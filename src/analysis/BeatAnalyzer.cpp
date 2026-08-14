@@ -25,7 +25,8 @@ namespace {
 constexpr int    kHop         = 512;
 constexpr double kBpmMin      = 60.0;
 constexpr double kBpmMax      = 180.0;
-constexpr double kPreferMin   = 90.0;   // octave preference window
+constexpr double kPreferMin   = 80.0;   // octave preference window
+constexpr double kPreferMax   = 160.0;  // (pop at 180 reads better as 90)
 constexpr double kMaxAnalysisSec = 180.0;
 
 double interpAt(const std::vector<double>& a, double x)
@@ -165,11 +166,12 @@ BeatAnalysis analyzeBeats(const float* mono, int64_t n, int sampleRate)
     for (double c : candidates) {
         const FineResult f = refineBpm(env, envRate, c);
         if (f.score > best.score) best = f;
-        if (f.bpm >= kPreferMin && f.score > bestPreferred.score) bestPreferred = f;
+        if (f.bpm >= kPreferMin && f.bpm <= kPreferMax && f.score > bestPreferred.score)
+            bestPreferred = f;
     }
     FineResult chosen = best;
-    if (bestPreferred.bpm > 0.0 && bestPreferred.score >= 0.8 * best.score)
-        chosen = bestPreferred;                              // prefer 90..180
+    if (bestPreferred.bpm > 0.0 && bestPreferred.score >= 0.65 * best.score)
+        chosen = bestPreferred;                              // prefer 80..160
     if (chosen.bpm <= 0.0 || chosen.score < 0.09) return result;  // no clear beat
 
     const double bpm = chosen.bpm;

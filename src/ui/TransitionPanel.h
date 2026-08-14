@@ -36,6 +36,7 @@ private slots:
     void onRec();
     void onStopSave();
     void onPerform();
+    void startReplay(gvt::PlayerMode mode);
     void onAbort();
     void onProgress(double beatsIn, double beatsTotal);
     void onFinished(bool completed);

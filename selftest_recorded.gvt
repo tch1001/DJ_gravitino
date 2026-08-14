@@ -1,0 +1,32 @@
+gravitino-transition 1
+
+[meta]
+name        = selftest recorded
+created     = 2026-08-15
+
+[from]
+title       = Demo Track 1
+artist      = Loopmasters
+bpm         = 127.99
+duration    = 172.43
+fingerprint = gvfp1:912f445668f4ccba
+
+[to]
+title       = Demo Track 2
+artist      = Loopmasters
+bpm         = 119.98
+duration    = 128.05
+fingerprint = gvfp1:5d3933e92670771e
+
+[sync]
+anchor_from = 0.0       ; beat in FROM track where the transition begins
+anchor_to   = 2.139     ; beat in TO track aligned to transition beat 0
+master_bpm  = 127.99    ; tempo the mix runs at during the transition
+
+[events]
+; beat | target | control | value | curve
+2.139    b        play
+4.266    x        xfader      0.30
+8.533    x        xfader      0.70   linear
+10.672   a        eq_low      0.00
+12.799   x        xfader      1.00   linear

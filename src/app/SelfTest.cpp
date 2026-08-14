@@ -147,6 +147,46 @@ int runSelfTest(const QStringList& args) {
         std::printf("FAIL: wav write\n"); return 1;
     }
     std::printf("OK: wrote selftest_out.wav (%zu frames) — listen to verify the blend\n", frames);
+
+    // ---- Recorder round-trip: capture live-style events, save, reload ------
+    engine.deck(0).seekSec(ta->firstBeatSec);
+    engine.deck(1).seekSec(tb->firstBeatSec);
+    bus.dispatch({0, ControlId::Play, 1.0}, Origin::System); // from-deck rolling
+    TransitionRecorder rec(&bus, &engine);
+    rec.start(0);
+    struct Step { double atSec; ControlEvent e; };
+    const Step steps[] = {
+        {1.0, {1, ControlId::Play, 1.0}},
+        {2.0, {kNoDeck, ControlId::Crossfader, 0.3}},
+        {4.0, {kNoDeck, ControlId::Crossfader, 0.7}},
+        {5.0, {0, ControlId::EqLow, 0.0}},
+        {6.0, {kNoDeck, ControlId::Crossfader, 1.0}},
+    };
+    size_t next = 0;
+    for (int64_t rendered = 0; rendered < (int64_t)(8.0 * kSampleRate); rendered += chunk) {
+        while (next < std::size(steps) &&
+               rendered >= (int64_t)(steps[next].atSec * kSampleRate)) {
+            bus.dispatch(steps[next].e, Origin::Ui);
+            ++next;
+        }
+        engine.renderOffline(buf.data(), chunk);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+    }
+    GvtFile recd = rec.finish();
+    std::printf("recorder: %zu events, anchor_from=%.2f master_bpm=%.2f\n",
+                recd.events.size(), recd.anchorFromBeat, recd.masterBpm);
+    if (recd.events.size() < 5) { std::printf("FAIL: recorder lost events\n"); return 1; }
+    if (recd.masterBpm < 60 || recd.masterBpm > 200) { std::printf("FAIL: recorder bpm\n"); return 1; }
+    recd.name = "selftest recorded";
+    if (!gvtSaveFile(recd, "selftest_recorded.gvt", &err)) {
+        std::printf("FAIL: save recorded: %s\n", qPrintable(err)); return 1;
+    }
+    GvtFile recd2;
+    if (!gvtLoadFile("selftest_recorded.gvt", recd2, &err, nullptr) ||
+        recd2.events.size() != recd.events.size()) {
+        std::printf("FAIL: recorded round-trip\n"); return 1;
+    }
+    std::printf("OK: recorder round-trip (selftest_recorded.gvt)\n");
     return 0;
 }
 

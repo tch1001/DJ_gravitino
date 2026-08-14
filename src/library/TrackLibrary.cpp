@@ -10,6 +10,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -151,16 +152,15 @@ void TrackLibrary::scanFolder(const QString& dirIn)
     auto st = state(this);
     const QString dirPath = dirIn.isEmpty() ? QDir::homePath() + QStringLiteral("/Music")
                                             : dirIn;
-    // Non-recursive + one level of subdirectories.
+    // Recursive scan, skipping hidden directories.
     QStringList files;
-    const QDir dir(dirPath);
-    const QStringList mp3 = {QStringLiteral("*.mp3")};
-    for (const QFileInfo& fi : dir.entryInfoList(mp3, QDir::Files | QDir::Readable, QDir::Name))
-        files << fi.absoluteFilePath();
-    for (const QFileInfo& sub : dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
-        for (const QFileInfo& fi : QDir(sub.absoluteFilePath())
-                                       .entryInfoList(mp3, QDir::Files | QDir::Readable, QDir::Name))
-            files << fi.absoluteFilePath();
+    QDirIterator it(dirPath, {QStringLiteral("*.mp3")}, QDir::Files | QDir::Readable,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString p = it.next();
+        if (!p.contains(QStringLiteral("/."))) files << p;
+    }
+    files.sort();
 
     st->generation++;
     const int gen = st->generation;

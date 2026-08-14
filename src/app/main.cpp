@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QMessageBox>
+#include <QTimer>
 
 #include "../audio/AudioEngine.h"
 #include "../control/ControlBus.h"
@@ -45,6 +46,33 @@ int main(int argc, char** argv)
 
     gvt::MainWindow win(bus, engine, library, store, recorder, player, midi);
     win.show();
+
+    // Dev flag: --autoload "<substr for deck A>" "<substr for deck B>" loads
+    // the first library tracks whose path matches each substring once analyzed
+    // (defaults: Demo Track 1 / Demo Track 2). Used for automated UI testing.
+    if (args.contains(QStringLiteral("--autoload"))) {
+        const int ai = args.indexOf(QStringLiteral("--autoload"));
+        const QString wantA = args.value(ai + 1).isEmpty() || args.value(ai + 1).startsWith("--")
+                                  ? QStringLiteral("Demo Track 1") : args.value(ai + 1);
+        const QString wantB = args.value(ai + 2).isEmpty() || args.value(ai + 2).startsWith("--")
+                                  ? QStringLiteral("Demo Track 2") : args.value(ai + 2);
+        auto* poll = new QTimer(&win);
+        QObject::connect(poll, &QTimer::timeout, [&win, library, engine, poll, wantA, wantB]() {
+            static bool loadedA = false, loadedB = false;
+            for (int r = 0; r < library->trackCount(); ++r) {
+                const QString p = library->pathAt(r);
+                gvt::TrackDataPtr t;
+                if (!loadedA && p.contains(wantA, Qt::CaseInsensitive) && (t = library->trackAt(r))) {
+                    engine->deck(0).loadTrack(t); win.notifyTrackLoaded(0); loadedA = true;
+                }
+                if (!loadedB && p.contains(wantB, Qt::CaseInsensitive) && (t = library->trackAt(r))) {
+                    engine->deck(1).loadTrack(t); win.notifyTrackLoaded(1); loadedB = true;
+                }
+            }
+            if (loadedA && loadedB) poll->stop();
+        });
+        poll->start(500);
+    }
 
     if (!audioOk) {
         QMessageBox::warning(

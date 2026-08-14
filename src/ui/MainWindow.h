@@ -22,6 +22,9 @@ public:
                TransitionStore* store, TransitionRecorder* recorder,
                TransitionPlayer* player, MidiEngine* midi,
                QWidget* parent = nullptr);
+    // Dev hook (--autoload): a track was loaded onto `deck` outside the
+    // library widget; refresh deck display + transition matches.
+    void notifyTrackLoaded(int deck);
 
 private slots:
     void openMusicFolder();

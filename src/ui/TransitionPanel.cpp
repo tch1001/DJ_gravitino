@@ -1,4 +1,5 @@
 #include "TransitionPanel.h"
+#include "../transitions/TransitionPlayerExt.h"
 #include "Theme.h"
 
 #include <QHBoxLayout>
@@ -64,11 +65,9 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     performBtn_->setStyleSheet(
         QStringLiteral("color:%1; font-weight:bold;").arg(deckAccent(0).name()));
     tutorialBtn_ = new QPushButton(tr("🎓 TUTORIAL"));
-    // gvt::transitionPlayerSetMode does not exist in the pinned headers, and
-    // TransitionPlayer::arm has no mode parameter — tutorial replay cannot be
-    // requested yet.
-    tutorialBtn_->setEnabled(false);
-    tutorialBtn_->setToolTip(tr("coming soon"));
+    tutorialBtn_->setToolTip(
+        tr("Practice this transition: prompts appear 4 beats ahead,\n"
+           "your moves are scored against the recording."));
     abortBtn_ = new QPushButton(tr("⏹ ABORT"));
     for (auto* b : {recBtn_, stopSaveBtn_, performBtn_, tutorialBtn_, abortBtn_})
         buttons->addWidget(b);
@@ -98,6 +97,8 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
             &TransitionPanel::onStopSave);
     connect(performBtn_, &QPushButton::clicked, this,
             &TransitionPanel::onPerform);
+    connect(tutorialBtn_, &QPushButton::clicked, this,
+            [this] { startReplay(PlayerMode::Tutorial); });
     connect(abortBtn_, &QPushButton::clicked, this, &TransitionPanel::onAbort);
 
     connect(store_, &TransitionStore::changed, this,
@@ -230,7 +231,9 @@ void TransitionPanel::onStopSave()
     // Store emits changed() -> refreshMatches().
 }
 
-void TransitionPanel::onPerform()
+void TransitionPanel::onPerform() { startReplay(PlayerMode::Perform); }
+
+void TransitionPanel::startReplay(PlayerMode mode)
 {
     int idx = selectedMatch();
     if (idx < 0) {
@@ -238,12 +241,16 @@ void TransitionPanel::onPerform()
         return;
     }
     const Match& m = matches_[(size_t)idx];
+    transitionPlayerSetMode(player_, mode);
     QString error;
     if (!player_->arm(*m.file, m.fromDeck, /*startNow=*/true, &error)) {
-        emit statusMessage(tr("Can't perform: %1").arg(error), 6000);
+        emit statusMessage(tr("Can't start: %1").arg(error), 6000);
         return;
     }
-    emit statusMessage(tr("Performing \"%1\"…").arg(m.file->name), 4000);
+    emit statusMessage(mode == PlayerMode::Tutorial
+                           ? tr("Tutorial: \"%1\" — follow the prompts!").arg(m.file->name)
+                           : tr("Performing \"%1\"…").arg(m.file->name),
+                       4000);
 }
 
 void TransitionPanel::onAbort()

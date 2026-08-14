@@ -48,8 +48,10 @@ QHeaderView::section {
     background: #2a2e37; color: #8a909c; border: none;
     border-right: 1px solid #383d48; padding: 4px 6px;
 }
-QSlider::groove:vertical { background: #16181d; width: 6px; border-radius: 3px; }
-QSlider::groove:horizontal { background: #16181d; height: 6px; border-radius: 3px; }
+QSlider:vertical { min-height: 110px; min-width: 26px; }
+QSlider:horizontal { min-width: 140px; min-height: 26px; }
+QSlider::groove:vertical { background: #383d48; width: 6px; border-radius: 3px; }
+QSlider::groove:horizontal { background: #383d48; height: 6px; border-radius: 3px; }
 QSlider::handle:vertical {
     background: #b8bec9; height: 14px; margin: 0 -6px; border-radius: 3px;
 }
@@ -130,10 +132,7 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
 
     // Cross-widget wiring.
     connect(libraryWidget_, &LibraryWidget::trackLoaded, this,
-            [this](int deck) {
-                (deck == 0 ? deckA_ : deckB_)->trackChanged();
-                transitionPanel_->refreshMatches();
-            });
+            [this](int deck) { notifyTrackLoaded(deck); });
     connect(libraryWidget_, &LibraryWidget::statusMessage, this,
             [this](const QString& msg, int timeoutMs) {
                 statusBar()->showMessage(msg, timeoutMs);
@@ -181,6 +180,12 @@ void MainWindow::onMidiConnection(bool connected, const QString& name)
         midiLabel_->setStyleSheet(
             QStringLiteral("color:%1;").arg(themeDimText().name()));
     }
+}
+
+void MainWindow::notifyTrackLoaded(int deck)
+{
+    (deck == 0 ? deckA_ : deckB_)->trackChanged();
+    transitionPanel_->refreshMatches();
 }
 
 } // namespace gvt

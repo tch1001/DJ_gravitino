@@ -176,6 +176,17 @@ GvtFile TransitionRecorder::finish() {
     for (size_t i = 0; i < im.events.size(); ++i)
         if (keep[i]) f.events.push_back(im.events[i]);
 
+    // Quantize for clean, human-editable files: 0.01 for BPM/durations,
+    // 0.001 beats (~0.5 ms at 128 BPM) for anchors and event times/values.
+    auto q = [](double v, double step) { return std::round(v / step) * step; };
+    f.from.bpm = q(f.from.bpm, 0.01); f.to.bpm = q(f.to.bpm, 0.01);
+    f.from.durationSec = q(f.from.durationSec, 0.01);
+    f.to.durationSec = q(f.to.durationSec, 0.01);
+    f.anchorFromBeat = q(f.anchorFromBeat, 0.001);
+    f.anchorToBeat = q(f.anchorToBeat, 0.001);
+    f.masterBpm = q(f.masterBpm, 0.01);
+    for (GvtEvent& e : f.events) { e.beat = q(e.beat, 0.001); e.value = q(e.value, 0.001); }
+
     im.events.clear();
     return f;
 }
