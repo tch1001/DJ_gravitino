@@ -22,14 +22,14 @@ namespace gvt {
 QString appStyleSheet()
 {
     return QStringLiteral(R"(
-* { font-size: 12px; }
+* { font-size: 11px; }
 QMainWindow, QDialog { background: #16181d; }
 QWidget { color: #d8dce4; background: #16181d; }
 QWidget[panel="true"] { background: #2a2e37; border-radius: 6px; }
 QLabel { background: transparent; }
 QPushButton {
     background: #383d48; border: 1px solid #4a505c; border-radius: 4px;
-    padding: 4px 10px; color: #d8dce4;
+    padding: 2px 8px; color: #d8dce4;
 }
 QPushButton:hover { background: #434956; }
 QPushButton:pressed { background: #2a2e37; }
@@ -46,10 +46,10 @@ QTableView, QListWidget {
 }
 QHeaderView::section {
     background: #2a2e37; color: #8a909c; border: none;
-    border-right: 1px solid #383d48; padding: 4px 6px;
+    border-right: 1px solid #383d48; padding: 2px 5px;
 }
-QSlider:vertical { min-height: 110px; min-width: 26px; }
-QSlider:horizontal { min-width: 140px; min-height: 26px; }
+QSlider:vertical { min-height: 84px; min-width: 22px; }
+QSlider:horizontal { min-width: 120px; min-height: 22px; }
 QSlider::groove:vertical { background: #383d48; width: 6px; border-radius: 3px; }
 QSlider::groove:horizontal { background: #383d48; height: 6px; border-radius: 3px; }
 QSlider::handle:vertical {
@@ -82,19 +82,19 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
       store_(store), midi_(midi)
 {
     setWindowTitle(tr("Gravitino DJ"));
-    setMinimumSize(1280, 800);
+    setMinimumSize(1200, 720);
 
     auto* central = new QWidget(this);
     auto* root = new QVBoxLayout(central);
-    root->setContentsMargins(10, 10, 10, 10);
-    root->setSpacing(8);
+    root->setContentsMargins(6, 6, 6, 6);
+    root->setSpacing(4);
 
     // Row 1: Deck A | Mixer | Deck B.
     deckA_ = new DeckWidget(0, bus_, engine_);
     deckB_ = new DeckWidget(1, bus_, engine_);
     mixer_ = new MixerWidget(bus_);
     auto* deckRow = new QHBoxLayout;
-    deckRow->setSpacing(8);
+    deckRow->setSpacing(6);
     deckRow->addWidget(deckA_, 4);
     deckRow->addWidget(mixer_, 2);
     deckRow->addWidget(deckB_, 4);
@@ -107,7 +107,7 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
 
     // Row 3: library (takes the remaining space).
     libraryWidget_ = new LibraryWidget(library_, engine_);
-    root->addWidget(libraryWidget_, 1);
+    root->addWidget(libraryWidget_, 2);
 
     setCentralWidget(central);
 

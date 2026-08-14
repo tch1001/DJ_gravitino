@@ -135,5 +135,8 @@ play, cue, and hot-cue state is restored when the output port reconnects.
 
 ## TODO backlog (post-MVP)
 
+- Fill the deck dead space (below hot cues) with loop / FX / beat-jump
+  sections as we chase Serato feature parity — the layout was deliberately
+  densified (11px base font, compact pads/knobs) to leave room for this.
 - Keylock (signalsmith-stretch), variable beatgrids, WAV/FLAC/AAC, transition
   marketplace/sharing UI, Windows/Linux builds, .app bundling + macdeployqt.

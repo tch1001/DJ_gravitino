@@ -40,8 +40,8 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     setProperty("panel", true);
 
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(8, 8, 8, 8);
-    root->setSpacing(6);
+    root->setContentsMargins(6, 4, 6, 4);
+    root->setSpacing(4);
 
     auto* topRow = new QHBoxLayout;
     auto* header = new QLabel(tr("LIBRARY"));

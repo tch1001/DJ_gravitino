@@ -36,6 +36,30 @@ cmake --build build
 ./build/gravitino --selftest # headless: renders a scripted transition to WAV
 ```
 
+## Using it
+
+1. Launch `./build/gravitino` — it scans `~/Music` (File ▸ Open Music Folder to
+   change) and analyzes BPM/beatgrids in the background.
+2. Load a track on each deck (Load ▶ A / Load ▶ B or double-click), press PLAY.
+3. **Record a transition**: with the outgoing deck playing, hit ● REC, do your
+   blend (faders, EQ, crossfader, sync, hot cues — mouse or FLX4), then
+   ■ STOP & SAVE and name it. It lands in `~/Music/Gravitino/Transitions/` as
+   a readable `.gvt` text file you can edit or share.
+4. **Replay it**: next time that pair is loaded (matched by audio fingerprint,
+   falling back to title/duration), it appears in the Transitions list —
+   ▶ PERFORM executes it beat-perfectly at whatever tempo you're running.
+5. **Learn it**: 🎓 TUTORIAL plays the song and prompts each move 4 beats ahead
+   ("in 4 beats: mixer xfader → 100%"), scoring your timing as you follow along.
+
+A sample transition for the Pioneer demo tracks ships in
+`~/Music/Gravitino/Transitions/demo-blend.gvt` after the selftest.
+
+Plug in a DDJ-FLX4 at any time — the status bar shows the connection and all
+controls + LEDs map automatically (see docs/STATUS.md for the exact mapping).
+
+Dev flags: `--selftest` (headless render check), `--autoload [A B]` (auto-load
+matching library tracks onto the decks).
+
 ## Repository layout
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Agent/contributor handoff

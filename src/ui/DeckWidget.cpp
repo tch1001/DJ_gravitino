@@ -45,7 +45,8 @@ static QString formatTime(double sec)
 WaveformView::WaveformView(int deckIndex, Deck* deck, QWidget* parent)
     : QWidget(parent), deckIndex_(deckIndex), deck_(deck)
 {
-    setMinimumHeight(72);
+    setMinimumHeight(64);
+    setMaximumHeight(100);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     setCursor(Qt::PointingHandCursor);
 }
@@ -139,8 +140,8 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     setProperty("panel", true);
 
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(8, 8, 8, 8);
-    root->setSpacing(6);
+    root->setContentsMargins(6, 4, 6, 4);
+    root->setSpacing(3);
 
     auto* header = new QLabel(deckIndex_ == 0 ? tr("DECK A") : tr("DECK B"));
     header->setStyleSheet(QStringLiteral("color:%1; font-weight:bold; "
@@ -152,7 +153,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     root->addWidget(waveform_);
 
     titleLabel_ = new QLabel(tr("—"));
-    titleLabel_->setStyleSheet("font-size:13px; font-weight:bold;");
+    titleLabel_->setStyleSheet("font-size:12px; font-weight:bold;");
     artistLabel_ = new QLabel(QString());
     artistLabel_->setStyleSheet(
         QStringLiteral("color:%1;").arg(themeDimText().name()));
@@ -170,7 +171,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
 
     // Transport row + vertical tempo slider on the side.
     auto* middle = new QHBoxLayout;
-    middle->setSpacing(6);
+    middle->setSpacing(4);
 
     auto* transportCol = new QVBoxLayout;
     auto* transport = new QHBoxLayout;
@@ -179,7 +180,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     cueBtn_ = new QPushButton(tr("CUE"));
     syncBtn_ = new QPushButton(tr("SYNC"));
     for (QPushButton* b : {playBtn_, cueBtn_, syncBtn_})
-        b->setMinimumHeight(34);
+        b->setMinimumHeight(26);
     playBtn_->setStyleSheet(
         QStringLiteral("QPushButton:checked { background:%1; color:black; "
                        "font-weight:bold; }")
@@ -191,10 +192,10 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
 
     // 8 hotcue buttons, 2 rows of 4.
     auto* cues = new QGridLayout;
-    cues->setSpacing(4);
+    cues->setSpacing(3);
     for (int i = 0; i < 8; ++i) {
         auto* b = new QPushButton(QString::number(i + 1));
-        b->setFixedHeight(26);
+        b->setFixedHeight(21);
         b->setToolTip(tr("Hot cue %1 — click: set/jump, right- or "
                          "shift-click: clear")
                           .arg(i + 1));

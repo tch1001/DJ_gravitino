@@ -38,8 +38,8 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
     setProperty("panel", true);
 
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(8, 8, 8, 8);
-    root->setSpacing(6);
+    root->setContentsMargins(6, 4, 6, 4);
+    root->setSpacing(3);
 
     auto* header = new QLabel(tr("MIXER"));
     header->setAlignment(Qt::AlignHCenter);
@@ -49,7 +49,7 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
     root->addWidget(header);
 
     auto* stripsRow = new QHBoxLayout;
-    stripsRow->setSpacing(10);
+    stripsRow->setSpacing(8);
     stripsRow->addWidget(buildStrip(0));
     stripsRow->addWidget(buildStrip(1));
     root->addLayout(stripsRow, 1);
@@ -87,7 +87,7 @@ void MixerWidget::wireDial(QDial* d, int deck, ControlId id, double initial)
     d->setRange(0, kSteps);
     d->setValue(toSteps(initial));
     d->setNotchesVisible(true);
-    d->setFixedSize(44, 44);
+    d->setFixedSize(36, 36);
     connect(d, &QDial::valueChanged, this, [this, d, deck, id](int v) {
         if (!d->signalsBlocked())
             bus_->dispatch(ControlEvent{deck, id, fromSteps(v)}, Origin::Ui);
@@ -132,7 +132,7 @@ QWidget* MixerWidget::buildStrip(int deck)
     s.fader = new QSlider(Qt::Vertical, w);
     s.fader->setRange(0, kSteps);
     s.fader->setValue(kSteps);
-    s.fader->setMinimumHeight(90);
+    s.fader->setMinimumHeight(72);
     connect(s.fader, &QSlider::valueChanged, this, [this, deck](int v) {
         QSlider* f = strips_[deck].fader;
         if (!f->signalsBlocked())

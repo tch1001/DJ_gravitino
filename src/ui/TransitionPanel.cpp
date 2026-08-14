@@ -39,8 +39,8 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     setProperty("panel", true);
 
     auto* root = new QHBoxLayout(this);
-    root->setContentsMargins(8, 8, 8, 8);
-    root->setSpacing(10);
+    root->setContentsMargins(6, 4, 6, 4);
+    root->setSpacing(8);
 
     // Left: matching transitions list.
     auto* leftCol = new QVBoxLayout;
@@ -50,8 +50,8 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
                               .arg(themeText().name()));
     leftCol->addWidget(header);
     list_ = new QListWidget;
-    list_->setMinimumHeight(70);
-    list_->setMaximumHeight(120);
+    list_->setMinimumHeight(52);
+    list_->setMaximumHeight(96);
     leftCol->addWidget(list_, 1);
     root->addLayout(leftCol, 1);
 
