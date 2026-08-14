@@ -1,4 +1,4 @@
-build/
+build*/
 *.wav
 .DS_Store
 compile_commands.json

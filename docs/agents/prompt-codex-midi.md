@@ -1,0 +1,12 @@
+You are codex-midi, implementing MIDI support for Gravitino DJ (Pioneer DDJ-FLX4). Read CLAUDE.md, docs/ARCHITECTURE.md, docs/STATUS.md first. You own ONLY: src/midi/MidiEngine.cpp, src/midi/Flx4Mapping.cpp, and may create src/midi/Flx4Mapping.h and internal headers under src/midi/. Do NOT edit other files except your row in docs/STATUS.md. Do NOT git commit.
+
+Implement against PINNED headers src/midi/MidiEngine.h, src/control/ControlBus.h, src/audio/AudioEngine.h (do not change them):
+
+- MidiEngine.cpp: pimpl with RtMidiIn/RtMidiOut (#include <rtmidi/RtMidi.h>). QTimer 2s poll of port names; connect to the first port whose name contains "DDJ-FLX4" (also accept "FLX4"); emit connectionChanged. The RtMidi callback runs on a CoreMIDI thread: parse there, then post ControlEvents to the GUI thread via QMetaObject::invokeMethod queued lambda that calls bus->dispatch(e, Origin::Midi). Never crash or busy-loop when no controller is present. Handle disconnect (port vanishing) gracefully.
+- Flx4Mapping.h/.cpp: DDJ-FLX4 MIDI map (base it on the public Pioneer DDJ-FLX4 MIDI spec / the Mixxx FLX4 mapping you know). Decks: ch0=deck1, ch1=deck2; mixer controls often on ch6. Map at minimum: play/pause note, cue note, channel faders (14-bit CC MSB/LSB pairs -> Fader 0..1), trim knobs -> Trim, EQ hi/mid/low knobs -> EqHigh/EqMid/EqLow, crossfader -> Crossfader (0 = left = deck A), tempo sliders (14-bit) -> ControlId::Tempo as RATIO 1.0 +/- 8% (Pioneer polarity: slider toward user/down = faster — invert appropriately), performance pads 1-8 in hot-cue mode -> HotCue1..8 press, BEAT SYNC button -> TempoSync, jog wheel rotation CC (relative, 0x40-centered) -> Jog with signed ticks (~1.0 per detent; treat rotation without platter-touch as nudge; ignore scratch mode for MVP).
+- LED feedback: subscribe to bus->eventDispatched; for events with origin != Origin::Midi (avoid echo loops), mirror state to the controller (play LED, cue LED, hotcue pad LEDs) by sending the corresponding note on/off with velocity 127/0. Track play state from the events you observe; keep a small state cache in the pimpl.
+
+Compile-check ONLY your objects in your OWN build dir:
+  cmake -B build-midi -G Ninja
+  ninja -C build-midi CMakeFiles/gvtcore.dir/src/midi/MidiEngine.cpp.o CMakeFiles/gvtcore.dir/src/midi/Flx4Mapping.cpp.o
+(other modules' objects may fail — ignore them). Iterate until warning-clean. Then update docs/STATUS.md: your row to DONE plus a table of the exact MIDI messages you mapped so a human can verify against hardware.

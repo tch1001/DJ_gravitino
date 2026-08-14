@@ -12,6 +12,7 @@ class TransitionRecorder : public QObject {
     Q_OBJECT
 public:
     TransitionRecorder(ControlBus* bus, AudioEngine* engine, QObject* parent = nullptr);
+    ~TransitionRecorder() override;
     // fromDeck = physical deck of the outgoing track at record start.
     void start(int fromDeck);
     bool isRecording() const;
@@ -35,6 +36,7 @@ class TransitionPlayer : public QObject {
     Q_OBJECT
 public:
     TransitionPlayer(ControlBus* bus, AudioEngine* engine, QObject* parent = nullptr);
+    ~TransitionPlayer() override;
     // fromDeck: physical deck playing the [from] track; the [to] track must
     // already be loaded on the other deck. startNow=true skips waiting for
     // the anchor beat and begins at the current beat.

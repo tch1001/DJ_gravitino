@@ -32,6 +32,7 @@ class TransitionStore : public QObject {
     Q_OBJECT
 public:
     explicit TransitionStore(QObject* parent = nullptr);
+    ~TransitionStore() override;
     void reload();
     QString directory() const;
     const std::vector<GvtFile>& all() const;
