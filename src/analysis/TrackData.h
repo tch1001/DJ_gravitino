@@ -1,0 +1,48 @@
+// PINNED INTERFACE — see docs/ARCHITECTURE.md before changing.
+#pragma once
+#include <QString>
+#include <memory>
+#include <vector>
+
+namespace gvt {
+
+constexpr int kSampleRate = 48000; // engine + all decoded tracks run at 48 kHz
+
+// A fully decoded, analyzed track resident in memory.
+struct TrackData {
+    QString filePath;
+    QString title, artist, album;
+    double  durationSec = 0.0;
+
+    // Interleaved stereo f32 at kSampleRate.
+    std::vector<float> pcm;
+    int64_t frameCount() const { return (int64_t)pcm.size() / 2; }
+
+    // Fixed-tempo beatgrid.
+    double bpm = 0.0;
+    double firstBeatSec = 0.0;
+    double beatAtSec(double sec) const { return (sec - firstBeatSec) * bpm / 60.0; }
+    double secAtBeat(double beat) const { return firstBeatSec + beat * 60.0 / bpm; }
+
+    // "gvfp1:<16 hex>" — see docs/TRANSITION_FORMAT.md.
+    QString fingerprint;
+
+    // Mono peak per ~512-frame bin, 0..1, for waveform drawing.
+    std::vector<float> overviewPeaks;
+
+    // Hot cue positions in seconds; <0 = unset. Index 0..7.
+    double hotCues[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
+};
+using TrackDataPtr = std::shared_ptr<TrackData>;
+
+// Blocking: decode + tags + fingerprint + BPM analysis. Returns nullptr and
+// sets *error on failure. Thread-safe; call from a worker thread.
+TrackDataPtr loadAndAnalyzeTrack(const QString& mp3Path, QString* error);
+
+// Exposed for unit tests: analyze mono 48k samples -> bpm & first beat.
+struct BeatAnalysis { double bpm = 0.0; double firstBeatSec = 0.0; bool ok = false; };
+BeatAnalysis analyzeBeats(const float* mono, int64_t n, int sampleRate);
+
+QString computeFingerprint(const float* stereoPcm, int64_t frames); // "gvfp1:..."
+
+} // namespace gvt
