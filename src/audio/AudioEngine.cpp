@@ -209,8 +209,11 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
             break;
         }
 
-        target.tempoRatio.store(otherBpm / targetTrack->bpm,
-                                std::memory_order_relaxed);
+        // Clamp to the range render() honors, or effectiveBpm() would report
+        // a tempo the audio thread silently refuses to run at.
+        target.tempoRatio.store(
+            std::clamp(otherBpm / targetTrack->bpm, 0.01, 4.0),
+            std::memory_order_relaxed);
 
         const double targetBeat = target.beatPosition();
         const double otherBeat = other.beatPosition();

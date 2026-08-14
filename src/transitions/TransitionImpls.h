@@ -64,6 +64,13 @@ struct TransitionPlayer::Impl {
     std::vector<uint8_t> done;      // fired (Perform) / resolved (Tutorial)
     std::vector<uint8_t> prompted;  // Tutorial: prompt emitted
 
+    // Wall-clock extrapolation if the from-deck stops mid-transition (most
+    // transitions end with a FromDeck stop; without this the beat clock
+    // freezes and finished() never fires).
+    bool          haveLastBeat = false;
+    double        lastBeat = 0.0;
+    QElapsedTimer sinceLastBeat;
+
     DeckId physicalDeck(Role r) const {
         switch (r) {
             case Role::FromDeck: return fromDeck;
@@ -73,14 +80,31 @@ struct TransitionPlayer::Impl {
         return kNoDeck;
     }
 
-    double currentRel() const {
-        return engine->deck(fromDeck).beatPosition() - anchorFrom;
+    // The .gvt crossfader is stored in ROLE space: 0 = from-deck, 1 = to-deck.
+    // Physically 0 = deck A, so mirror when the from role sits on deck B.
+    double xfaderRoleToPhysical(double v) const { return fromDeck == 0 ? v : 1.0 - v; }
+
+    double currentRel() {
+        Deck& d = engine->deck(fromDeck);
+        if (d.playing.load()) {
+            const double b = d.beatPosition() - anchorFrom;
+            lastBeat = b;
+            haveLastBeat = true;
+            sinceLastBeat.restart();
+            return b;
+        }
+        const double bpm = file.masterBpm > 0.0 ? file.masterBpm : d.effectiveBpm();
+        if (haveLastBeat && bpm > 0.0)
+            return lastBeat + sinceLastBeat.nsecsElapsed() * 1e-9 * bpm / 60.0;
+        return d.beatPosition() - anchorFrom;
     }
 
     // Engine's current value for a (role, control) — glide start fallback.
     double engineValue(Role role, ControlId id) const {
         if (role == Role::Mixer)
-            return (id == ControlId::Crossfader) ? engine->crossfader.load() : 0.0;
+            return (id == ControlId::Crossfader)
+                       ? xfaderRoleToPhysical(engine->crossfader.load()) // to role space (self-inverse)
+                       : 0.0;
         const Deck& d = engine->deck(physicalDeck(role));
         switch (id) {
             case ControlId::Tempo:  return d.tempoRatio.load();
@@ -97,7 +121,7 @@ struct TransitionPlayer::Impl {
         ControlEvent e;
         e.deck = physicalDeck(role);
         e.id = id;
-        e.value = value;
+        e.value = (id == ControlId::Crossfader) ? xfaderRoleToPhysical(value) : value;
         bus->dispatch(e, Origin::Replay);
     }
 

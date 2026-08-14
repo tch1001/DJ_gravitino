@@ -47,21 +47,30 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
         // Only human origins are recorded — never Replay or System.
         if (origin != Origin::Ui && origin != Origin::Midi) return;
 
+        // Jog nudges are transient rate bends; recording them as absolute
+        // values would replay as a sustained pitch bend. Skip them.
+        if (e.id == ControlId::Jog) return;
+
         GvtEvent g;
         g.beat = std::max(0.0, beat);
         g.role = roleForDeck(e.deck, im.fromDeck);
         g.control = e.id;
-        g.value = e.value;
+        // Crossfader is stored in ROLE space (0 = from-deck, 1 = to-deck) so
+        // a transition replays correctly when the pair is loaded swapped.
+        g.value = (e.id == ControlId::Crossfader && im.fromDeck != 0)
+                      ? 1.0 - e.value : e.value;
         g.curve = Curve::Step;
 
-        // Coalesce dense runs of the same continuous (role, control): if the
-        // previous event for this key is closer than kCoalesceBeats, keep only
-        // the newest value.
+        // Coalesce dense runs of the same continuous (role, control) into
+        // fixed 0.05-beat buckets: update the bucket's value but NEVER move
+        // its beat forward — a rolling window would swallow a whole slow
+        // gesture into one snap. Negative deltas (clock jumps) start a new
+        // event instead of corrupting an old bucket.
         if (!controlIsTrigger(g.control)) {
             for (auto it = im.events.rbegin(); it != im.events.rend(); ++it) {
                 if (it->role != g.role || it->control != g.control) continue;
-                if (g.beat - it->beat < kCoalesceBeats) {
-                    it->beat = g.beat;
+                const double delta = g.beat - it->beat;
+                if (delta >= 0.0 && delta < kCoalesceBeats) {
                     it->value = g.value;
                     emit eventCaptured((int)im.events.size());
                     return;
@@ -84,6 +93,12 @@ void TransitionRecorder::start(int fromDeck) {
     im.masterBpm = im.engine->deck(fromDeck).effectiveBpm();
     im.toAnchorSet = false;
     im.toAnchorBeat = 0.0;
+    // If the incoming deck is already rolling, its anchor is NOW — waiting for
+    // the first bus event would record it beats late.
+    if (im.engine->deck(im.toDeck).playing.load()) {
+        im.toAnchorBeat = im.engine->deck(im.toDeck).beatPosition();
+        im.toAnchorSet = true;
+    }
     im.haveLastBeat = false;
     im.lastBeat = 0.0;
     im.events.clear();

@@ -133,6 +133,36 @@ play, cue, and hot-cue state is restored when the output port reconnects.
 3. Mapping table (message-level) is in the MIDI section below; fix constants
    in src/midi/Flx4Mapping.cpp if any control is off.
 
+## Adversarial review (2026-08-15, Claude + Codex independently)
+
+Both reviewers converged on the same top defects; all fixed and re-verified
+(ctest 4/4, --selftest green, realtime repro of the hang now passes):
+
+- FIXED: TransitionPlayer froze forever when the from-deck stopped
+  mid-transition (beat clock had no wall-clock fallback; confirmed by repro).
+- FIXED: crossfader recorded in physical space broke B→A replays — .gvt
+  xfader values are now ROLE space (0 = outgoing, 1 = incoming), mirrored on
+  record/replay/glide-start when fromDeck == 1.
+- FIXED: Deck track-swap handshake was Dekker's pattern with acq/rel only —
+  added seq_cst fences (loadTrack/render/~Deck) to close a PCM use-after-free.
+- FIXED: recorder's rolling coalescing window could swallow a slow continuous
+  gesture into one snap — now fixed 0.05-beat buckets, negative deltas kept.
+- FIXED: jog ticks were recorded as absolute glides (replayed as a stuck
+  pitch bend) — jog is no longer recorded.
+- FIXED: play-after-end-of-track did nothing (position never rewound).
+- FIXED: TempoSync could store a ratio outside the range render() honors.
+- FIXED: FLX4 play LED / play-toggle desync after deck self-stop at EOF —
+  MidiEngine now reconciles cached transport state against the engine at
+  250 ms and toggles against engine truth; RtMidi objects are destroyed
+  first in ~Impl so late CoreMIDI callbacks can't touch freed members.
+- FIXED: recorder captured the TO-deck anchor late if that deck was already
+  playing at record start; TransitionPlayer mode side-table now erased on
+  destruction (heap-reuse could inherit Tutorial mode).
+- Deferred (documented): fast unplug/replug with identical port name isn't
+  re-opened until the next state change (endpoint identity, not name, is the
+  right key); full drain-counter handshake for MIDI teardown; EQ "kill" is
+  -26 dB not -inf (ARCHITECTURE.md wording).
+
 ## TODO backlog (post-MVP)
 
 - Fill the deck dead space (below hot cues) with loop / FX / beat-jump

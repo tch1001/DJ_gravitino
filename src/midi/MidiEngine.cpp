@@ -1,6 +1,7 @@
 #include <memory>
 
 #include "MidiEngine.h"
+#include "../audio/AudioEngine.h"
 #include "Flx4Mapping.h"
 
 #include <QMetaObject>
@@ -117,6 +118,12 @@ struct MidiEngine::Impl {
         }
         closeInput();
         closeOutput();
+        // Destroy the RtMidi objects NOW, while every other member is still
+        // alive: their destructors tear down the CoreMIDI client, which is the
+        // only thing that guarantees no callback is left running when the
+        // remaining members (mapping, names, ...) are destroyed.
+        try { midiIn.reset(); } catch (...) {}
+        try { midiOut.reset(); } catch (...) {}
     }
 
     void start()
@@ -304,12 +311,14 @@ struct MidiEngine::Impl {
     {
         if (event.deck >= 0 && event.deck < 2
             && event.id == ControlId::Play && event.value > 0.0) {
-            auto& state = playing[static_cast<std::size_t>(event.deck)];
-            bool wasPlaying = state.load(std::memory_order_relaxed);
-            while (!state.compare_exchange_weak(
-                wasPlaying, !wasPlaying,
-                std::memory_order_relaxed, std::memory_order_relaxed)) {
-            }
+            // Toggle against the ENGINE's play state, not our cache — the
+            // deck stops itself at end-of-track without a bus event, and a
+            // stale cache would turn the next Play press into Stop.
+            const bool wasPlaying =
+                engine != nullptr &&
+                engine->deck(event.deck).playing.load(std::memory_order_relaxed);
+            playing[static_cast<std::size_t>(event.deck)].store(
+                !wasPlaying, std::memory_order_relaxed);
             event.id = wasPlaying ? ControlId::Stop : ControlId::Play;
         }
 
@@ -391,6 +400,27 @@ struct MidiEngine::Impl {
         }
     }
 
+    // Cached transport state can drift from the engine (deck stops itself at
+    // end-of-track with no bus event; Play refused with no track loaded).
+    // Poll the engine truth and push LED deltas.
+    void reconcileTransportLeds() noexcept
+    {
+        if (engine == nullptr) {
+            return;
+        }
+        for (DeckId deck = 0; deck < 2; ++deck) {
+            const auto index = static_cast<std::size_t>(deck);
+            const bool actual =
+                engine->deck(deck).playing.load(std::memory_order_relaxed);
+            if (playing[index].load(std::memory_order_relaxed) != actual) {
+                playing[index].store(actual, std::memory_order_relaxed);
+                if (connected) {
+                    sendLed(deck, ControlId::Play, actual);
+                }
+            }
+        }
+    }
+
     void syncLedState() noexcept
     {
         for (DeckId deck = 0; deck < 2; ++deck) {
@@ -410,6 +440,7 @@ struct MidiEngine::Impl {
 
     MidiEngine* owner = nullptr;
     ControlBus* bus = nullptr;
+    AudioEngine* engine = nullptr;
     QTimer pollTimer;
     std::unique_ptr<RtMidiIn> midiIn;
     std::unique_ptr<RtMidiOut> midiOut;
@@ -426,7 +457,12 @@ MidiEngine::MidiEngine(
     ControlBus* bus, AudioEngine* engine, QObject* parent)
     : QObject(parent), impl_(std::make_unique<Impl>(this, bus))
 {
-    static_cast<void>(engine);
+    impl_->engine = engine;
+    auto* ledTimer = new QTimer(this);
+    ledTimer->setInterval(250);
+    connect(ledTimer, &QTimer::timeout, this,
+            [this] { impl_->reconcileTransportLeds(); });
+    ledTimer->start();
 }
 
 MidiEngine::~MidiEngine() = default;

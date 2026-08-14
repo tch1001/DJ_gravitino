@@ -60,6 +60,7 @@ Deck::Deck() : impl_(std::make_unique<Impl>()) {}
 Deck::~Deck()
 {
     playing.store(false, std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_seq_cst); // see loadTrack()
     impl_->waitForRender();
 }
 
@@ -68,6 +69,10 @@ void Deck::loadTrack(TrackDataPtr track)
     // Once playing is false, a new render cannot enter the protected section.
     // Waiting drains a callback that observed the previous playing state.
     playing.store(false, std::memory_order_release);
+    // StoreLoad barrier: without it this thread can read activeRenders==0 from
+    // its store buffer while the audio thread still sees playing==true
+    // (Dekker's pattern) — and we'd free PCM mid-render.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     impl_->waitForRender();
 
     impl_->audioTrack.store(nullptr, std::memory_order_release);
@@ -98,8 +103,15 @@ TrackDataPtr Deck::track() const
 
 void Deck::play()
 {
-    if (impl_->audioTrack.load(std::memory_order_acquire) != nullptr)
-        playing.store(true, std::memory_order_release);
+    if (impl_->audioTrack.load(std::memory_order_acquire) == nullptr)
+        return;
+    // At end-of-track the render callback would immediately clear `playing`
+    // again — rewind so play-after-EOF restarts instead of doing nothing.
+    const auto frames = impl_->trackFrameCount.load(std::memory_order_acquire);
+    if (impl_->positionFrames.load(std::memory_order_acquire) >=
+        (double)frames - 1.0)
+        impl_->positionFrames.store(0.0, std::memory_order_release);
+    playing.store(true, std::memory_order_release);
 }
 
 void Deck::stop()
@@ -168,6 +180,9 @@ void Deck::render(float* out, int frames)
         return;
 
     impl_->activeRenders.fetch_add(1, std::memory_order_acq_rel);
+    // StoreLoad barrier pairing with loadTrack(): the re-check below must not
+    // read a stale playing==true after publishing activeRenders.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!playing.load(std::memory_order_acquire)) {
         impl_->activeRenders.fetch_sub(1, std::memory_order_release);
         return;

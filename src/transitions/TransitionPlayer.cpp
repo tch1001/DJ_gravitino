@@ -104,7 +104,9 @@ TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
     });
 }
 
-TransitionPlayer::~TransitionPlayer() = default;
+TransitionPlayer::~TransitionPlayer() {
+    modeTable().erase(this); // a heap-reused address must not inherit our mode
+}
 
 bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
                            QString* error) {
