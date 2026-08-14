@@ -241,6 +241,9 @@ void TransitionPanel::startReplay(PlayerMode mode)
         return;
     }
     const Match& m = matches_[(size_t)idx];
+    // A stopped from-deck means the beat clock never advances; start it.
+    if (!engine_->deck(m.fromDeck).playing.load())
+        bus_->dispatch({m.fromDeck, ControlId::Play, 1.0}, Origin::System);
     transitionPlayerSetMode(player_, mode);
     QString error;
     if (!player_->arm(*m.file, m.fromDeck, /*startNow=*/true, &error)) {

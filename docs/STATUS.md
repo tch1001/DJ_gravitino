@@ -6,9 +6,15 @@
 
 ## Current state (update the date/line when you change things)
 
-- 2026-08-15 ~04:30: Repo scaffolded. Docs + pinned headers + CMake written by
-  the orchestrator. Stub .cpp files compile and link; modules being implemented
-  by parallel agents.
+- 2026-08-15 ~05:00: **MVP complete and verified end-to-end.** All modules
+  implemented, app builds/links clean, 4/4 unit tests pass, `--selftest` green
+  (decode ▸ BPM ▸ .gvt parse/serialize ▸ offline transition render ▸ recorder
+  round-trip). Live GUI verified by screenshot + accessibility automation:
+  tracks load with waveforms, decks play on the real output device, a recorded
+  transition PERFORMs live (deck B auto-starts, crossfader glides), and
+  TUTORIAL mode overlays beat-countdown prompts. FLX4 mapping is implemented
+  but NOT yet verified against hardware (controller was unplugged all night).
+  A sample transition is installed at ~/Music/Gravitino/Transitions/demo-blend.gvt.
 - 2026-08-15 (claude-transitions): transitions module implemented. .gvt
   parse/serialize round-trips losslessly and re-emits the exact aligned style
   of the spec example; recorder coalesces (<0.05 beat) + thins linear runs;
@@ -52,7 +58,7 @@ FLX4 may or may not be plugged in — MidiEngine must never crash without it.
 | transitions/{GvtFormat,TransitionRecorder,TransitionPlayer}.cpp, tests | claude-transitions | DONE |
 | midi/{MidiEngine,Flx4Mapping}.cpp | codex-midi | DONE |
 | ui/*.cpp, app/* | claude-ui | DONE — ui/{MainWindow,DeckWidget,MixerWidget,LibraryWidget,TransitionPanel,Theme}.h+cpp, app/main.cpp, app/SelfTest.h (declares `gvt::runSelfTest`; SelfTest.cpp is the orchestrator's). All 6 TUs + moc outputs compile warning-clean (-Wall -Wextra). Notes: (1) pinned TrackLibrary.h/TransitionEngine.h pImpl classes (TransitionStore/Recorder/Player) declare no destructor, so any TU destroying them fails to compile — main.cpp heap-allocates them with process lifetime as a workaround; header owners should add declared dtors (moc/mocs_compilation may hit the same issue). (2) `gvt::transitionPlayerSetMode` doesn't exist and `arm()` has no PlayerMode arg, so the TUTORIAL button is disabled ("coming soon"); tutorialPrompt/tutorialScored signals are wired (banner + accuracy toasts) and light up once the player emits them. (3) Hotcue clear writes `track->hotCues[i] = -1` directly (no Deck clear API). (4) UI mirrors Play state by polling `deck.playing` at 30 Hz; continuous controls mirror via bus events with QSignalBlocker. |
-| integration/selftest | orchestrator | pending |
+| integration/selftest | orchestrator | DONE — see Verification below |
 
 ### DDJ-FLX4 MIDI messages mapped
 
@@ -97,6 +103,35 @@ play, cue, and hot-cue state is restored when the output port reconnects.
 - .gvt parsers skip unknown controls with warnings, never hard-fail.
 - Qt is keg-only at /opt/homebrew/opt/qt (CMAKE_PREFIX_PATH already set in
   CMakeLists.txt).
+
+## Verification summary (2026-08-15)
+
+- `ctest`: test_beats, test_fingerprint, test_gvt, test_player — all pass.
+- `./build/gravitino --selftest`: BPMs 127.99/119.98 on the demo tracks,
+  scripted 16-beat blend renders with sane RMS/no NaN, recorder captures 5/5
+  events and round-trips through a .gvt file.
+- Live: PLAY/PERFORM/TUTORIAL exercised via accessibility automation.
+- BPM sanity on real pop: Pink Venom 90.03, Can't Stop The Feeling 113.00.
+
+## Integration decisions added after the parallel phase
+
+- Checkable buttons wire `toggled` (not `clicked`) so programmatic/AX toggles
+  dispatch too; `refresh()` mirrors engine state under QSignalBlocker.
+- PERFORM/TUTORIAL auto-start the from-deck if stopped.
+- Recorder quantizes saved files (0.01 BPM/sec, 0.001 beats) for clean diffs.
+- BPM octave preference window is 80..160 (threshold 0.65× best score).
+- Library scan is fully recursive under the chosen folder, hidden dirs skipped.
+- Dev flags: `--selftest`, `--autoload [substrA substrB]` (loads matching
+  library tracks onto decks once analyzed; defaults to the Pioneer demo pair).
+
+## Morning checklist (FLX4 hardware bring-up)
+
+1. Plug in the DDJ-FLX4, launch `./build/gravitino` — status bar should flip
+   to "DDJ-FLX4 connected" within ~2 s (hot-plug poll).
+2. Check: play/cue per deck, faders/EQ/trim, crossfader, tempo sliders
+   (polarity!), pads = hot cues, SYNC, jog nudge, LED echo on play/pads.
+3. Mapping table (message-level) is in the MIDI section below; fix constants
+   in src/midi/Flx4Mapping.cpp if any control is off.
 
 ## TODO backlog (post-MVP)
 

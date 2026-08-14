@@ -237,7 +237,9 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     root->addLayout(middle, 1);
 
     // --- wiring: user actions -> bus (Origin::Ui) ---
-    connect(playBtn_, &QPushButton::clicked, this, [this](bool checked) {
+    // toggled (not clicked): fires for mouse, keyboard, and accessibility
+    // toggles alike; refresh() blocks signals when mirroring engine state.
+    connect(playBtn_, &QPushButton::toggled, this, [this](bool checked) {
         dispatch(checked ? ControlId::Play : ControlId::Stop);
     });
     connect(cueBtn_, &QPushButton::clicked, this,
