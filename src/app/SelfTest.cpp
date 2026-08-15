@@ -2,6 +2,7 @@
 // transition through the real engine in offline mode, writes selftest_out.wav.
 // Run: ./build/gravitino --selftest [trackA.mp3 trackB.mp3]
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
 #include <QStringList>
@@ -127,6 +128,14 @@ int runSelfTest(const QStringList& args) {
         engine.renderOffline(buf.data(), chunk);
         out.insert(out.end(), buf.begin(), buf.end());
         QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+    }
+    // Offline rendering outruns wall time; after the final FromDeck stop the
+    // player clock runs on wall time, so give the event loop a few real
+    // seconds to let the schedule finish (live playback is real time anyway).
+    {
+        QElapsedTimer et; et.start();
+        while (!done && et.elapsed() < 4000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
     }
     std::printf("rendered %.1fs, player %s\n", (double)out.size() / 2.0 / kSampleRate,
                 done ? (completed ? "completed" : "aborted") : "STILL ACTIVE");

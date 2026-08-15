@@ -1,6 +1,8 @@
 #include "DeckWidget.h"
 #include "Theme.h"
 
+#include <QComboBox>
+#include <QDial>
 #include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -36,6 +38,16 @@ static double sliderToRatio(int v)
 // styles append a background to this so the compact metrics survive.
 static constexpr const char* kLoopBtnBase =
     "QPushButton { padding: 1px 3px; font-size: 9px; }";
+
+// FxBeats display: "1/4", "1/2", "1", "2", "4".
+static QString formatFxBeats(double beats)
+{
+    if (beats < 0.99) {
+        int denom = (int)std::lround(1.0 / beats);
+        return QStringLiteral("1/%1").arg(denom);
+    }
+    return QString::number((int)std::lround(beats));
+}
 
 static QString formatTime(double sec)
 {
@@ -397,6 +409,92 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     }
     loopRow->addStretch(1);
     mainCol->addLayout(loopRow);
+
+    // FX strip: one compact ~20 px row below the loop/jump row.
+    // FX [ECHO|REVERB|FLANGER] [ON] WET(dial) BEATS [<][1/2][>]
+    // All dispatch through the bus (Origin::Ui); state mirrors the deck's
+    // fx* atomics on the 30 Hz refresh under QSignalBlocker.
+    auto* fxRow = new QHBoxLayout;
+    fxRow->setSpacing(2);
+    auto mkFxLabel = [&](const QString& text) {
+        auto* l = new QLabel(text, this);
+        l->setStyleSheet(QStringLiteral("color:%1; font-size:8px;")
+                             .arg(themeDimText().name()));
+        fxRow->addWidget(l);
+        return l;
+    };
+    mkFxLabel(tr("FX"));
+    fxTypeCombo_ = new QComboBox(this);
+    fxTypeCombo_->addItems({tr("ECHO"), tr("REVERB"), tr("FLANGER")});
+    fxTypeCombo_->setFixedHeight(18);
+    fxTypeCombo_->setStyleSheet(
+        QStringLiteral("QComboBox { font-size: 9px; padding: 0px 4px; }"));
+    fxTypeCombo_->setFocusPolicy(Qt::NoFocus);
+    fxTypeCombo_->setToolTip(tr("FX type"));
+    fxRow->addWidget(fxTypeCombo_);
+    connect(fxTypeCombo_, &QComboBox::activated, this,
+            [this](int index) { dispatch(ControlId::FxType, index); });
+
+    fxOnBtn_ = new QPushButton(tr("ON"), this);
+    fxOnBtn_->setCheckable(true);
+    fxOnBtn_->setFixedHeight(18);
+    fxOnBtn_->setMinimumWidth(26);
+    fxOnBtn_->setStyleSheet(QString::fromLatin1(kLoopBtnBase));
+    fxOnBtn_->setFocusPolicy(Qt::NoFocus);
+    fxOnBtn_->setToolTip(tr("Engage / disengage the deck FX"));
+    fxRow->addWidget(fxOnBtn_);
+    connect(fxOnBtn_, &QPushButton::toggled, this, [this](bool checked) {
+        if (!fxOnBtn_->signalsBlocked())
+            dispatch(ControlId::FxOn, checked ? 1.0 : 0.0);
+    });
+
+    fxRow->addSpacing(4);
+    mkFxLabel(tr("WET"));
+    fxWetDial_ = new QDial(this);
+    fxWetDial_->setRange(0, 100);
+    fxWetDial_->setValue(50);
+    fxWetDial_->setNotchesVisible(false);
+    fxWetDial_->setFixedSize(20, 20);
+    fxWetDial_->setFocusPolicy(Qt::NoFocus);
+    fxWetDial_->setToolTip(tr("FX dry/wet"));
+    fxRow->addWidget(fxWetDial_);
+    connect(fxWetDial_, &QDial::valueChanged, this, [this](int v) {
+        if (!fxWetDial_->signalsBlocked())
+            dispatch(ControlId::FxWet, v / 100.0);
+    });
+
+    fxRow->addSpacing(4);
+    mkFxLabel(tr("BEATS"));
+    auto mkBeatsBtn = [&](const QString& text, const QString& tip) {
+        auto* b = new QPushButton(text, this);
+        b->setFixedHeight(18);
+        b->setFixedWidth(18);
+        b->setStyleSheet(QString::fromLatin1(kLoopBtnBase));
+        b->setToolTip(tip);
+        b->setFocusPolicy(Qt::NoFocus);
+        fxRow->addWidget(b);
+        return b;
+    };
+    auto* beatsDn = mkBeatsBtn(QStringLiteral("<"), tr("Halve FX beats"));
+    fxBeatsLabel_ = new QLabel(QStringLiteral("1/2"), this);
+    fxBeatsLabel_->setAlignment(Qt::AlignCenter);
+    fxBeatsLabel_->setMinimumWidth(22);
+    fxBeatsLabel_->setStyleSheet(
+        QStringLiteral("font-family:monospace; font-size:9px;"));
+    fxRow->addWidget(fxBeatsLabel_);
+    auto* beatsUp = mkBeatsBtn(QStringLiteral(">"), tr("Double FX beats"));
+    auto dispatchBeats = [this](double factor) {
+        const double cur = engine_->deck(deckIndex_).fxBeats.load();
+        const double next = std::clamp(cur * factor, 0.25, 4.0);
+        dispatch(ControlId::FxBeats, next);
+        fxBeatsLabel_->setText(formatFxBeats(next)); // instant; refresh mirrors
+    };
+    connect(beatsDn, &QPushButton::pressed, this,
+            [dispatchBeats] { dispatchBeats(0.5); });
+    connect(beatsUp, &QPushButton::pressed, this,
+            [dispatchBeats] { dispatchBeats(2.0); });
+    fxRow->addStretch(1);
+    mainCol->addLayout(fxRow);
     mainCol->addStretch(1);
 
     // Narrow vertical tempo slider column.
@@ -532,6 +630,47 @@ void DeckWidget::syncLoopButtons()
     waveform_->update(); // loop region may have (dis)appeared while paused
 }
 
+void DeckWidget::syncFxControls()
+{
+    Deck& deck = engine_->deck(deckIndex_);
+
+    const int type = std::clamp(deck.fxType.load(), 0, 2);
+    if (fxTypeCombo_->currentIndex() != type) {
+        QSignalBlocker block(fxTypeCombo_);
+        fxTypeCombo_->setCurrentIndex(type);
+    }
+
+    const bool on = deck.fxOn.load();
+    if (fxOnBtn_->isChecked() != on) {
+        QSignalBlocker block(fxOnBtn_);
+        fxOnBtn_->setChecked(on);
+    }
+    if (shownFxOn_ != (on ? 1 : 0)) {
+        shownFxOn_ = on ? 1 : 0;
+        const QString base = QString::fromLatin1(kLoopBtnBase);
+        fxOnBtn_->setStyleSheet(
+            on ? base + QStringLiteral(
+                            "QPushButton { background:%1; color:black; "
+                            "font-weight:bold; }")
+                            .arg(deckAccent(deckIndex_).name())
+               : base);
+    }
+
+    if (!fxWetDial_->isSliderDown()) {
+        const int wet = (int)std::lround(
+            std::clamp((double)deck.fxWet.load(), 0.0, 1.0) * 100.0);
+        if (fxWetDial_->value() != wet) {
+            QSignalBlocker block(fxWetDial_);
+            fxWetDial_->setValue(wet);
+        }
+    }
+
+    const QString beatsText = formatFxBeats(
+        std::clamp(deck.fxBeats.load(), 0.25, 4.0));
+    if (fxBeatsLabel_->text() != beatsText)
+        fxBeatsLabel_->setText(beatsText);
+}
+
 void DeckWidget::trackChanged()
 {
     TrackDataPtr t = engine_->deck(deckIndex_).track();
@@ -615,6 +754,7 @@ void DeckWidget::refresh()
         timeLabel_->setText(tr("0:00.0 / -0:00.0"));
     }
     syncLoopButtons();
+    syncFxControls();
 }
 
 } // namespace gvt

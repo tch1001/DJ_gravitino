@@ -6,6 +6,43 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-15 (claude-lib4): **Per-deck FX strip UI + Serato-style library
+  crates sidebar + History tab.** DeckWidget gains a compact ~20 px FX row
+  below the loop/jump row: FX [ECHO|REVERB|FLANGER] QComboBox (dispatches
+  FxType index on activation), checkable ON button (FxOn 1/0 on toggled,
+  deck-accent when engaged), 20 px WET dial (FxWet 0..1), and BEATS
+  [<][label][>] halving/doubling the deck's fxBeats within 0.25..4
+  (dispatches FxBeats with the new value; label shows "1/4".."4"). All
+  Origin::Ui through the bus; the 30 Hz refresh mirrors fxType/fxOn/fxWet/
+  fxBeats atomics under QSignalBlocker (syncFxControls, restyle only on
+  change). LibraryWidget restructured: left crate sidebar in a collapsible
+  QSplitter (~170 px start, min 90) — "All Tracks (N)" plus one crate per
+  immediate subdirectory (recursive track counts) of the crate ROOT, which
+  is derived as the deepest common directory of all pathAt() values (so no
+  TrackLibrary change; tracks sitting directly in the root appear only
+  under All Tracks); rebuilds on modelReset/rowsInserted/rowsRemoved,
+  preserving the selected crate. Selecting a crate path-prefix-filters the
+  table via the new CrateFilterProxy (QSortFilterProxyModel: crate prefix
+  AND title/artist search compose; uses begin/endFilterChange — Qt >= 6.10).
+  Right-aligned segmented [Library][History] tabs sit in the chrome row
+  above the table and switch a QStackedWidget; the History page is a
+  QTableView over HistoryModel (in LibraryWidget.cpp, newest first;
+  columns Loaded/Title/Artist/BPM/Key/Deck) fed by new gvt::History
+  (src/library/History.{h,cpp}, added to gvtcore in CMakeLists —
+  add-only). History persists JSON-lines at ~/.gravitino/history.jsonl
+  (one compact object per line: startedAt ISO-8601 local, deck 0/1, title,
+  artist, bpm, key; appended on each load, last 500 loaded on start,
+  malformed lines skipped). MainWindow constructs History as a child and
+  logs from notifyTrackLoaded (covers both library loads and --autoload;
+  main.cpp untouched); LibraryWidget ctor gained `History* history =
+  nullptr` before `parent` — when null the History tab is hidden (old
+  callers compile unchanged). Verified: full build + link warning-clean in
+  build-lib4, ctest 5/5, GUI launch screenshot shows FX rows / sidebar /
+  tabs, --autoload writes two history lines end-to-end. `--selftest` still
+  shows the pre-existing concurrent "player STILL ACTIVE" failure (no
+  src/ui or library dependency). Touched only src/ui/*, new
+  src/library/History.{h,cpp}, CMakeLists (add-only), this file.
+
 - 2026-08-15 (codex-audio3): **Loops, beat jump, DJ filter, master tap, and
   FLX4 controls implemented in the engine.** Auto loops floor-snap to the
   current native-grid beat (1/8..64 beats); manual IN/OUT snap to 1/8 beat;
@@ -133,7 +170,7 @@ FLX4 may or may not be plugged in — MidiEngine must never crash without it.
 | analysis/{TrackData,BeatAnalyzer}.cpp, library/*.cpp | claude-analysis | DONE — decode/tags/fingerprint/beatgrid + library model/cache + TransitionStore (incl. gvt::matchTrack). Demo Track 1 → 128.0 BPM, Demo Track 2 → 120.0 BPM. tests/test_beats.cpp + tests/test_fingerprint.cpp pass standalone; ctest link pending peers' objects. 2026-08-15 (claude-analysis2): added Serato-style band waveform data — `TrackData::overviewLow/Mid/High` (per-512-frame-bin peak abs of one-pole-filtered mono: low <200 Hz, mid 200–2000, high >2000; all three normalized by one shared global max, always sized like overviewPeaks, silent→zeros/no NaN). Computed in loadAndAnalyzeTrack and recomputed from PCM on library cache hits via `detail::computeBandOverviews` (AnalysisInternal.h) — NOT stored in the JSON cache, cache format unchanged. Verified: TrackData.cpp.o + TrackLibrary.cpp.o compile warning-clean; standalone probe on Demo Track 1 prints 16166 bins per band, non-zero, sizes equal to overviewPeaks. 2026-08-15 (claude-key): musical key detection added — new src/analysis/KeyAnalyzer.{h,cpp} (`gvt::analyzeKey`: mono downmix, 4x decimate to 12 kHz, Hann+Goertzel chromagram C3..B6 with log compression + per-frame L1 norm over first 120 s, Krumhansl-Schmuckler major/minor correlation, Camelot mapping; ~0.4 s/track; empty fields if corr < 0.5 or degenerate). loadAndAnalyzeTrack fills `TrackData::camelotKey/keyName`; TrackLibrary caches both in the JSON and treats a missing "camelotKey" field as a cache MISS (pre-feature entries re-analyze once); model gained a Key column between BPM and Duration (shows camelotKey, right-aligned). KeyAnalyzer.cpp added to gvtcore in CMakeLists. Verified: all 4 TUs compile warning-clean (-Wall -Wextra); standalone probe detects — Can't Stop the Feeling: 8B/C (matches known C major), Demo Track 1: 7B/F, Demo Track 2: 4A/Fm, Pink Venom: 12B/E (published key is 1A/G#m — detector picks the neighboring E major, which shares 6 of 7 scale tones; known limitation). |
 | transitions/{GvtFormat,TransitionRecorder,TransitionPlayer}.cpp, tests | claude-transitions | DONE |
 | midi/{MidiEngine,Flx4Mapping}.cpp | codex-midi | DONE |
-| ui/*.cpp, app/* | claude-ui / claude-ui2 / claude-ui3 | DONE — 2026-08-15 (claude-ui3): loop/beat-jump row, loop-region shading (overview + detail lanes), FILTER knobs, band-colored deck overview, camelot key in the info line, MainWindow MasterRecorder* param + status-bar "● REC MASTER" button (see Current state above). Serato-parity restructure 2026-08-15 (see Current state above): equal deck halves + outer tempo sliders, new DetailWaveformView center lanes, horizontal mixer strip, press/release Cue + hot-cue dispatch, MainWindow::setTransitionEntryMarker. Original notes:  ui/{MainWindow,DeckWidget,MixerWidget,LibraryWidget,TransitionPanel,Theme}.h+cpp, app/main.cpp, app/SelfTest.h (declares `gvt::runSelfTest`; SelfTest.cpp is the orchestrator's). All 6 TUs + moc outputs compile warning-clean (-Wall -Wextra). Notes: (1) pinned TrackLibrary.h/TransitionEngine.h pImpl classes (TransitionStore/Recorder/Player) declare no destructor, so any TU destroying them fails to compile — main.cpp heap-allocates them with process lifetime as a workaround; header owners should add declared dtors (moc/mocs_compilation may hit the same issue). (2) `gvt::transitionPlayerSetMode` doesn't exist and `arm()` has no PlayerMode arg, so the TUTORIAL button is disabled ("coming soon"); tutorialPrompt/tutorialScored signals are wired (banner + accuracy toasts) and light up once the player emits them. (3) Hotcue clear writes `track->hotCues[i] = -1` directly (no Deck clear API). (4) UI mirrors Play state by polling `deck.playing` at 30 Hz; continuous controls mirror via bus events with QSignalBlocker. |
+| ui/*.cpp, app/*, library/History.* | claude-ui / claude-ui2 / claude-ui3 / claude-lib4 | DONE — 2026-08-15 (claude-lib4): per-deck FX strip, crate sidebar + Library/History tabs, gvt::History JSONL log (see Current state above). 2026-08-15 (claude-ui3): loop/beat-jump row, loop-region shading (overview + detail lanes), FILTER knobs, band-colored deck overview, camelot key in the info line, MainWindow MasterRecorder* param + status-bar "● REC MASTER" button (see Current state above). Serato-parity restructure 2026-08-15 (see Current state above): equal deck halves + outer tempo sliders, new DetailWaveformView center lanes, horizontal mixer strip, press/release Cue + hot-cue dispatch, MainWindow::setTransitionEntryMarker. Original notes:  ui/{MainWindow,DeckWidget,MixerWidget,LibraryWidget,TransitionPanel,Theme}.h+cpp, app/main.cpp, app/SelfTest.h (declares `gvt::runSelfTest`; SelfTest.cpp is the orchestrator's). All 6 TUs + moc outputs compile warning-clean (-Wall -Wextra). Notes: (1) pinned TrackLibrary.h/TransitionEngine.h pImpl classes (TransitionStore/Recorder/Player) declare no destructor, so any TU destroying them fails to compile — main.cpp heap-allocates them with process lifetime as a workaround; header owners should add declared dtors (moc/mocs_compilation may hit the same issue). (2) `gvt::transitionPlayerSetMode` doesn't exist and `arm()` has no PlayerMode arg, so the TUTORIAL button is disabled ("coming soon"); tutorialPrompt/tutorialScored signals are wired (banner + accuracy toasts) and light up once the player emits them. (3) Hotcue clear writes `track->hotCues[i] = -1` directly (no Deck clear API). (4) UI mirrors Play state by polling `deck.playing` at 30 Hz; continuous controls mirror via bus events with QSignalBlocker. |
 | integration/selftest | orchestrator | DONE — see Verification below |
 | audio/MasterRecorder.cpp (+ pinned .h), tests/test_masterrec.cpp | claude-recmaster | DONE 2026-08-15 — master WAV recorder: feed() is audio-thread lock-free (SPSC ring, 2^18 floats ≈ 2.7 s, atomic head/tail acq/rel; full ring drops the whole chunk + atomic counter, qWarning once on stop). Worker std::thread drains every 10 ms → 16-bit LE PCM; start("") resolves ~/Music/Gravitino/Recordings/gravitino-YYYYMMDD-HHMMSS.wav (dirs created), placeholder 44-byte header (16-bit/2ch/48k) patched with RIFF/data sizes on stop(). stop() clears the atomic 'active' gate BEFORE joining, so concurrent feed() at worst writes into the still-allocated ring. recordedSec() from atomic frame counter; recordingChanged(bool,path) emitted on start/stop; dtor stops cleanly. Added to gvtcore in CMakeLists (add-only). Verified: MasterRecorder.cpp.o compiles clean in build-rec; test_masterrec built standalone (MasterRecorder.cpp + moc + QtCore, -Wall -Wextra clean) and passes: "test_masterrec OK: 2.000 s recorded, 384000 data bytes, peak 16384" (2 s of 440 Hz sine, header validated 16-bit/2ch/48k, data size exact, 0 drops). ctest picks it up via the tests glob once peers' objects link. NOT yet wired into AudioEngine/UI — orchestrator: call feed() from the master render output after the limiter. |
 
@@ -273,10 +310,11 @@ set/jump, FLX4 note-off releases, transition ENTRY POINT: PERFORM/TUTORIAL
 seek to the recorded anchor beat, new ⚡ PRIME arms loop-style firing when
 playback crosses the anchor, orange "T" markers on all waveforms.
 
-Next parity targets (not started): loops (auto/manual + entering stored
-loops), FX section, beat jump, sampler pads, colored overview waveforms,
-key detection/display, pitch-fader value readouts, 4-deck mode, master
-recording, library crates/playlists + iTunes import, history panel.
+Next parity targets (not started): sampler pads, pitch-fader value
+readouts, 4-deck mode, iTunes import, playlist editing (crates are
+currently folder-derived, read-only). DONE since: loops, beat jump, FX
+section (engine + per-deck UI strip), colored overview waveforms, key
+detection/display, master recording, folder-crate sidebar, history panel.
 
 ## TODO backlog (post-MVP)
 

@@ -3,6 +3,8 @@
 #include "../control/ControlBus.h"
 #include "../audio/AudioEngine.h"
 
+class QComboBox;
+class QDial;
 class QLabel;
 class QPushButton;
 class QSlider;
@@ -80,6 +82,15 @@ private:
     // -2 = none, -1 = manual/non-standard length, 0..4 = kAutoLoopBeats idx.
     int shownLoopLenIdx_ = -2;
     bool shownLoopIn_ = false, shownLoopActive_ = false;
+
+    // FX strip (below the loop/jump row): type combo, ON toggle, WET dial,
+    // BEATS halve/double. Mirrors the deck's fx* atomics in refresh().
+    void syncFxControls();
+    QComboBox* fxTypeCombo_ = nullptr;
+    QPushButton* fxOnBtn_ = nullptr;
+    QDial* fxWetDial_ = nullptr;
+    QLabel* fxBeatsLabel_ = nullptr;
+    int shownFxOn_ = -1; // -1 = unstyled yet, else 0/1
 
     QTimer* timer_ = nullptr;
 };

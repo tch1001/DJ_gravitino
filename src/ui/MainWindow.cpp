@@ -7,6 +7,7 @@
 #include "Theme.h"
 #include "TransitionPanel.h"
 #include "../audio/MasterRecorder.h"
+#include "../library/History.h"
 
 #include <QDesktopServices>
 #include <QPushButton>
@@ -118,8 +119,11 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     mixRow->addWidget(transitionPanel_, 2);
     root->addLayout(mixRow);
 
-    // Row 4: library (takes the remaining space).
-    libraryWidget_ = new LibraryWidget(library_, engine_);
+    // Row 4: library (takes the remaining space). The load history is
+    // constructed here (persisted at ~/.gravitino/history.jsonl) and shown
+    // in the library's History tab.
+    history_ = new History(this);
+    libraryWidget_ = new LibraryWidget(library_, engine_, history_);
     root->addWidget(libraryWidget_, 2);
 
     setCentralWidget(central);
@@ -260,6 +264,12 @@ void MainWindow::onRecordingChanged(bool active, const QString& path)
 
 void MainWindow::notifyTrackLoaded(int deck)
 {
+    // Log to the session history (covers both library loads and the
+    // --autoload dev hook, which land here alike).
+    if (history_ && (deck == 0 || deck == 1)) {
+        if (TrackDataPtr t = engine_->deck(deck).track())
+            history_->logLoad(deck, *t);
+    }
     (deck == 0 ? deckA_ : deckB_)->trackChanged();
     detailWave_->update();
     transitionPanel_->refreshMatches();

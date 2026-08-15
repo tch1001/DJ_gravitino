@@ -12,6 +12,7 @@ class QTimer;
 
 namespace gvt {
 
+class History;
 class MasterRecorder;
 class DeckWidget;
 class DetailWaveformView;
@@ -53,6 +54,7 @@ private:
     TrackLibrary* library_;
     TransitionStore* store_;
     MidiEngine* midi_;
+    History* history_ = nullptr; // owned (QObject child); load log + panel
 
     DeckWidget* deckA_ = nullptr;
     DeckWidget* deckB_ = nullptr;

@@ -28,6 +28,7 @@ add_library(gvtcore STATIC
     src/analysis/BeatAnalyzer.cpp
     src/analysis/KeyAnalyzer.cpp
     src/library/TrackLibrary.cpp
+    src/library/History.cpp
     src/library/TransitionStore.cpp
     src/transitions/GvtFormat.cpp
     src/transitions/TransitionRecorder.cpp
