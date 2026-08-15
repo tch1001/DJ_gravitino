@@ -187,6 +187,34 @@ int runSelfTest(const QStringList& args) {
         std::printf("FAIL: recorded round-trip\n"); return 1;
     }
     std::printf("OK: recorder round-trip (selftest_recorded.gvt)\n");
+
+    // ---- Loop + beat-jump sanity through the real render path -------------
+    Deck& da = engine.deck(0);
+    da.seekSec(ta->secAtBeat(32.0));
+    bus.dispatch({0, ControlId::Play, 1.0}, Origin::System);
+    bus.dispatch({0, ControlId::LoopAuto, 4.0}, Origin::System);
+    if (!da.loopActive.load()) { std::printf("FAIL: loopAuto did not activate\n"); return 1; }
+    const double ls = da.loopStartSec.load(), le = da.loopEndSec.load();
+    const double lenBeats = (le - ls) * ta->bpm / 60.0;
+    if (std::fabs(lenBeats - 4.0) > 0.05) {
+        std::printf("FAIL: loop length %.3f beats (want 4)\n", lenBeats); return 1;
+    }
+    for (int i = 0; i < (int)(6.0 * kSampleRate / chunk); ++i) // 6 s > loop len
+        engine.renderOffline(buf.data(), chunk);
+    const double posInLoop = da.positionSec();
+    if (posInLoop < ls - 0.05 || posInLoop > le + 0.05) {
+        std::printf("FAIL: position %.3f escaped loop [%.3f, %.3f]\n",
+                    posInLoop, ls, le); return 1;
+    }
+    bus.dispatch({0, ControlId::LoopExit, 1.0}, Origin::System);
+    if (da.loopActive.load()) { std::printf("FAIL: loopExit ignored\n"); return 1; }
+    const double beatBefore = da.beatPosition();
+    bus.dispatch({0, ControlId::BeatJump, 8.0}, Origin::System);
+    const double jumped = da.beatPosition() - beatBefore;
+    if (std::fabs(jumped - 8.0) > 0.6) {
+        std::printf("FAIL: beat_jump moved %.2f beats (want ~8)\n", jumped); return 1;
+    }
+    std::printf("OK: loop wrap + exit + beat_jump (+%.2f beats)\n", jumped);
     return 0;
 }
 

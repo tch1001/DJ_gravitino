@@ -7,9 +7,12 @@
 #include "../transitions/TransitionEngine.h"
 
 class QLabel;
+class QPushButton;
+class QTimer;
 
 namespace gvt {
 
+class MasterRecorder;
 class DeckWidget;
 class DetailWaveformView;
 class MixerWidget;
@@ -19,10 +22,13 @@ class TransitionPanel;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
+    // `rec` may be null (e.g. tests / older callers): the master-record
+    // button is then hidden entirely. Wiring rec into the engine's master
+    // tap is main.cpp's (the orchestrator's) job.
     MainWindow(ControlBus* bus, AudioEngine* engine, TrackLibrary* library,
                TransitionStore* store, TransitionRecorder* recorder,
                TransitionPlayer* player, MidiEngine* midi,
-               QWidget* parent = nullptr);
+               MasterRecorder* rec = nullptr, QWidget* parent = nullptr);
     // Dev hook (--autoload): a track was loaded onto `deck` outside the
     // library widget; refresh deck display + transition matches.
     void notifyTrackLoaded(int deck);
@@ -38,6 +44,8 @@ private slots:
     void openTransitionsFolder();
     void about();
     void onMidiConnection(bool connected, const QString& name);
+    void onRecClicked();
+    void onRecordingChanged(bool active, const QString& path);
 
 private:
     ControlBus* bus_;
@@ -54,6 +62,11 @@ private:
     TransitionPanel* transitionPanel_ = nullptr;
     QLabel* midiLabel_ = nullptr;
     QLabel* rateLabel_ = nullptr;
+
+    // Master recording (null rec_ = feature hidden).
+    MasterRecorder* rec_ = nullptr;
+    QPushButton* recBtn_ = nullptr;
+    QTimer* recTimer_ = nullptr; // 1 s elapsed-time updates while recording
 };
 
 } // namespace gvt

@@ -1,6 +1,7 @@
 #include "AudioEngine.h"
 
 #include "../../third_party/miniaudio.h"
+#include "../audio/MasterRecorder.h"
 
 #include <algorithm>
 #include <array>
@@ -84,6 +85,11 @@ struct AudioEngine::Impl {
 
             rendered += chunkFrames;
         }
+
+        MasterRecorder* const tap =
+            owner->masterTap.load(std::memory_order_acquire);
+        if (tap != nullptr)
+            tap->feed(output, frames);
     }
 };
 
@@ -263,6 +269,26 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
             target.play();
         break;
     }
+    case ControlId::LoopIn:
+        if (event.value >= 0.5)
+            target.loopIn();
+        break;
+    case ControlId::LoopOut:
+        if (event.value >= 0.5)
+            target.loopOut();
+        break;
+    case ControlId::LoopExit:
+        if (event.value >= 0.5)
+            target.loopExit();
+        break;
+    case ControlId::LoopHalve:
+        if (event.value >= 0.5)
+            target.loopHalve();
+        break;
+    case ControlId::LoopDouble:
+        if (event.value >= 0.5)
+            target.loopDouble();
+        break;
     case ControlId::Tempo:
         if (std::isfinite(event.value) && event.value > 0.0) {
             target.tempoRatio.store(std::clamp(event.value, 0.01, 4.0),
@@ -292,6 +318,17 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
     case ControlId::EqHigh:
         if (std::isfinite(event.value))
             target.eqHigh.store(normalizedValue(event.value),
+                                std::memory_order_relaxed);
+        break;
+    case ControlId::LoopAuto:
+        target.loopAuto(event.value);
+        break;
+    case ControlId::BeatJump:
+        target.beatJump(event.value);
+        break;
+    case ControlId::Filter:
+        if (std::isfinite(event.value))
+            target.filter.store(normalizedValue(event.value),
                                 std::memory_order_relaxed);
         break;
     case ControlId::Jog:

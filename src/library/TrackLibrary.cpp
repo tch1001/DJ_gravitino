@@ -29,7 +29,7 @@ namespace gvt {
 
 namespace {
 
-enum Col { ColTitle = 0, ColArtist, ColBpm, ColDuration, ColStatus, ColCount };
+enum Col { ColTitle = 0, ColArtist, ColBpm, ColKey, ColDuration, ColStatus, ColCount };
 
 struct Row {
     QString      path;
@@ -82,6 +82,8 @@ void writeCache(const TrackData& t, qint64 mtimeMs)
     o[QStringLiteral("bpm")]          = t.bpm;
     o[QStringLiteral("firstBeatSec")] = t.firstBeatSec;
     o[QStringLiteral("fingerprint")]  = t.fingerprint;
+    o[QStringLiteral("camelotKey")]   = t.camelotKey;
+    o[QStringLiteral("keyName")]      = t.keyName;
     QJsonArray cues;
     for (double c : t.hotCues) cues.append(c);
     o[QStringLiteral("hotCues")] = cues;
@@ -102,6 +104,9 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
     if (!doc.isObject()) return nullptr;
     const QJsonObject o = doc.object();
     if ((qint64)o.value(QStringLiteral("mtime")).toDouble(-1) != mtimeMs) return nullptr;
+    // Entries written before key detection existed lack "camelotKey" — treat
+    // them as a miss so the track re-analyzes once and the cache is upgraded.
+    if (!o.contains(QStringLiteral("camelotKey"))) return nullptr;
 
     auto t = std::make_shared<TrackData>();
     t->filePath = path;
@@ -112,6 +117,8 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
     t->bpm          = o.value(QStringLiteral("bpm")).toDouble();
     t->firstBeatSec = o.value(QStringLiteral("firstBeatSec")).toDouble();
     t->fingerprint  = o.value(QStringLiteral("fingerprint")).toString();
+    t->camelotKey   = o.value(QStringLiteral("camelotKey")).toString();
+    t->keyName      = o.value(QStringLiteral("keyName")).toString();
     t->durationSec  = (double)t->frameCount() / (double)kSampleRate;
     const QJsonArray cues = o.value(QStringLiteral("hotCues")).toArray();
     for (int i = 0; i < 8 && i < cues.size(); ++i) t->hotCues[i] = cues[i].toDouble(-1.0);
@@ -237,7 +244,7 @@ QVariant TrackLibrary::data(const QModelIndex& idx, int role) const
     const Row& r = st->rows[(size_t)idx.row()];
 
     if (role == Qt::TextAlignmentRole) {
-        if (idx.column() == ColBpm || idx.column() == ColDuration)
+        if (idx.column() == ColBpm || idx.column() == ColKey || idx.column() == ColDuration)
             return QVariant(Qt::AlignRight | Qt::AlignVCenter);
         return {};
     }
@@ -253,6 +260,8 @@ QVariant TrackLibrary::data(const QModelIndex& idx, int role) const
     case ColBpm:
         return (r.track && r.track->bpm > 0.0) ? QString::number(r.track->bpm, 'f', 1)
                                                : QString();
+    case ColKey:
+        return r.track ? r.track->camelotKey : QString();
     case ColDuration:
         return r.track ? formatDuration(r.track->durationSec) : QString();
     case ColStatus:
@@ -268,6 +277,7 @@ QVariant TrackLibrary::headerData(int section, Qt::Orientation o, int role) cons
     case ColTitle:    return QStringLiteral("Title");
     case ColArtist:   return QStringLiteral("Artist");
     case ColBpm:      return QStringLiteral("BPM");
+    case ColKey:      return QStringLiteral("Key");
     case ColDuration: return QStringLiteral("Duration");
     case ColStatus:   return QStringLiteral("Status");
     }

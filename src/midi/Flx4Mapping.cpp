@@ -19,6 +19,16 @@ constexpr std::uint8_t kDeck2HotCueChannel = 0x09;
 constexpr std::uint8_t kPlayNote = 0x0B;
 constexpr std::uint8_t kCueNote = 0x0C;
 constexpr std::uint8_t kBeatSyncNote = 0x58;
+constexpr std::uint8_t kLoopInNote = 0x10;
+constexpr std::uint8_t kLoopOutNote = 0x11;
+constexpr std::uint8_t kFourBeatExitNote = 0x4D;
+constexpr std::uint8_t kShiftFourBeatExitNote = 0x50;
+constexpr std::uint8_t kLoopHalveNote = 0x51;
+constexpr std::uint8_t kLoopDoubleNote = 0x53;
+constexpr std::uint8_t kShiftLoopHalveNote = 0x4C;
+constexpr std::uint8_t kShiftLoopDoubleNote = 0x4E;
+constexpr std::uint8_t kBeatJumpPadFirstNote = 0x20;
+constexpr std::uint8_t kBeatJumpPadLastNote = 0x27;
 
 constexpr std::uint8_t kTempoMsb = 0x00;
 constexpr std::uint8_t kTempoLsb = 0x20;
@@ -34,6 +44,10 @@ constexpr std::uint8_t kEqLowMsb = 0x0F;
 constexpr std::uint8_t kEqLowLsb = 0x2F;
 constexpr std::uint8_t kCrossfaderMsb = 0x1F;
 constexpr std::uint8_t kCrossfaderLsb = 0x3F;
+constexpr std::uint8_t kFilterDeck1Msb = 0x17;
+constexpr std::uint8_t kFilterDeck1Lsb = 0x37;
+constexpr std::uint8_t kFilterDeck2Msb = 0x18;
+constexpr std::uint8_t kFilterDeck2Lsb = 0x38;
 
 constexpr std::uint8_t kJogSide = 0x21;
 constexpr std::uint8_t kJogPlatterVinylOn = 0x22;
@@ -70,6 +84,13 @@ bool hotCueIndex(ControlId id, std::uint8_t& index) noexcept
     }
     index = static_cast<std::uint8_t>(value - first);
     return true;
+}
+
+double beatJumpForPad(std::uint8_t pad) noexcept
+{
+    constexpr std::array<double, 8> kBeatJumps {
+        -1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -8.0, 8.0};
+    return kBeatJumps[static_cast<std::size_t>(pad)];
 }
 
 double normalizedFourteenBit(int value) noexcept
@@ -130,6 +151,35 @@ std::optional<ControlEvent> Flx4Mapping::parse(
             if (pressed)
                 return ControlEvent {deck, ControlId::TempoSync, 1.0};
             return std::nullopt;
+        case kLoopInNote:
+            if (pressed)
+                return ControlEvent {deck, ControlId::LoopIn, 1.0};
+            return std::nullopt;
+        case kLoopOutNote:
+            if (pressed)
+                return ControlEvent {deck, ControlId::LoopOut, 1.0};
+            return std::nullopt;
+        case kFourBeatExitNote:
+            if (pressed) {
+                // MidiEngine changes this to LoopExit when a loop is already
+                // active, matching the FLX4's combined 4 BEAT/EXIT button.
+                return ControlEvent {deck, ControlId::LoopAuto, 4.0};
+            }
+            return std::nullopt;
+        case kShiftFourBeatExitNote:
+            if (pressed)
+                return ControlEvent {deck, ControlId::LoopExit, 1.0};
+            return std::nullopt;
+        case kLoopHalveNote:
+        case kShiftLoopHalveNote:
+            if (pressed)
+                return ControlEvent {deck, ControlId::LoopHalve, 1.0};
+            return std::nullopt;
+        case kLoopDoubleNote:
+        case kShiftLoopDoubleNote:
+            if (pressed)
+                return ControlEvent {deck, ControlId::LoopDouble, 1.0};
+            return std::nullopt;
         default:
             return std::nullopt;
         }
@@ -140,6 +190,17 @@ std::optional<ControlEvent> Flx4Mapping::parse(
         const DeckId deck = channel == kDeck1HotCueChannel ? 0 : 1;
         return ControlEvent {
             deck, hotCueId(data1), pressed ? 1.0 : 0.0};
+    }
+
+    if ((channel == kDeck1HotCueChannel || channel == kDeck2HotCueChannel)
+        && data1 >= kBeatJumpPadFirstNote &&
+        data1 <= kBeatJumpPadLastNote) {
+        if (!pressed)
+            return std::nullopt;
+        const DeckId deck = channel == kDeck1HotCueChannel ? 0 : 1;
+        const auto pad = static_cast<std::uint8_t>(
+            data1 - kBeatJumpPadFirstNote);
+        return ControlEvent {deck, ControlId::BeatJump, beatJumpForPad(pad)};
     }
 
     return std::nullopt;
@@ -204,6 +265,22 @@ std::optional<ControlEvent> Flx4Mapping::parseControlChange(
     }
 
     if (channel == kMixerChannel) {
+        if (controller == kFilterDeck1Msb) {
+            return finishFourteenBit(
+                filter_[0], true, value, 0, ControlId::Filter);
+        }
+        if (controller == kFilterDeck1Lsb) {
+            return finishFourteenBit(
+                filter_[0], false, value, 0, ControlId::Filter);
+        }
+        if (controller == kFilterDeck2Msb) {
+            return finishFourteenBit(
+                filter_[1], true, value, 1, ControlId::Filter);
+        }
+        if (controller == kFilterDeck2Lsb) {
+            return finishFourteenBit(
+                filter_[1], false, value, 1, ControlId::Filter);
+        }
         if (controller == kCrossfaderMsb) {
             return finishFourteenBit(
                 crossfader_, true, value, kNoDeck, ControlId::Crossfader);
@@ -252,6 +329,18 @@ std::optional<std::array<unsigned char, 3>> Flx4Mapping::ledMessage(
         note = kPlayNote;
     } else if (id == ControlId::Cue) {
         note = kCueNote;
+    } else if (id == ControlId::LoopIn) {
+        note = kLoopInNote;
+    } else if (id == ControlId::LoopOut) {
+        note = kLoopOutNote;
+    } else if (id == ControlId::LoopExit) {
+        note = kFourBeatExitNote;
+    } else if (id == ControlId::LoopHalve) {
+        note = kShiftLoopHalveNote;
+    } else if (id == ControlId::LoopDouble) {
+        note = kShiftLoopDoubleNote;
+    } else if (id == ControlId::LoopAuto) {
+        note = kShiftFourBeatExitNote;
     } else {
         std::uint8_t pad = 0;
         if (!hotCueIndex(id, pad)) {

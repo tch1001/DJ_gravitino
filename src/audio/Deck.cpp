@@ -17,6 +17,9 @@ constexpr double kMaximumJogRatio = 0.25;
 constexpr double kCuePreviewToleranceSec = 0.05;
 // Reaches 0.1% of the initial bend after approximately 200 ms at 48 kHz.
 constexpr double kJogDecayPerFrame = 0.999280701;
+constexpr double kMinimumLoopBeats = 0.125;
+constexpr double kMaximumLoopBeats = 64.0;
+constexpr double kManualLoopSubdivisions = 8.0;
 
 float clampUnit(float value, float fallback) noexcept
 {
@@ -35,6 +38,32 @@ double trimGain(float knob) noexcept
     return std::pow(10.0, boostDb / 20.0);
 }
 
+bool hasUsableBeatGrid(const TrackDataPtr& track) noexcept
+{
+    return track != nullptr && std::isfinite(track->bpm) && track->bpm > 0.0 &&
+           std::isfinite(track->firstBeatSec) && track->frameCount() > 0;
+}
+
+double trackDurationSec(const TrackData& track) noexcept
+{
+    return static_cast<double>(track.frameCount()) /
+           static_cast<double>(kSampleRate);
+}
+
+double clampTrackSec(const TrackData& track, double sec) noexcept
+{
+    return std::clamp(sec, 0.0, trackDurationSec(track));
+}
+
+double snapToBeatSubdivision(const TrackData& track, double sec) noexcept
+{
+    const double beat = track.beatAtSec(sec);
+    const double snappedBeat =
+        std::round(beat * kManualLoopSubdivisions) /
+        kManualLoopSubdivisions;
+    return clampTrackSec(track, track.secAtBeat(snappedBeat));
+}
+
 } // namespace
 
 struct Deck::Impl {
@@ -48,7 +77,10 @@ struct Deck::Impl {
     std::atomic<double> pendingJogRatio { 0.0 };
     std::atomic<bool> cuePreviewing { false };
     double jogRatio = 0.0; // Audio-thread-owned after a safe track swap.
+    double pendingLoopInSec = -1.0; // GUI-thread-owned.
+    bool hasPendingLoopIn = false;
     Eq eq;
+    DjFilter djFilter;
 
     void waitForRender() const noexcept
     {
@@ -83,7 +115,13 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->pendingJogRatio.store(0.0, std::memory_order_release);
     impl_->cuePreviewing.store(false, std::memory_order_release);
     impl_->jogRatio = 0.0;
+    impl_->pendingLoopInSec = -1.0;
+    impl_->hasPendingLoopIn = false;
     impl_->eq.reset();
+    impl_->djFilter.reset();
+    loopActive.store(false, std::memory_order_release);
+    loopStartSec.store(-1.0, std::memory_order_release);
+    loopEndSec.store(-1.0, std::memory_order_release);
 
     TrackData* const rawTrack = impl_->ownedTrack.get();
     if (rawTrack == nullptr) {
@@ -209,6 +247,150 @@ void Deck::nudge(double ticks)
         pending, desired, std::memory_order_release, std::memory_order_relaxed));
 }
 
+void Deck::loopAuto(double beats)
+{
+    const TrackDataPtr currentTrack = track();
+    if (!hasUsableBeatGrid(currentTrack) || !std::isfinite(beats))
+        return;
+
+    beats = std::clamp(beats, kMinimumLoopBeats, kMaximumLoopBeats);
+    const double currentBeat = currentTrack->beatAtSec(positionSec());
+    if (!std::isfinite(currentBeat))
+        return;
+
+    const double start = clampTrackSec(
+        *currentTrack, currentTrack->secAtBeat(std::floor(currentBeat)));
+    const double beatDuration = 60.0 / currentTrack->bpm;
+    const double end = clampTrackSec(
+        *currentTrack, start + beats * beatDuration);
+    if (!(end > start))
+        return;
+
+    // Disable first so the audio thread never observes a newly written start
+    // paired with the previous end.
+    loopActive.store(false, std::memory_order_release);
+    loopStartSec.store(start, std::memory_order_release);
+    loopEndSec.store(end, std::memory_order_release);
+    impl_->pendingLoopInSec = -1.0;
+    impl_->hasPendingLoopIn = false;
+    loopActive.store(true, std::memory_order_release);
+}
+
+void Deck::loopIn()
+{
+    const TrackDataPtr currentTrack = track();
+    if (!hasUsableBeatGrid(currentTrack))
+        return;
+
+    const double start = snapToBeatSubdivision(*currentTrack, positionSec());
+    loopActive.store(false, std::memory_order_release);
+    loopStartSec.store(start, std::memory_order_release);
+    loopEndSec.store(-1.0, std::memory_order_release);
+    impl_->pendingLoopInSec = start;
+    impl_->hasPendingLoopIn = true;
+}
+
+void Deck::loopOut()
+{
+    const TrackDataPtr currentTrack = track();
+    if (!hasUsableBeatGrid(currentTrack) || !impl_->hasPendingLoopIn)
+        return;
+
+    const double current = positionSec();
+    const double start = impl_->pendingLoopInSec;
+    if (!std::isfinite(current) || !(current > start))
+        return;
+
+    double end = snapToBeatSubdivision(*currentTrack, current);
+    const double minimumEnd =
+        start + kMinimumLoopBeats * 60.0 / currentTrack->bpm;
+    end = clampTrackSec(*currentTrack, std::max(end, minimumEnd));
+    if (!(end > start))
+        return;
+
+    loopEndSec.store(end, std::memory_order_release);
+    impl_->pendingLoopInSec = -1.0;
+    impl_->hasPendingLoopIn = false;
+    loopActive.store(true, std::memory_order_release);
+}
+
+void Deck::loopExit()
+{
+    // Bounds deliberately survive. LoopIn starts a fresh manual-loop arm.
+    loopActive.store(false, std::memory_order_release);
+}
+
+void Deck::loopHalve()
+{
+    if (!loopActive.load(std::memory_order_acquire))
+        return;
+
+    const TrackDataPtr currentTrack = track();
+    if (!hasUsableBeatGrid(currentTrack))
+        return;
+
+    const double start = loopStartSec.load(std::memory_order_acquire);
+    const double end = loopEndSec.load(std::memory_order_acquire);
+    if (!std::isfinite(start) || !std::isfinite(end) || !(end > start))
+        return;
+
+    const double lengthBeats = (end - start) * currentTrack->bpm / 60.0;
+    const double newLengthBeats =
+        std::max(kMinimumLoopBeats, lengthBeats * 0.5);
+    const double newEnd = clampTrackSec(
+        *currentTrack, start + newLengthBeats * 60.0 / currentTrack->bpm);
+    if (!(newEnd > start))
+        return;
+
+    loopEndSec.store(newEnd, std::memory_order_release);
+}
+
+void Deck::loopDouble()
+{
+    if (!loopActive.load(std::memory_order_acquire))
+        return;
+
+    const TrackDataPtr currentTrack = track();
+    if (!hasUsableBeatGrid(currentTrack))
+        return;
+
+    const double start = loopStartSec.load(std::memory_order_acquire);
+    const double end = loopEndSec.load(std::memory_order_acquire);
+    if (!std::isfinite(start) || !std::isfinite(end) || !(end > start))
+        return;
+
+    const double lengthBeats = (end - start) * currentTrack->bpm / 60.0;
+    const double newLengthBeats =
+        std::min(kMaximumLoopBeats, lengthBeats * 2.0);
+    const double newEnd = clampTrackSec(
+        *currentTrack, start + newLengthBeats * 60.0 / currentTrack->bpm);
+    if (!(newEnd > start))
+        return;
+
+    loopEndSec.store(newEnd, std::memory_order_release);
+}
+
+void Deck::beatJump(double beats)
+{
+    const TrackDataPtr currentTrack = track();
+    if (!hasUsableBeatGrid(currentTrack) || !std::isfinite(beats))
+        return;
+
+    const double currentBeat = currentTrack->beatAtSec(positionSec());
+    if (!std::isfinite(currentBeat))
+        return;
+
+    const double duration = trackDurationSec(*currentTrack);
+    if (!(duration > 0.0))
+        return;
+
+    const double finalPlayableSec = std::nextafter(duration, 0.0);
+    const double targetSec = std::clamp(
+        currentTrack->secAtBeat(std::round(currentBeat) + beats),
+        0.0, finalPlayableSec);
+    seekSec(targetSec);
+}
+
 void Deck::render(float* out, int frames)
 {
     if (out == nullptr || frames <= 0)
@@ -258,7 +440,37 @@ void Deck::render(float* out, int frames)
     const double inputGain = trimGain(trim.load(std::memory_order_relaxed));
     bool reachedEnd = false;
 
+    bool loopEnabled = loopActive.load(std::memory_order_acquire);
+    double loopStartFrame = 0.0;
+    double loopEndFrame = 0.0;
+    double loopLengthFrames = 0.0;
+    if (loopEnabled) {
+        loopStartFrame = std::clamp(
+            loopStartSec.load(std::memory_order_acquire) *
+                static_cast<double>(kSampleRate),
+            0.0, static_cast<double>(trackFrames));
+        loopEndFrame = std::clamp(
+            loopEndSec.load(std::memory_order_acquire) *
+                static_cast<double>(kSampleRate),
+            0.0, static_cast<double>(trackFrames));
+        loopLengthFrames = loopEndFrame - loopStartFrame;
+        if (!std::isfinite(loopStartFrame) || !std::isfinite(loopEndFrame) ||
+            !(loopLengthFrames > 0.0)) {
+            loopEnabled = false;
+        }
+    }
+
+    const auto wrapLoopPosition = [&] {
+        if (loopEnabled && position >= loopEndFrame) {
+            const double overshoot =
+                std::fmod(position - loopStartFrame, loopLengthFrames);
+            position = loopStartFrame +
+                (overshoot >= 0.0 ? overshoot : overshoot + loopLengthFrames);
+        }
+    };
+
     for (int frame = 0; frame < frames; ++frame) {
+        wrapLoopPosition();
         if (position >= static_cast<double>(trackFrames)) {
             position = static_cast<double>(trackFrames);
             reachedEnd = true;
@@ -284,6 +496,7 @@ void Deck::render(float* out, int frames)
         const double playbackRatio =
             std::clamp(ratio + impl_->jogRatio, 0.01, 4.0);
         position += playbackRatio;
+        wrapLoopPosition();
         impl_->jogRatio *= kJogDecayPerFrame;
         if (std::abs(impl_->jogRatio) < 1.0e-8)
             impl_->jogRatio = 0.0;
@@ -298,6 +511,8 @@ void Deck::render(float* out, int frames)
                       eqLow.load(std::memory_order_relaxed),
                       eqMid.load(std::memory_order_relaxed),
                       eqHigh.load(std::memory_order_relaxed));
+    impl_->djFilter.process(
+        out, frames, filter.load(std::memory_order_relaxed));
 
     const float channelGain =
         clampUnit(fader.load(std::memory_order_relaxed), 1.0f);
@@ -332,6 +547,18 @@ void Deck::seekSec(double sec)
     const double targetFrame = std::clamp(
         sec * static_cast<double>(kSampleRate), 0.0,
         static_cast<double>(std::max<int64_t>(frames, 0)));
+
+    if (loopActive.load(std::memory_order_acquire)) {
+        const double start = loopStartSec.load(std::memory_order_acquire);
+        const double end = loopEndSec.load(std::memory_order_acquire);
+        const double targetSec = targetFrame / static_cast<double>(kSampleRate);
+        if (!std::isfinite(start) || !std::isfinite(end) ||
+            targetSec < start || targetSec >= end) {
+            // External seeks outside an active loop use Serato-style exit:
+            // deactivate the loop but preserve its stored bounds.
+            loopActive.store(false, std::memory_order_release);
+        }
+    }
     impl_->positionFrames.store(targetFrame, std::memory_order_release);
 }
 

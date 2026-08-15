@@ -6,6 +6,52 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-15 (codex-audio3): **Loops, beat jump, DJ filter, master tap, and
+  FLX4 controls implemented in the engine.** Auto loops floor-snap to the
+  current native-grid beat (1/8..64 beats); manual IN/OUT snap to 1/8 beat;
+  active loops wrap per rendered frame under tempo resampling; half/double use
+  native track BPM. Beat jump rounds the current grid beat before applying the
+  signed offset and preserves play state. External seeks outside an active
+  loop deactivate it but retain its bounds. The post-EQ bipolar filter is a
+  second-order log-swept LPF/HPF with a 0.47..0.53 true-bypass dead-zone.
+  MasterRecorder is fed once per completed mix buffer after soft clipping.
+  FLX4 loop-section notes, Beat Jump pads, channel filter CCs, and active-loop
+  LEDs are mapped below.
+
+- 2026-08-15 (claude-ui3): **Loops/beat-jump UI, filter knobs, colored
+  overview, key display, master-record button.** DeckWidget gains a compact
+  single-row loop/beat-jump section below the hot cues (LOOP [1/2][1][2][4][8]
+  auto · [IN][OUT][EXIT] · [<½][2×>] · JUMP [◀8][◀4][◀1][1▶][4▶][8▶]); all
+  fire on pressed() via bus->dispatch(Origin::Ui) using
+  LoopAuto/LoopIn/LoopOut/LoopExit/LoopHalve/LoopDouble/BeatJump. The 30 Hz
+  refresh highlights (deck-accent) the matching auto-loop length button
+  (beats ≈ (end−start)·bpm/60, ±20% match) plus IN (pending start set) and
+  OUT (loop active). Loop region [loopStartSec,loopEndSec] is shaded in the
+  deck accent (~25% alpha active / dimmer when stored-but-inactive, brighter
+  edge lines) in BOTH the deck overview and the DetailWaveformView lanes;
+  the detail view's dirty check now watches the loop atomics so edits
+  repaint while paused. Deck overview waveform is now band-colored from
+  overviewLow/Mid/High (Theme.h waveLow/Mid/HighColor, unplayed part drawn
+  darker(190); gray/accent fallback when band vectors are empty). MixerWidget
+  strips gain a FILTER QDial after LOW (0..1, starts 0.5) dispatching
+  ControlId::Filter, mirrored from the bus under QSignalBlocker like the
+  other knobs; caption turns cyan <0.47 (LPF) / orange >0.53 (HPF) / gray at
+  center; double-click re-centers to 0.5 (event filter — the reset
+  dispatches like a user turn). Deck info line shows TrackData::camelotKey
+  before BPM ("8A · BPM 128.00 → 128.00"), re-checked each refresh tick so
+  async key analysis appears when ready. MainWindow now takes an ADDITIONAL
+  `MasterRecorder* rec = nullptr` parameter (before `parent`; existing
+  callers compile unchanged): when non-null, a "● REC MASTER" toggle button
+  sits on the status-bar LEFT — click starts rec->start("", &err) (error
+  shown in the status bar) / stops; state follows recordingChanged (red
+  button, text becomes "● MM:SS" elapsed via a 1 s timer using
+  recordedSec()); when rec == nullptr the button is never created.
+  Orchestrator: pass the recorder as the 8th MainWindow ctor arg and set
+  engine->masterTap. Verified: full build + link clean in build-ui3, all UI
+  TUs warning-clean; `--selftest` still shows the pre-existing concurrent
+  "player STILL ACTIVE" failure (no src/ui dependency). Only src/ui/* +
+  this file touched.
+
 - 2026-08-15 (claude-ui2): **UI restructured toward Serato DJ Pro parity.**
   New layout (top to bottom): Row 1 = Deck A | Deck B panels at exactly 1:1
   stretch (no center mixer column); each deck has a compact 44 px overview
@@ -84,11 +130,12 @@ FLX4 may or may not be plugged in — MidiEngine must never crash without it.
 |---|---|---|
 | control/ControlBus.* | orchestrator | DONE |
 | audio/{AudioEngine,Deck,Eq}.cpp | codex-audio | DONE |
-| analysis/{TrackData,BeatAnalyzer}.cpp, library/*.cpp | claude-analysis | DONE — decode/tags/fingerprint/beatgrid + library model/cache + TransitionStore (incl. gvt::matchTrack). Demo Track 1 → 128.0 BPM, Demo Track 2 → 120.0 BPM. tests/test_beats.cpp + tests/test_fingerprint.cpp pass standalone; ctest link pending peers' objects. 2026-08-15 (claude-analysis2): added Serato-style band waveform data — `TrackData::overviewLow/Mid/High` (per-512-frame-bin peak abs of one-pole-filtered mono: low <200 Hz, mid 200–2000, high >2000; all three normalized by one shared global max, always sized like overviewPeaks, silent→zeros/no NaN). Computed in loadAndAnalyzeTrack and recomputed from PCM on library cache hits via `detail::computeBandOverviews` (AnalysisInternal.h) — NOT stored in the JSON cache, cache format unchanged. Verified: TrackData.cpp.o + TrackLibrary.cpp.o compile warning-clean; standalone probe on Demo Track 1 prints 16166 bins per band, non-zero, sizes equal to overviewPeaks. |
+| analysis/{TrackData,BeatAnalyzer}.cpp, library/*.cpp | claude-analysis | DONE — decode/tags/fingerprint/beatgrid + library model/cache + TransitionStore (incl. gvt::matchTrack). Demo Track 1 → 128.0 BPM, Demo Track 2 → 120.0 BPM. tests/test_beats.cpp + tests/test_fingerprint.cpp pass standalone; ctest link pending peers' objects. 2026-08-15 (claude-analysis2): added Serato-style band waveform data — `TrackData::overviewLow/Mid/High` (per-512-frame-bin peak abs of one-pole-filtered mono: low <200 Hz, mid 200–2000, high >2000; all three normalized by one shared global max, always sized like overviewPeaks, silent→zeros/no NaN). Computed in loadAndAnalyzeTrack and recomputed from PCM on library cache hits via `detail::computeBandOverviews` (AnalysisInternal.h) — NOT stored in the JSON cache, cache format unchanged. Verified: TrackData.cpp.o + TrackLibrary.cpp.o compile warning-clean; standalone probe on Demo Track 1 prints 16166 bins per band, non-zero, sizes equal to overviewPeaks. 2026-08-15 (claude-key): musical key detection added — new src/analysis/KeyAnalyzer.{h,cpp} (`gvt::analyzeKey`: mono downmix, 4x decimate to 12 kHz, Hann+Goertzel chromagram C3..B6 with log compression + per-frame L1 norm over first 120 s, Krumhansl-Schmuckler major/minor correlation, Camelot mapping; ~0.4 s/track; empty fields if corr < 0.5 or degenerate). loadAndAnalyzeTrack fills `TrackData::camelotKey/keyName`; TrackLibrary caches both in the JSON and treats a missing "camelotKey" field as a cache MISS (pre-feature entries re-analyze once); model gained a Key column between BPM and Duration (shows camelotKey, right-aligned). KeyAnalyzer.cpp added to gvtcore in CMakeLists. Verified: all 4 TUs compile warning-clean (-Wall -Wextra); standalone probe detects — Can't Stop the Feeling: 8B/C (matches known C major), Demo Track 1: 7B/F, Demo Track 2: 4A/Fm, Pink Venom: 12B/E (published key is 1A/G#m — detector picks the neighboring E major, which shares 6 of 7 scale tones; known limitation). |
 | transitions/{GvtFormat,TransitionRecorder,TransitionPlayer}.cpp, tests | claude-transitions | DONE |
 | midi/{MidiEngine,Flx4Mapping}.cpp | codex-midi | DONE |
-| ui/*.cpp, app/* | claude-ui / claude-ui2 | DONE — Serato-parity restructure 2026-08-15 (see Current state above): equal deck halves + outer tempo sliders, new DetailWaveformView center lanes, horizontal mixer strip, press/release Cue + hot-cue dispatch, MainWindow::setTransitionEntryMarker. Original notes:  ui/{MainWindow,DeckWidget,MixerWidget,LibraryWidget,TransitionPanel,Theme}.h+cpp, app/main.cpp, app/SelfTest.h (declares `gvt::runSelfTest`; SelfTest.cpp is the orchestrator's). All 6 TUs + moc outputs compile warning-clean (-Wall -Wextra). Notes: (1) pinned TrackLibrary.h/TransitionEngine.h pImpl classes (TransitionStore/Recorder/Player) declare no destructor, so any TU destroying them fails to compile — main.cpp heap-allocates them with process lifetime as a workaround; header owners should add declared dtors (moc/mocs_compilation may hit the same issue). (2) `gvt::transitionPlayerSetMode` doesn't exist and `arm()` has no PlayerMode arg, so the TUTORIAL button is disabled ("coming soon"); tutorialPrompt/tutorialScored signals are wired (banner + accuracy toasts) and light up once the player emits them. (3) Hotcue clear writes `track->hotCues[i] = -1` directly (no Deck clear API). (4) UI mirrors Play state by polling `deck.playing` at 30 Hz; continuous controls mirror via bus events with QSignalBlocker. |
+| ui/*.cpp, app/* | claude-ui / claude-ui2 / claude-ui3 | DONE — 2026-08-15 (claude-ui3): loop/beat-jump row, loop-region shading (overview + detail lanes), FILTER knobs, band-colored deck overview, camelot key in the info line, MainWindow MasterRecorder* param + status-bar "● REC MASTER" button (see Current state above). Serato-parity restructure 2026-08-15 (see Current state above): equal deck halves + outer tempo sliders, new DetailWaveformView center lanes, horizontal mixer strip, press/release Cue + hot-cue dispatch, MainWindow::setTransitionEntryMarker. Original notes:  ui/{MainWindow,DeckWidget,MixerWidget,LibraryWidget,TransitionPanel,Theme}.h+cpp, app/main.cpp, app/SelfTest.h (declares `gvt::runSelfTest`; SelfTest.cpp is the orchestrator's). All 6 TUs + moc outputs compile warning-clean (-Wall -Wextra). Notes: (1) pinned TrackLibrary.h/TransitionEngine.h pImpl classes (TransitionStore/Recorder/Player) declare no destructor, so any TU destroying them fails to compile — main.cpp heap-allocates them with process lifetime as a workaround; header owners should add declared dtors (moc/mocs_compilation may hit the same issue). (2) `gvt::transitionPlayerSetMode` doesn't exist and `arm()` has no PlayerMode arg, so the TUTORIAL button is disabled ("coming soon"); tutorialPrompt/tutorialScored signals are wired (banner + accuracy toasts) and light up once the player emits them. (3) Hotcue clear writes `track->hotCues[i] = -1` directly (no Deck clear API). (4) UI mirrors Play state by polling `deck.playing` at 30 Hz; continuous controls mirror via bus events with QSignalBlocker. |
 | integration/selftest | orchestrator | DONE — see Verification below |
+| audio/MasterRecorder.cpp (+ pinned .h), tests/test_masterrec.cpp | claude-recmaster | DONE 2026-08-15 — master WAV recorder: feed() is audio-thread lock-free (SPSC ring, 2^18 floats ≈ 2.7 s, atomic head/tail acq/rel; full ring drops the whole chunk + atomic counter, qWarning once on stop). Worker std::thread drains every 10 ms → 16-bit LE PCM; start("") resolves ~/Music/Gravitino/Recordings/gravitino-YYYYMMDD-HHMMSS.wav (dirs created), placeholder 44-byte header (16-bit/2ch/48k) patched with RIFF/data sizes on stop(). stop() clears the atomic 'active' gate BEFORE joining, so concurrent feed() at worst writes into the still-allocated ring. recordedSec() from atomic frame counter; recordingChanged(bool,path) emitted on start/stop; dtor stops cleanly. Added to gvtcore in CMakeLists (add-only). Verified: MasterRecorder.cpp.o compiles clean in build-rec; test_masterrec built standalone (MasterRecorder.cpp + moc + QtCore, -Wall -Wextra clean) and passes: "test_masterrec OK: 2.000 s recorded, 384000 data bytes, peak 16384" (2 s of 440 Hz sine, header validated 16-bit/2ch/48k, data size exact, 0 drops). ctest picks it up via the tests glob once peers' objects link. NOT yet wired into AudioEngine/UI — orchestrator: call feed() from the master render output after the limiter. |
 
 ### DDJ-FLX4 MIDI messages mapped
 
@@ -110,14 +157,24 @@ the completed value on receipt of the LSB. Deck A/B below are ControlBus deck
 | EQ HI, 14-bit | A / B | `B0/B1 07 mm`, then `B0/B1 27 ll` | `EqHigh = raw / 3FFF` |
 | EQ MID, 14-bit | A / B | `B0/B1 0B mm`, then `B0/B1 2B ll` | `EqMid = raw / 3FFF` |
 | EQ LOW, 14-bit | A / B | `B0/B1 0F mm`, then `B0/B1 2F ll` | `EqLow = raw / 3FFF` |
+| FILTER, 14-bit | A | `B6 17 mm`, then `B6 37 ll` | `Filter = raw / 3FFF`; center `2000` is bypass, left is LPF, right is HPF |
+| FILTER, 14-bit | B | `B6 18 mm`, then `B6 38 ll` | `Filter = raw / 3FFF`; center `2000` is bypass, left is LPF, right is HPF |
 | Crossfader, 14-bit | Global | `B6 1F mm`, then `B6 3F ll` | `Crossfader = raw / 3FFF`; `0000` = full left/deck A, `3FFF` = full right/deck B |
 | Jog side / platter (vinyl on / vinyl off) | A / B | `B0/B1 21/22/23 vv` | `Jog = signed(vv - 40)` ticks; `41` = +1 clockwise, `3F` = -1 counterclockwise, `40` ignored; all modes nudge for MVP |
+| LOOP IN | A / B | `90/91 10 hh` | Nonzero press → `LoopIn`; active-loop LED output `90/91 10 7F/00` |
+| LOOP OUT | A / B | `90/91 11 hh` | Nonzero press → `LoopOut`; active-loop LED output `90/91 11 7F/00` |
+| 4 BEAT / EXIT | A / B | `90/91 4D hh` | Nonzero press → `LoopAuto=4.0` when inactive, `LoopExit` when active; LED `90/91 4D 7F/00` |
+| SHIFT + 4 BEAT / EXIT | A / B | `90/91 50 hh` | Nonzero press → `LoopExit`; modifier-state LED mirrors active state |
+| CUE/LOOP CALL left / right | A / B | `90/91 51 hh` / `90/91 53 hh` | Nonzero press → `LoopHalve` / `LoopDouble` |
+| SHIFT + LOOP IN / OUT (1/2X / 2X alternate) | A / B | `90/91 4C hh` / `90/91 4E hh` | Nonzero press → `LoopHalve` / `LoopDouble`; modifier-state LEDs mirror active state |
+| Beat-jump pads 1–8 (BEAT JUMP mode) | A / B | `97/99 20..27 hh` | Nonzero presses → `BeatJump=-1,+1,-2,+2,-4,+4,-8,+8`; releases ignored |
 
 PLAY and BEAT SYNC releases remain press-only and are ignored. CUE and hot-cue
 releases are dispatched so hold-preview and future pad-release behavior reach
-the deck. LED state is sent only for non-MIDI-origin bus events to prevent
-feedback loops; cached play, cue-point, and hot-cue state is reconciled against
-the engine and restored when the output port reconnects.
+the deck. Play/cue/hot-cue LED state is sent for non-MIDI-origin bus events;
+loop LEDs also update after MIDI-origin state changes because the combined
+4 BEAT/EXIT action is host-resolved. Cached play, cue-point, loop-active, and
+hot-cue state is reconciled against the engine and restored on output reconnect.
 
 ### Transport semantics
 

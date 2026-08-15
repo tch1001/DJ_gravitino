@@ -3,6 +3,7 @@
 #include "../control/ControlBus.h"
 
 class QDial;
+class QLabel;
 class QSlider;
 
 namespace gvt {
@@ -17,6 +18,10 @@ class MixerWidget : public QWidget {
 public:
     explicit MixerWidget(ControlBus* bus, QWidget* parent = nullptr);
 
+protected:
+    // Double-click on a FILTER dial re-centers it to 0.5 (off).
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private slots:
     void onBusEvent(const gvt::ControlEvent& e, gvt::Origin origin);
 
@@ -26,10 +31,13 @@ private:
         QDial* eqHigh = nullptr;
         QDial* eqMid = nullptr;
         QDial* eqLow = nullptr;
+        QDial* filter = nullptr;
+        QLabel* filterLabel = nullptr;
         QSlider* fader = nullptr;
     };
     QWidget* buildStrip(int deck);
     void wireDial(QDial* d, int deck, ControlId id, double initial);
+    void updateFilterLabel(int deck, double value);
 
     ControlBus* bus_;
     Strip strips_[2];

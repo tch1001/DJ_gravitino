@@ -23,8 +23,10 @@ add_library(gvtcore STATIC
     src/audio/AudioEngine.cpp
     src/audio/Deck.cpp
     src/audio/Eq.cpp
+    src/audio/MasterRecorder.cpp
     src/analysis/TrackData.cpp
     src/analysis/BeatAnalyzer.cpp
+    src/analysis/KeyAnalyzer.cpp
     src/library/TrackLibrary.cpp
     src/library/TransitionStore.cpp
     src/transitions/GvtFormat.cpp

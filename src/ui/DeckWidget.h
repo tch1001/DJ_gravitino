@@ -52,6 +52,7 @@ private slots:
 private:
     void dispatch(ControlId id, double value = 1.0);
     void syncHotCueButtons();
+    void syncLoopButtons();
 
     int deckIndex_;
     ControlBus* bus_;
@@ -68,6 +69,18 @@ private:
     QPushButton* syncBtn_ = nullptr;
     QSlider* tempoSlider_ = nullptr;
     QPushButton* hotcueBtns_[8] = {};
+
+    // Loop / beat-jump row (below the hot cues).
+    static constexpr double kAutoLoopBeats[5] = {0.5, 1, 2, 4, 8};
+    QPushButton* autoLoopBtns_[5] = {};
+    QPushButton* loopInBtn_ = nullptr;
+    QPushButton* loopOutBtn_ = nullptr;
+    QPushButton* loopExitBtn_ = nullptr;
+    // Cached loop-highlight state so refresh() only restyles on change:
+    // -2 = none, -1 = manual/non-standard length, 0..4 = kAutoLoopBeats idx.
+    int shownLoopLenIdx_ = -2;
+    bool shownLoopIn_ = false, shownLoopActive_ = false;
+
     QTimer* timer_ = nullptr;
 };
 

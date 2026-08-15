@@ -8,7 +8,7 @@ namespace gvt {
 
 // Scans a folder for .mp3, analyzes in background threads, caches analysis
 // (bpm/grid/fingerprint/hotcues) as JSON in ~/.gravitino/cache/.
-// Columns: Title, Artist, BPM, Duration, Status.
+// Columns: Title, Artist, BPM, Key, Duration, Status.
 class TrackLibrary : public QAbstractTableModel {
     Q_OBJECT
 public:

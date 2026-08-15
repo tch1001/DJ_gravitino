@@ -5,6 +5,7 @@
 #include "../audio/AudioEngine.h"
 #include "../control/ControlBus.h"
 #include "../library/TrackLibrary.h"
+#include "../audio/MasterRecorder.h"
 #include "../midi/MidiEngine.h"
 #include "../transitions/TransitionEngine.h"
 #include "../ui/MainWindow.h"
@@ -40,11 +41,14 @@ int main(int argc, char** argv)
     auto* player = new gvt::TransitionPlayer(bus, engine);
     auto* midi = new gvt::MidiEngine(bus, engine);
     midi->start();
+    auto* masterRec = new gvt::MasterRecorder;
+    engine->masterTap.store(masterRec);
 
     QString audioError;
     const bool audioOk = engine->start(&audioError);
 
-    gvt::MainWindow win(bus, engine, library, store, recorder, player, midi);
+    gvt::MainWindow win(bus, engine, library, store, recorder, player, midi,
+                        masterRec);
     win.show();
 
     // Dev flag: --autoload "<substr for deck A>" "<substr for deck B>" loads

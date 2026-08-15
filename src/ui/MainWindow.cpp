@@ -6,8 +6,11 @@
 #include "MixerWidget.h"
 #include "Theme.h"
 #include "TransitionPanel.h"
+#include "../audio/MasterRecorder.h"
 
 #include <QDesktopServices>
+#include <QPushButton>
+#include <QTimer>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -78,9 +81,9 @@ QScrollBar { background: #16181d; }
 MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
                        TrackLibrary* library, TransitionStore* store,
                        TransitionRecorder* recorder, TransitionPlayer* player,
-                       MidiEngine* midi, QWidget* parent)
+                       MidiEngine* midi, MasterRecorder* rec, QWidget* parent)
     : QMainWindow(parent), bus_(bus), engine_(engine), library_(library),
-      store_(store), midi_(midi)
+      store_(store), midi_(midi), rec_(rec)
 {
     setWindowTitle(tr("Gravitino DJ"));
     setMinimumSize(1200, 720);
@@ -130,6 +133,28 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
                          &MainWindow::openTransitionsFolder);
     QMenu* helpMenu = menuBar()->addMenu(tr("&Help"));
     helpMenu->addAction(tr("About Gravitino"), this, &MainWindow::about);
+
+    // Status-bar LEFT: master-record toggle (hidden when no recorder was
+    // provided — the button is simply never created).
+    if (rec_) {
+        recBtn_ = new QPushButton(tr("● REC MASTER"));
+        recBtn_->setToolTip(
+            tr("Record the master output to a WAV file"));
+        recBtn_->setCursor(Qt::PointingHandCursor);
+        statusBar()->addWidget(recBtn_); // left side
+        connect(recBtn_, &QPushButton::clicked, this,
+                &MainWindow::onRecClicked);
+        connect(rec_, &MasterRecorder::recordingChanged, this,
+                &MainWindow::onRecordingChanged);
+        recTimer_ = new QTimer(this);
+        recTimer_->setInterval(1000);
+        connect(recTimer_, &QTimer::timeout, this, [this] {
+            const int s = (int)rec_->recordedSec();
+            recBtn_->setText(
+                QString::asprintf("● %02d:%02d", s / 60, s % 60));
+        });
+        onRecordingChanged(rec_->isRecording(), rec_->currentPath());
+    }
 
     // Status bar: MIDI indicator, sample rate, transient messages.
     midiLabel_ = new QLabel;
@@ -191,6 +216,45 @@ void MainWindow::onMidiConnection(bool connected, const QString& name)
         midiLabel_->setText(tr("no controller — plug in any time"));
         midiLabel_->setStyleSheet(
             QStringLiteral("color:%1;").arg(themeDimText().name()));
+    }
+}
+
+void MainWindow::onRecClicked()
+{
+    if (!rec_) return;
+    if (rec_->isRecording()) {
+        rec_->stop();
+        return;
+    }
+    QString err;
+    if (!rec_->start(QString(), &err))
+        statusBar()->showMessage(
+            tr("Master recording failed: %1").arg(err), 6000);
+    // Button state follows recordingChanged, not the click.
+}
+
+void MainWindow::onRecordingChanged(bool active, const QString& path)
+{
+    if (!recBtn_) return;
+    if (active) {
+        recBtn_->setText(QStringLiteral("● 00:00"));
+        recBtn_->setStyleSheet(
+            "QPushButton { background:#c8322e; color:white; "
+            "font-weight:bold; }");
+        recBtn_->setToolTip(tr("Recording master → %1 — click to stop")
+                                .arg(path));
+        recTimer_->start();
+        statusBar()->showMessage(tr("Recording master → %1").arg(path),
+                                 4000);
+    } else {
+        recTimer_->stop();
+        recBtn_->setText(tr("● REC MASTER"));
+        recBtn_->setStyleSheet(QString());
+        recBtn_->setToolTip(
+            tr("Record the master output to a WAV file"));
+        if (!path.isEmpty())
+            statusBar()->showMessage(tr("Saved recording: %1").arg(path),
+                                     6000);
     }
 }
 

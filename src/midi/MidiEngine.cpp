@@ -322,6 +322,16 @@ struct MidiEngine::Impl {
             event.id = wasPlaying ? ControlId::Stop : ControlId::Play;
         }
 
+        if (event.deck >= 0 && event.deck < 2 &&
+            event.id == ControlId::LoopAuto && engine != nullptr &&
+            engine->deck(event.deck).loopActive.load(
+                std::memory_order_relaxed)) {
+            // The FLX4 exposes one combined 4 BEAT/EXIT button. Its note is
+            // state-independent, so resolve the action against engine truth.
+            event.id = ControlId::LoopExit;
+            event.value = 1.0;
+        }
+
         ControlBus* const targetBus = bus;
         if (targetBus == nullptr) {
             return;
@@ -370,6 +380,22 @@ struct MidiEngine::Impl {
             return;
         }
 
+        if (event.id == ControlId::LoopIn ||
+            event.id == ControlId::LoopOut ||
+            event.id == ControlId::LoopExit ||
+            event.id == ControlId::LoopHalve ||
+            event.id == ControlId::LoopDouble ||
+            event.id == ControlId::LoopAuto) {
+            const bool actual = engine != nullptr &&
+                engine->deck(event.deck).loopActive.load(
+                    std::memory_order_relaxed);
+            const bool changed = loopActive[deck] != actual;
+            loopActive[deck] = actual;
+            if (mirrorToController || changed)
+                sendLoopLeds(event.deck, actual);
+            return;
+        }
+
         const auto idValue = static_cast<unsigned int>(event.id);
         const auto firstHotCue = static_cast<unsigned int>(ControlId::HotCue1);
         const auto lastHotCue = static_cast<unsigned int>(ControlId::HotCue8);
@@ -409,6 +435,18 @@ struct MidiEngine::Impl {
         }
     }
 
+    void sendLoopLeds(DeckId deck, bool on) noexcept
+    {
+        sendLed(deck, ControlId::LoopIn, on);
+        sendLed(deck, ControlId::LoopOut, on);
+        sendLed(deck, ControlId::LoopExit, on);
+        // Mirror the modifier-specific note numbers too. The FLX4 uses the
+        // same physical LEDs but addresses them separately while SHIFT is held.
+        sendLed(deck, ControlId::LoopHalve, on);
+        sendLed(deck, ControlId::LoopDouble, on);
+        sendLed(deck, ControlId::LoopAuto, on);
+    }
+
     // Cached deck state can drift from the engine (deck stops itself at EOF,
     // tracks load outside the bus, and cue/hot-cue LEDs represent stored
     // points rather than momentary button state).
@@ -436,6 +474,14 @@ struct MidiEngine::Impl {
                 cue[index] = actualCue;
                 if (connected)
                     sendLed(deck, ControlId::Cue, actualCue);
+            }
+
+            const bool actualLoop =
+                engine->deck(deck).loopActive.load(std::memory_order_relaxed);
+            if (loopActive[index] != actualLoop) {
+                loopActive[index] = actualLoop;
+                if (connected)
+                    sendLoopLeds(deck, actualLoop);
             }
 
             const TrackDataPtr currentTrack = engine->deck(deck).track();
@@ -466,6 +512,8 @@ struct MidiEngine::Impl {
                     std::memory_order_relaxed);
                 cue[index] = engine->deck(deck).cuePointSec.load(
                     std::memory_order_relaxed) >= 0.0;
+                loopActive[index] = engine->deck(deck).loopActive.load(
+                    std::memory_order_relaxed);
 
                 const TrackDataPtr currentTrack = engine->deck(deck).track();
                 for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
@@ -479,6 +527,7 @@ struct MidiEngine::Impl {
                 deck, ControlId::Play,
                 playing[index].load(std::memory_order_relaxed));
             sendLed(deck, ControlId::Cue, cue[index]);
+            sendLoopLeds(deck, loopActive[index]);
 
             for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
                 const auto id = static_cast<ControlId>(
@@ -500,6 +549,7 @@ struct MidiEngine::Impl {
     QString connectedOutputName;
     std::array<std::atomic_bool, 2> playing {};
     std::array<bool, 2> cue {};
+    std::array<bool, 2> loopActive {};
     std::array<std::array<bool, 8>, 2> hotCue {};
 };
 

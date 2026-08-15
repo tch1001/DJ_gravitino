@@ -56,7 +56,10 @@ DetailWaveformView::DetailWaveformView(AudioEngine* engine, QWidget* parent)
             TrackDataPtr t = deck.track();
             double pos = deck.positionSec();
             if (deck.playing.load() || pos != lastPaintPos_[d] ||
-                t.get() != lastTrack_[d])
+                t.get() != lastTrack_[d] ||
+                deck.loopStartSec.load() != lastLoopStart_[d] ||
+                deck.loopEndSec.load() != lastLoopEnd_[d] ||
+                deck.loopActive.load() != lastLoopActive_[d])
                 dirty = true;
         }
         if (dirty) update();
@@ -153,6 +156,9 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
         p.setPen(themeDimText());
         p.drawText(r, Qt::AlignCenter, tr("no track loaded"));
         lastPaintPos_[deck] = -1.0;
+        lastLoopStart_[deck] = d.loopStartSec.load();
+        lastLoopEnd_[deck] = d.loopEndSec.load();
+        lastLoopActive_[deck] = d.loopActive.load();
         return;
     }
 
@@ -223,6 +229,32 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
     auto xForSec = [&](double sec) {
         return r.left() + (int)std::lround((sec - leftSec) / secPerPx);
     };
+
+    // Loop region: deck-accent shading between loopStartSec/loopEndSec —
+    // ~25% alpha while active, dimmer when bounds are stored but inactive —
+    // with brighter edge lines.
+    {
+        const double ls = d.loopStartSec.load();
+        const double le = d.loopEndSec.load();
+        const bool active = d.loopActive.load();
+        lastLoopStart_[deck] = ls;
+        lastLoopEnd_[deck] = le;
+        lastLoopActive_[deck] = active;
+        const double rightSec = leftSec + windowSec_;
+        if (ls >= 0.0 && le > ls && ls < rightSec && le > leftSec) {
+            const int x0 = std::max(r.left(), xForSec(ls));
+            const int x1 = std::min(r.right(), xForSec(le));
+            QColor fill = accent;
+            fill.setAlpha(active ? 64 : 28);
+            p.fillRect(QRect(x0, r.top(), std::max(1, x1 - x0), r.height()),
+                       fill);
+            QColor edge = accent.lighter(140);
+            edge.setAlpha(active ? 230 : 110);
+            p.setPen(QPen(edge, 1));
+            if (ls >= leftSec) p.drawLine(x0, r.top(), x0, r.bottom());
+            if (le <= rightSec) p.drawLine(x1, r.top(), x1, r.bottom());
+        }
+    }
 
     // Beatgrid: one tick per beat, stronger every 4 (downbeat).
     if (t->bpm > 0.0) {

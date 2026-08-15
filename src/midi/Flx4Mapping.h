@@ -39,6 +39,7 @@ private:
     std::array<FourteenBitState, 2> eqHigh_ {};
     std::array<FourteenBitState, 2> eqMid_ {};
     std::array<FourteenBitState, 2> eqLow_ {};
+    std::array<FourteenBitState, 2> filter_ {};
     FourteenBitState crossfader_ {};
 };
 

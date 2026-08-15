@@ -44,6 +44,10 @@ private:
     double transitionEntrySec_[2] = {-1.0, -1.0};
     double lastPaintPos_[2] = {-1.0, -1.0};
     const void* lastTrack_[2] = {nullptr, nullptr};
+    // Last-painted loop state, so loop edits repaint even while paused.
+    double lastLoopStart_[2] = {-2.0, -2.0};
+    double lastLoopEnd_[2] = {-2.0, -2.0};
+    bool lastLoopActive_[2] = {false, false};
     QTimer* timer_ = nullptr;
     QToolButton* zoomInBtn_ = nullptr;
     QToolButton* zoomOutBtn_ = nullptr;

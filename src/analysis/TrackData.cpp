@@ -4,6 +4,7 @@
 
 #include "TrackData.h"
 #include "AnalysisInternal.h"
+#include "KeyAnalyzer.h"
 
 #include "../../third_party/miniaudio.h"  // impl compiled in third_party/miniaudio_impl.c
 
@@ -179,6 +180,12 @@ TrackDataPtr loadAndAnalyzeTrack(const QString& mp3Path, QString* error)
         t->bpm = ba.bpm;
         t->firstBeatSec = ba.firstBeatSec;
     } // else leave bpm = 0 (track still usable, no grid)
+
+    const KeyResult key = analyzeKey(t->pcm.data(), t->frameCount(), kSampleRate);
+    if (key.ok) {
+        t->camelotKey = key.camelotKey;
+        t->keyName = key.keyName;
+    } // else leave both empty (unknown key)
 
     return t;
 }

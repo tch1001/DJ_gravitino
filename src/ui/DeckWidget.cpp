@@ -32,6 +32,11 @@ static double sliderToRatio(int v)
     return 1.0 + (double)v / kTempoSteps * kTempoRange;
 }
 
+// Base style for the compact loop/beat-jump buttons; the "lit" highlight
+// styles append a background to this so the compact metrics survive.
+static constexpr const char* kLoopBtnBase =
+    "QPushButton { padding: 1px 3px; font-size: 9px; }";
+
 static QString formatTime(double sec)
 {
     if (sec < 0) sec = 0;
@@ -89,18 +94,78 @@ void WaveformView::paintEvent(QPaintEvent*)
     }
 
     // Vertical peak bars: max of the bins covered by each pixel column.
+    // Band-colored (low/mid/high, same palette as DetailWaveformView) when
+    // the analysis filled overviewLow/Mid/High; gray/accent fallback else.
+    // The unplayed part is drawn dimmed so progress stays readable.
+    const auto& lowB = t->overviewLow;
+    const auto& midB = t->overviewMid;
+    const auto& highB = t->overviewHigh;
+    const bool banded = !lowB.empty() && lowB.size() == midB.size() &&
+                        lowB.size() == highB.size();
+    const int nb = banded ? (int)lowB.size() : n;
     const int mid = h / 2;
     const QColor unplayed(0x6a, 0x70, 0x7d);
+    const QColor lowC = waveLowColor(), midC = waveMidColor(),
+                 highC = waveHighColor();
+    const QColor lowD = lowC.darker(190), midD = midC.darker(190),
+                 highD = highC.darker(190);
     for (int x = 0; x < w; ++x) {
-        int i0 = (int)((int64_t)x * n / w);
-        int i1 = (int)((int64_t)(x + 1) * n / w);
+        int i0 = (int)((int64_t)x * nb / w);
+        int i1 = (int)((int64_t)(x + 1) * nb / w);
         i1 = std::max(i1, i0 + 1);
-        float peak = 0.0f;
-        for (int i = i0; i < i1 && i < n; ++i)
-            peak = std::max(peak, peaks[i]);
-        int half = std::max(1, (int)(peak * (h / 2 - 3)));
-        p.setPen(x <= playedX ? accent : unplayed);
-        p.drawLine(x, mid - half, x, mid + half);
+        const bool played = x <= playedX;
+        if (banded) {
+            float l = 0, m = 0, hi = 0;
+            for (int i = i0; i < i1 && i < nb; ++i) {
+                l = std::max(l, lowB[i]);
+                m = std::max(m, midB[i]);
+                hi = std::max(hi, highB[i]);
+            }
+            const int lh = (int)(l * (h / 2 - 3));
+            const int mh = (int)(m * (h / 2 - 3));
+            const int hh = (int)(hi * (h / 2 - 3));
+            if (lh > 0) { // low tallest in back, high in front
+                p.setPen(played ? lowC : lowD);
+                p.drawLine(x, mid - lh, x, mid + lh);
+            }
+            if (mh > 0) {
+                p.setPen(played ? midC : midD);
+                p.drawLine(x, mid - mh, x, mid + mh);
+            }
+            if (hh > 0) {
+                p.setPen(played ? highC : highD);
+                p.drawLine(x, mid - hh, x, mid + hh);
+            }
+        } else {
+            float peak = 0.0f;
+            for (int i = i0; i < i1 && i < nb; ++i)
+                peak = std::max(peak, peaks[i]);
+            int half = std::max(1, (int)(peak * (h / 2 - 3)));
+            p.setPen(played ? accent : unplayed);
+            p.drawLine(x, mid - half, x, mid + half);
+        }
+    }
+
+    // Loop region: accent shading between loopStartSec/loopEndSec —
+    // ~25% alpha while active, dimmer when bounds are set but inactive —
+    // with brighter edge lines.
+    {
+        const double ls = deck_->loopStartSec.load();
+        const double le = deck_->loopEndSec.load();
+        const bool active = deck_->loopActive.load();
+        if (ls >= 0.0 && le > ls && ls < t->durationSec) {
+            const int x0 = (int)(ls / t->durationSec * w);
+            const int x1 = (int)(std::min(le, t->durationSec) /
+                                 t->durationSec * w);
+            QColor fill = accent;
+            fill.setAlpha(active ? 64 : 28);
+            p.fillRect(QRect(x0, 0, std::max(1, x1 - x0), h), fill);
+            QColor edge = accent.lighter(140);
+            edge.setAlpha(active ? 230 : 110);
+            p.setPen(QPen(edge, 1));
+            p.drawLine(x0, 0, x0, h);
+            p.drawLine(x1, 0, x1, h);
+        }
     }
 
     // Cue point marker (Deck::cuePointSec) — small accent notch.
@@ -266,6 +331,72 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     }
     cues->setColumnStretch(4, 1);
     mainCol->addLayout(cues);
+
+    // Loop / beat-jump section: one compact row below the hot cues.
+    // [1/2][1][2][4][8] auto-loop · [IN][OUT][EXIT] manual · [<½][2×>]
+    // resize · [◀8][◀4][◀1][1▶][4▶][8▶] beat jump. All fire on press via
+    // the bus; active loop length + IN/OUT state highlighted from refresh().
+    auto* loopRow = new QHBoxLayout;
+    loopRow->setSpacing(2);
+    auto mkLoopBtn = [&](const QString& text, const QString& tip) {
+        auto* b = new QPushButton(text, this);
+        b->setFixedHeight(18);
+        b->setMinimumWidth(24);
+        b->setStyleSheet(QString::fromLatin1(kLoopBtnBase));
+        b->setToolTip(tip);
+        b->setFocusPolicy(Qt::NoFocus);
+        loopRow->addWidget(b);
+        return b;
+    };
+    auto mkGroupLabel = [&](const QString& text) {
+        auto* l = new QLabel(text, this);
+        l->setStyleSheet(QStringLiteral("color:%1; font-size:8px;")
+                             .arg(themeDimText().name()));
+        loopRow->addWidget(l);
+    };
+    mkGroupLabel(tr("LOOP"));
+    static const char* kAutoTexts[5] = {"1/2", "1", "2", "4", "8"};
+    for (int i = 0; i < 5; ++i) {
+        const double beats = kAutoLoopBeats[i];
+        autoLoopBtns_[i] = mkLoopBtn(
+            QLatin1String(kAutoTexts[i]),
+            tr("Auto loop %1 beat(s)").arg(beats));
+        connect(autoLoopBtns_[i], &QPushButton::pressed, this,
+                [this, beats] { dispatch(ControlId::LoopAuto, beats); });
+    }
+    loopRow->addSpacing(5);
+    loopInBtn_ = mkLoopBtn(tr("IN"), tr("Set loop in point"));
+    loopOutBtn_ = mkLoopBtn(tr("OUT"), tr("Set loop out point + activate"));
+    loopExitBtn_ = mkLoopBtn(tr("EXIT"), tr("Exit the active loop"));
+    connect(loopInBtn_, &QPushButton::pressed, this,
+            [this] { dispatch(ControlId::LoopIn); });
+    connect(loopOutBtn_, &QPushButton::pressed, this,
+            [this] { dispatch(ControlId::LoopOut); });
+    connect(loopExitBtn_, &QPushButton::pressed, this,
+            [this] { dispatch(ControlId::LoopExit); });
+    loopRow->addSpacing(5);
+    auto* halveBtn = mkLoopBtn(QStringLiteral("<½"), tr("Halve loop length"));
+    auto* doubleBtn = mkLoopBtn(QStringLiteral("2×>"),
+                                tr("Double loop length"));
+    connect(halveBtn, &QPushButton::pressed, this,
+            [this] { dispatch(ControlId::LoopHalve); });
+    connect(doubleBtn, &QPushButton::pressed, this,
+            [this] { dispatch(ControlId::LoopDouble); });
+    loopRow->addSpacing(7);
+    mkGroupLabel(tr("JUMP"));
+    static const struct { const char* text; double beats; } kJumps[6] = {
+        {"◀8", -8}, {"◀4", -4}, {"◀1", -1},
+        {"1▶", 1},  {"4▶", 4},  {"8▶", 8},
+    };
+    for (const auto& j : kJumps) {
+        auto* b = mkLoopBtn(QString::fromUtf8(j.text),
+                            tr("Beat jump %1 beats").arg(j.beats));
+        const double beats = j.beats;
+        connect(b, &QPushButton::pressed, this,
+                [this, beats] { dispatch(ControlId::BeatJump, beats); });
+    }
+    loopRow->addStretch(1);
+    mainCol->addLayout(loopRow);
     mainCol->addStretch(1);
 
     // Narrow vertical tempo slider column.
@@ -360,13 +491,57 @@ void DeckWidget::syncHotCueButtons()
     }
 }
 
+void DeckWidget::syncLoopButtons()
+{
+    Deck& deck = engine_->deck(deckIndex_);
+    TrackDataPtr t = deck.track();
+    const bool active = deck.loopActive.load();
+    const double start = deck.loopStartSec.load();
+    const double end = deck.loopEndSec.load();
+    const bool inSet = start >= 0.0;
+
+    // Active loop length in beats ≈ (end-start)*bpm/60, matched to the
+    // nearest standard auto-loop size (±20% tolerance).
+    int lenIdx = -2;
+    if (active && t && t->bpm > 0.0 && end > start) {
+        const double beats = (end - start) * t->bpm / 60.0;
+        lenIdx = -1;
+        for (int i = 0; i < 5; ++i) {
+            if (std::abs(beats / kAutoLoopBeats[i] - 1.0) < 0.2) {
+                lenIdx = i;
+                break;
+            }
+        }
+    }
+    if (lenIdx == shownLoopLenIdx_ && inSet == shownLoopIn_ &&
+        active == shownLoopActive_)
+        return;
+    shownLoopLenIdx_ = lenIdx;
+    shownLoopIn_ = inSet;
+    shownLoopActive_ = active;
+
+    const QString base = QString::fromLatin1(kLoopBtnBase);
+    const QString lit =
+        base + QStringLiteral("QPushButton { background:%1; color:black; "
+                              "font-weight:bold; }")
+                   .arg(deckAccent(deckIndex_).name());
+    for (int i = 0; i < 5; ++i)
+        autoLoopBtns_[i]->setStyleSheet(i == lenIdx ? lit : base);
+    loopInBtn_->setStyleSheet(inSet ? lit : base);
+    loopOutBtn_->setStyleSheet(active ? lit : base);
+    waveform_->update(); // loop region may have (dis)appeared while paused
+}
+
 void DeckWidget::trackChanged()
 {
     TrackDataPtr t = engine_->deck(deckIndex_).track();
     if (t) {
         titleLabel_->setText(t->title.isEmpty() ? t->filePath : t->title);
         artistLabel_->setText(t->artist);
-        bpmLabel_->setText(QString::asprintf("BPM %.2f", t->bpm));
+        const QString key = t->camelotKey.isEmpty()
+                                ? QString()
+                                : t->camelotKey + QStringLiteral(" · ");
+        bpmLabel_->setText(key + QString::asprintf("BPM %.2f", t->bpm));
     } else {
         titleLabel_->setText(tr("—"));
         artistLabel_->clear();
@@ -417,8 +592,13 @@ void DeckWidget::refresh()
         timeLabel_->setText(formatTime(pos) + " / -" +
                             formatTime(t->durationSec - pos));
         double eff = deck.effectiveBpm();
+        // Camelot key next to BPM ("8A · BPM 128.00 → 128.00") — the key is
+        // filled in asynchronously by analysis, so re-check every tick.
+        const QString key = t->camelotKey.isEmpty()
+                                ? QString()
+                                : t->camelotKey + QStringLiteral(" · ");
         bpmLabel_->setText(
-            QString::asprintf("BPM %.2f → %.2f", t->bpm, eff));
+            key + QString::asprintf("BPM %.2f → %.2f", t->bpm, eff));
         // Mirror the engine's tempo ratio when we're not dragging.
         if (!tempoSlider_->isSliderDown()) {
             int sv = ratioToSlider(deck.tempoRatio.load());
@@ -434,6 +614,7 @@ void DeckWidget::refresh()
     } else {
         timeLabel_->setText(tr("0:00.0 / -0:00.0"));
     }
+    syncLoopButtons();
 }
 
 } // namespace gvt
