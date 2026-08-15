@@ -12,6 +12,8 @@ constexpr std::uint8_t kControlChange = 0xB0;
 
 constexpr std::uint8_t kDeck1Channel = 0x00;
 constexpr std::uint8_t kDeck2Channel = 0x01;
+constexpr std::uint8_t kFxChannel1 = 0x04;
+constexpr std::uint8_t kFxChannel2 = 0x05;
 constexpr std::uint8_t kMixerChannel = 0x06;
 constexpr std::uint8_t kDeck1HotCueChannel = 0x07;
 constexpr std::uint8_t kDeck2HotCueChannel = 0x09;
@@ -29,6 +31,13 @@ constexpr std::uint8_t kShiftLoopHalveNote = 0x4C;
 constexpr std::uint8_t kShiftLoopDoubleNote = 0x4E;
 constexpr std::uint8_t kBeatJumpPadFirstNote = 0x20;
 constexpr std::uint8_t kBeatJumpPadLastNote = 0x27;
+constexpr std::uint8_t kBeatFxAssignDeck1Note = 0x10;
+constexpr std::uint8_t kBeatFxAssignDeck2Note = 0x11;
+constexpr std::uint8_t kBeatFxOnNote = 0x47;
+constexpr std::uint8_t kBeatFxLeftNote = 0x4A;
+constexpr std::uint8_t kBeatFxRightNote = 0x4B;
+constexpr std::uint8_t kBeatFxSelectNextNote = 0x63;
+constexpr std::uint8_t kBeatFxSelectPreviousNote = 0x64;
 
 constexpr std::uint8_t kTempoMsb = 0x00;
 constexpr std::uint8_t kTempoLsb = 0x20;
@@ -48,6 +57,8 @@ constexpr std::uint8_t kFilterDeck1Msb = 0x17;
 constexpr std::uint8_t kFilterDeck1Lsb = 0x37;
 constexpr std::uint8_t kFilterDeck2Msb = 0x18;
 constexpr std::uint8_t kFilterDeck2Lsb = 0x38;
+constexpr std::uint8_t kBeatFxWetMsb = 0x02;
+constexpr std::uint8_t kBeatFxWetLsb = 0x22;
 
 constexpr std::uint8_t kJogSide = 0x21;
 constexpr std::uint8_t kJogPlatterVinylOn = 0x22;
@@ -137,6 +148,44 @@ std::optional<ControlEvent> Flx4Mapping::parse(
     }
     const bool pressed = command == kNoteOn && data2 != 0;
 
+    if ((channel == kFxChannel1 && data1 == kBeatFxAssignDeck1Note) ||
+        (channel == kFxChannel2 && data1 == kBeatFxAssignDeck2Note)) {
+        if (!fxAssignmentKnown_) {
+            fxAssigned_.fill(false);
+            fxAssignmentKnown_ = true;
+        }
+        const std::size_t deck = channel == kFxChannel1 ? 0U : 1U;
+        fxAssigned_[deck] = pressed;
+        return std::nullopt;
+    }
+
+    if (channel == kFxChannel1 || channel == kFxChannel2) {
+        switch (data1) {
+        case kBeatFxOnNote:
+            if (pressed)
+                return ControlEvent {kNoDeck, ControlId::FxOn, 1.0};
+            return std::nullopt;
+        case kBeatFxLeftNote:
+            if (pressed)
+                return ControlEvent {kNoDeck, ControlId::FxBeats, 0.5};
+            return std::nullopt;
+        case kBeatFxRightNote:
+            if (pressed)
+                return ControlEvent {kNoDeck, ControlId::FxBeats, 2.0};
+            return std::nullopt;
+        case kBeatFxSelectNextNote:
+            if (pressed)
+                return ControlEvent {kNoDeck, ControlId::FxType, 1.0};
+            return std::nullopt;
+        case kBeatFxSelectPreviousNote:
+            if (pressed)
+                return ControlEvent {kNoDeck, ControlId::FxType, -1.0};
+            return std::nullopt;
+        default:
+            return std::nullopt;
+        }
+    }
+
     if (isDeckChannel(channel)) {
         const DeckId deck = deckForChannel(channel);
         switch (data1) {
@@ -209,6 +258,17 @@ std::optional<ControlEvent> Flx4Mapping::parse(
 std::optional<ControlEvent> Flx4Mapping::parseControlChange(
     std::uint8_t channel, std::uint8_t controller, std::uint8_t value) noexcept
 {
+    if (channel == kFxChannel1) {
+        if (controller == kBeatFxWetMsb) {
+            return finishFourteenBit(
+                fxWet_, true, value, kNoDeck, ControlId::FxWet);
+        }
+        if (controller == kBeatFxWetLsb) {
+            return finishFourteenBit(
+                fxWet_, false, value, kNoDeck, ControlId::FxWet);
+        }
+    }
+
     if (isDeckChannel(channel)) {
         const auto deckIndex = static_cast<std::size_t>(deckForChannel(channel));
         const DeckId deck = static_cast<DeckId>(deckIndex);
@@ -341,6 +401,11 @@ std::optional<std::array<unsigned char, 3>> Flx4Mapping::ledMessage(
         note = kShiftLoopDoubleNote;
     } else if (id == ControlId::LoopAuto) {
         note = kShiftFourBeatExitNote;
+    } else if (id == ControlId::FxOn) {
+        status = deck == 0
+            ? static_cast<std::uint8_t>(kNoteOn + kFxChannel1)
+            : static_cast<std::uint8_t>(kNoteOn + kFxChannel2);
+        note = kBeatFxOnNote;
     } else {
         std::uint8_t pad = 0;
         if (!hotCueIndex(id, pad)) {

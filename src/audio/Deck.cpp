@@ -1,6 +1,7 @@
 #include "AudioEngine.h"
 
 #include "Eq.h"
+#include "Fx.h"
 
 #include <algorithm>
 #include <cmath>
@@ -73,6 +74,7 @@ struct Deck::Impl {
     std::atomic<double> trackBpm { 0.0 };
     std::atomic<double> firstBeatSec { 0.0 };
     std::atomic<int64_t> trackFrameCount { 0 };
+    std::atomic<bool> renderGate { true };
     std::atomic<unsigned int> activeRenders { 0 };
     std::atomic<double> pendingJogRatio { 0.0 };
     std::atomic<bool> cuePreviewing { false };
@@ -81,6 +83,7 @@ struct Deck::Impl {
     bool hasPendingLoopIn = false;
     Eq eq;
     DjFilter djFilter;
+    DeckFx fx;
 
     void waitForRender() const noexcept
     {
@@ -94,17 +97,19 @@ Deck::Deck() : impl_(std::make_unique<Impl>()) {}
 Deck::~Deck()
 {
     playing.store(false, std::memory_order_release);
+    impl_->renderGate.store(false, std::memory_order_release);
     std::atomic_thread_fence(std::memory_order_seq_cst); // see loadTrack()
     impl_->waitForRender();
 }
 
 void Deck::loadTrack(TrackDataPtr track)
 {
-    // Once playing is false, a new render cannot enter the protected section.
-    // Waiting drains a callback that observed the previous playing state.
+    // The render gate also covers tail-only callbacks after transport stops.
+    // Closing it before draining protects both the PCM pointer and FX state.
     playing.store(false, std::memory_order_release);
+    impl_->renderGate.store(false, std::memory_order_release);
     // StoreLoad barrier: without it this thread can read activeRenders==0 from
-    // its store buffer while the audio thread still sees playing==true
+    // its store buffer while the audio thread still sees renderGate==true
     // (Dekker's pattern) — and we'd free PCM mid-render.
     std::atomic_thread_fence(std::memory_order_seq_cst);
     impl_->waitForRender();
@@ -119,6 +124,7 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->hasPendingLoopIn = false;
     impl_->eq.reset();
     impl_->djFilter.reset();
+    impl_->fx.reset();
     loopActive.store(false, std::memory_order_release);
     loopStartSec.store(-1.0, std::memory_order_release);
     loopEndSec.store(-1.0, std::memory_order_release);
@@ -129,6 +135,7 @@ void Deck::loadTrack(TrackDataPtr track)
         impl_->trackBpm.store(0.0, std::memory_order_release);
         impl_->firstBeatSec.store(0.0, std::memory_order_release);
         impl_->trackFrameCount.store(0, std::memory_order_release);
+        impl_->renderGate.store(true, std::memory_order_release);
         return;
     }
 
@@ -137,6 +144,7 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->firstBeatSec.store(rawTrack->firstBeatSec, std::memory_order_release);
     impl_->trackFrameCount.store(rawTrack->frameCount(), std::memory_order_release);
     impl_->audioTrack.store(rawTrack, std::memory_order_release);
+    impl_->renderGate.store(true, std::memory_order_release);
 }
 
 TrackDataPtr Deck::track() const
@@ -398,121 +406,146 @@ void Deck::render(float* out, int frames)
 
     std::fill_n(out, static_cast<std::size_t>(frames) * 2U, 0.0f);
 
-    // The second playing check closes the race with loadTrack(): a render that
-    // saw the old true value either publishes itself here or exits before ever
-    // reading the raw track pointer.
-    if (!playing.load(std::memory_order_acquire))
+    // A stopped deck normally costs nothing, except while an effect has stored
+    // energy to release. Tail-only renders use zero input and never advance the
+    // track position.
+    if (!impl_->renderGate.load(std::memory_order_acquire) ||
+        (!playing.load(std::memory_order_acquire) && !impl_->fx.hasTail())) {
         return;
+    }
 
     impl_->activeRenders.fetch_add(1, std::memory_order_acq_rel);
-    // StoreLoad barrier pairing with loadTrack(): the re-check below must not
-    // read a stale playing==true after publishing activeRenders.
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    if (!playing.load(std::memory_order_acquire)) {
-        impl_->activeRenders.fetch_sub(1, std::memory_order_release);
-        return;
-    }
+    struct ActiveRenderGuard {
+        std::atomic<unsigned int>& counter;
+        ~ActiveRenderGuard() { counter.fetch_sub(1, std::memory_order_release); }
+    } activeRenderGuard {impl_->activeRenders};
 
-    TrackData* const currentTrack =
-        impl_->audioTrack.load(std::memory_order_acquire);
-    if (currentTrack == nullptr || currentTrack->frameCount() <= 0) {
-        playing.store(false, std::memory_order_release);
-        impl_->activeRenders.fetch_sub(1, std::memory_order_release);
+    // StoreLoad barrier pairing with loadTrack(): the re-check below must not
+    // read a stale open gate after publishing activeRenders.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (!impl_->renderGate.load(std::memory_order_acquire))
         return;
+
+    bool renderTrack = playing.load(std::memory_order_acquire);
+    TrackData* currentTrack = renderTrack
+        ? impl_->audioTrack.load(std::memory_order_acquire)
+        : nullptr;
+    if (renderTrack &&
+        (currentTrack == nullptr || currentTrack->frameCount() <= 0)) {
+        playing.store(false, std::memory_order_release);
+        renderTrack = false;
     }
+    if (!renderTrack && !impl_->fx.hasTail())
+        return;
 
     double ratio = tempoRatio.load(std::memory_order_relaxed);
     if (!std::isfinite(ratio) || ratio <= 0.0)
         ratio = 1.0;
     ratio = std::clamp(ratio, 0.01, 4.0);
 
-    impl_->jogRatio = std::clamp(
-        impl_->jogRatio +
-            impl_->pendingJogRatio.exchange(0.0, std::memory_order_acq_rel),
-        -kMaximumJogRatio, kMaximumJogRatio);
-
     const double startPosition =
         impl_->positionFrames.load(std::memory_order_acquire);
     double position = std::isfinite(startPosition)
         ? std::max(0.0, startPosition)
         : 0.0;
-    const int64_t trackFrames = currentTrack->frameCount();
-    const double inputGain = trimGain(trim.load(std::memory_order_relaxed));
     bool reachedEnd = false;
 
-    bool loopEnabled = loopActive.load(std::memory_order_acquire);
-    double loopStartFrame = 0.0;
-    double loopEndFrame = 0.0;
-    double loopLengthFrames = 0.0;
-    if (loopEnabled) {
-        loopStartFrame = std::clamp(
-            loopStartSec.load(std::memory_order_acquire) *
-                static_cast<double>(kSampleRate),
-            0.0, static_cast<double>(trackFrames));
-        loopEndFrame = std::clamp(
-            loopEndSec.load(std::memory_order_acquire) *
-                static_cast<double>(kSampleRate),
-            0.0, static_cast<double>(trackFrames));
-        loopLengthFrames = loopEndFrame - loopStartFrame;
-        if (!std::isfinite(loopStartFrame) || !std::isfinite(loopEndFrame) ||
-            !(loopLengthFrames > 0.0)) {
-            loopEnabled = false;
-        }
-    }
+    if (renderTrack) {
+        impl_->jogRatio = std::clamp(
+            impl_->jogRatio + impl_->pendingJogRatio.exchange(
+                0.0, std::memory_order_acq_rel),
+            -kMaximumJogRatio, kMaximumJogRatio);
 
-    const auto wrapLoopPosition = [&] {
-        if (loopEnabled && position >= loopEndFrame) {
-            const double overshoot =
-                std::fmod(position - loopStartFrame, loopLengthFrames);
-            position = loopStartFrame +
-                (overshoot >= 0.0 ? overshoot : overshoot + loopLengthFrames);
+        const int64_t trackFrames = currentTrack->frameCount();
+        const double inputGain = trimGain(
+            trim.load(std::memory_order_relaxed));
+        bool loopEnabled = loopActive.load(std::memory_order_acquire);
+        double loopStartFrame = 0.0;
+        double loopEndFrame = 0.0;
+        double loopLengthFrames = 0.0;
+        if (loopEnabled) {
+            loopStartFrame = std::clamp(
+                loopStartSec.load(std::memory_order_acquire) *
+                    static_cast<double>(kSampleRate),
+                0.0, static_cast<double>(trackFrames));
+            loopEndFrame = std::clamp(
+                loopEndSec.load(std::memory_order_acquire) *
+                    static_cast<double>(kSampleRate),
+                0.0, static_cast<double>(trackFrames));
+            loopLengthFrames = loopEndFrame - loopStartFrame;
+            if (!std::isfinite(loopStartFrame) ||
+                !std::isfinite(loopEndFrame) ||
+                !(loopLengthFrames > 0.0)) {
+                loopEnabled = false;
+            }
         }
-    };
 
-    for (int frame = 0; frame < frames; ++frame) {
-        wrapLoopPosition();
+        const auto wrapLoopPosition = [&] {
+            if (loopEnabled && position >= loopEndFrame) {
+                const double overshoot =
+                    std::fmod(position - loopStartFrame, loopLengthFrames);
+                position = loopStartFrame + (overshoot >= 0.0
+                    ? overshoot : overshoot + loopLengthFrames);
+            }
+        };
+
+        for (int frame = 0; frame < frames; ++frame) {
+            wrapLoopPosition();
+            if (position >= static_cast<double>(trackFrames)) {
+                position = static_cast<double>(trackFrames);
+                reachedEnd = true;
+                break;
+            }
+
+            const int64_t frame0 = static_cast<int64_t>(position);
+            const int64_t frame1 = std::min(frame0 + 1, trackFrames - 1);
+            const double fraction = position - static_cast<double>(frame0);
+            const std::size_t sample0 =
+                static_cast<std::size_t>(frame0) * 2U;
+            const std::size_t sample1 =
+                static_cast<std::size_t>(frame1) * 2U;
+            const int outputBase = frame * 2;
+
+            for (int channel = 0; channel < 2; ++channel) {
+                const double first = currentTrack->pcm[
+                    sample0 + static_cast<std::size_t>(channel)];
+                const double second = currentTrack->pcm[
+                    sample1 + static_cast<std::size_t>(channel)];
+                out[outputBase + channel] = static_cast<float>(
+                    (first + (second - first) * fraction) * inputGain);
+            }
+
+            const double playbackRatio =
+                std::clamp(ratio + impl_->jogRatio, 0.01, 4.0);
+            position += playbackRatio;
+            wrapLoopPosition();
+            impl_->jogRatio *= kJogDecayPerFrame;
+            if (std::abs(impl_->jogRatio) < 1.0e-8)
+                impl_->jogRatio = 0.0;
+        }
+
         if (position >= static_cast<double>(trackFrames)) {
             position = static_cast<double>(trackFrames);
             reachedEnd = true;
-            break;
         }
 
-        const int64_t frame0 = static_cast<int64_t>(position);
-        const int64_t frame1 = std::min(frame0 + 1, trackFrames - 1);
-        const double fraction = position - static_cast<double>(frame0);
-        const std::size_t sample0 = static_cast<std::size_t>(frame0) * 2U;
-        const std::size_t sample1 = static_cast<std::size_t>(frame1) * 2U;
-        const int outputBase = frame * 2;
-
-        for (int channel = 0; channel < 2; ++channel) {
-            const double first = currentTrack->pcm[
-                sample0 + static_cast<std::size_t>(channel)];
-            const double second = currentTrack->pcm[
-                sample1 + static_cast<std::size_t>(channel)];
-            out[outputBase + channel] = static_cast<float>(
-                (first + (second - first) * fraction) * inputGain);
-        }
-
-        const double playbackRatio =
-            std::clamp(ratio + impl_->jogRatio, 0.01, 4.0);
-        position += playbackRatio;
-        wrapLoopPosition();
-        impl_->jogRatio *= kJogDecayPerFrame;
-        if (std::abs(impl_->jogRatio) < 1.0e-8)
-            impl_->jogRatio = 0.0;
+        impl_->eq.process(out, frames,
+                          eqLow.load(std::memory_order_relaxed),
+                          eqMid.load(std::memory_order_relaxed),
+                          eqHigh.load(std::memory_order_relaxed));
+        impl_->djFilter.process(
+            out, frames, filter.load(std::memory_order_relaxed));
     }
 
-    if (position >= static_cast<double>(trackFrames)) {
-        position = static_cast<double>(trackFrames);
-        reachedEnd = true;
-    }
-
-    impl_->eq.process(out, frames,
-                      eqLow.load(std::memory_order_relaxed),
-                      eqMid.load(std::memory_order_relaxed),
-                      eqHigh.load(std::memory_order_relaxed));
-    impl_->djFilter.process(
-        out, frames, filter.load(std::memory_order_relaxed));
+    const double trackBpm = impl_->trackBpm.load(std::memory_order_relaxed);
+    const double bpm = std::isfinite(trackBpm) && trackBpm > 0.0
+        ? trackBpm * ratio : 0.0;
+    impl_->fx.process(
+        out, frames,
+        fxType.load(std::memory_order_relaxed),
+        fxOn.load(std::memory_order_relaxed),
+        fxWet.load(std::memory_order_relaxed),
+        fxBeats.load(std::memory_order_relaxed), bpm);
 
     const float channelGain =
         clampUnit(fader.load(std::memory_order_relaxed), 1.0f);
@@ -521,14 +554,15 @@ void Deck::render(float* out, int frames)
         out[sample] *= channelGain;
     }
 
-    double expectedPosition = startPosition;
-    const bool positionCommitted = impl_->positionFrames.compare_exchange_strong(
-        expectedPosition, position, std::memory_order_release,
-        std::memory_order_relaxed);
-    if (reachedEnd && positionCommitted)
-        playing.store(false, std::memory_order_release);
-
-    impl_->activeRenders.fetch_sub(1, std::memory_order_release);
+    if (renderTrack) {
+        double expectedPosition = startPosition;
+        const bool positionCommitted =
+            impl_->positionFrames.compare_exchange_strong(
+                expectedPosition, position, std::memory_order_release,
+                std::memory_order_relaxed);
+        if (reachedEnd && positionCommitted)
+            playing.store(false, std::memory_order_release);
+    }
 }
 
 double Deck::positionSec() const

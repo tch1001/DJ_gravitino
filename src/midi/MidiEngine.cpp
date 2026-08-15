@@ -10,8 +10,10 @@
 
 #include <rtmidi/RtMidi.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -309,6 +311,15 @@ struct MidiEngine::Impl {
 
     void postMidiEvent(ControlEvent event) noexcept
     {
+        if (event.deck == kNoDeck &&
+            (event.id == ControlId::FxType ||
+             event.id == ControlId::FxOn ||
+             event.id == ControlId::FxWet ||
+             event.id == ControlId::FxBeats)) {
+            postSharedFxEvent(event);
+            return;
+        }
+
         if (event.deck >= 0 && event.deck < 2
             && event.id == ControlId::Play && event.value > 0.0) {
             // Toggle against the ENGINE's play state, not our cache — the
@@ -341,6 +352,61 @@ struct MidiEngine::Impl {
             targetBus,
             [targetBus, event] {
                 targetBus->dispatch(event, Origin::Midi);
+            },
+            Qt::QueuedConnection);
+    }
+
+    void postSharedFxEvent(const ControlEvent& event) noexcept
+    {
+        if (bus == nullptr || engine == nullptr)
+            return;
+
+        const std::array<bool, 2> assigned = mapping.fxAssignedDecks();
+        std::array<ControlEvent, 2> events {};
+        std::size_t eventCount = 0;
+        for (DeckId deck = 0; deck < 2; ++deck) {
+            if (!assigned[static_cast<std::size_t>(deck)])
+                continue;
+
+            Deck& target = engine->deck(deck);
+            double value = event.value;
+            switch (event.id) {
+            case ControlId::FxOn:
+                value = target.fxOn.load(std::memory_order_relaxed)
+                    ? 0.0 : 1.0;
+                break;
+            case ControlId::FxBeats:
+                value = std::clamp(
+                    target.fxBeats.load(std::memory_order_relaxed) *
+                        event.value,
+                    0.25, 4.0);
+                break;
+            case ControlId::FxType: {
+                const int direction = event.value < 0.0 ? -1 : 1;
+                const int current = std::clamp(
+                    target.fxType.load(std::memory_order_relaxed), 0, 2);
+                value = static_cast<double>((current + direction + 3) % 3);
+                break;
+            }
+            case ControlId::FxWet:
+                if (!std::isfinite(value))
+                    continue;
+                value = std::clamp(value, 0.0, 1.0);
+                break;
+            default:
+                return;
+            }
+            events[eventCount++] = ControlEvent {deck, event.id, value};
+        }
+
+        if (eventCount == 0)
+            return;
+        ControlBus* const targetBus = bus;
+        QMetaObject::invokeMethod(
+            targetBus,
+            [targetBus, events, eventCount] {
+                for (std::size_t index = 0; index < eventCount; ++index)
+                    targetBus->dispatch(events[index], Origin::Midi);
             },
             Qt::QueuedConnection);
     }
@@ -393,6 +459,15 @@ struct MidiEngine::Impl {
             loopActive[deck] = actual;
             if (mirrorToController || changed)
                 sendLoopLeds(event.deck, actual);
+            return;
+        }
+
+        if (event.id == ControlId::FxOn) {
+            const bool actual = event.value > 0.5;
+            const bool changed = fxOn[deck] != actual;
+            fxOn[deck] = actual;
+            if (mirrorToController || changed)
+                sendLed(event.deck, ControlId::FxOn, actual);
             return;
         }
 
@@ -484,6 +559,14 @@ struct MidiEngine::Impl {
                     sendLoopLeds(deck, actualLoop);
             }
 
+            const bool actualFx =
+                engine->deck(deck).fxOn.load(std::memory_order_relaxed);
+            if (fxOn[index] != actualFx) {
+                fxOn[index] = actualFx;
+                if (connected)
+                    sendLed(deck, ControlId::FxOn, actualFx);
+            }
+
             const TrackDataPtr currentTrack = engine->deck(deck).track();
             for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
                 const bool actualHotCue = currentTrack
@@ -514,6 +597,8 @@ struct MidiEngine::Impl {
                     std::memory_order_relaxed) >= 0.0;
                 loopActive[index] = engine->deck(deck).loopActive.load(
                     std::memory_order_relaxed);
+                fxOn[index] = engine->deck(deck).fxOn.load(
+                    std::memory_order_relaxed);
 
                 const TrackDataPtr currentTrack = engine->deck(deck).track();
                 for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
@@ -528,6 +613,7 @@ struct MidiEngine::Impl {
                 playing[index].load(std::memory_order_relaxed));
             sendLed(deck, ControlId::Cue, cue[index]);
             sendLoopLeds(deck, loopActive[index]);
+            sendLed(deck, ControlId::FxOn, fxOn[index]);
 
             for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
                 const auto id = static_cast<ControlId>(
@@ -550,6 +636,7 @@ struct MidiEngine::Impl {
     std::array<std::atomic_bool, 2> playing {};
     std::array<bool, 2> cue {};
     std::array<bool, 2> loopActive {};
+    std::array<bool, 2> fxOn {};
     std::array<std::array<bool, 8>, 2> hotCue {};
 };
 

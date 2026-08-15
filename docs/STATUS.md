@@ -6,6 +6,30 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-16 (codex-fx): **Per-deck RT-safe FX insert + DDJ-FLX4 Beat FX
+  mapping complete.** `Deck::render` now runs FX after the DJ filter and before
+  the channel fader. New preallocated `DeckFx` provides: stereo 0.5-feedback
+  beat/BPM-timed echo (1 ms..2 s, 2 s x 48 kHz ring per deck), small stereo
+  Schroeder reverb (four detuned ~29.7/37.1/41.1/43.7 ms feedback combs into
+  5/1.7 ms allpasses), and beat-period stereo flanger (0.5..8 ms, feedback
+  0.6). Wet uses a smoothed equal-power crossfade. Disengaging mutes only the
+  effect input and restores unity dry while the stored tail decays; stopped
+  decks continue tail-only zero-input renders without advancing position, then
+  return to hard bypass. A render gate extends the existing track-swap drain
+  handshake to tail-only callbacks. `AudioEngine::applyEvent` clamps/stores all
+  four pinned Fx controls. FLX4 shared Beat FX controls map from the published
+  messages: assign notes target deck A/B (both until the controller first
+  reports assignment), SELECT cycles echo/reverb/flanger, BEAT </> halves or
+  doubles 0.25..4 beats, 14-bit LEVEL/DEPTH sets wet, ON/OFF toggles each
+  assigned deck against its atomic state, and `94/95 47` drives the ON LED.
+  Verified all requested objects and the full link warning-clean with
+  `-Wall -Wextra`; ctest 5/5 and `--selftest` pass; raw MIDI parser/LED proof
+  passed. Standalone real-track echo proof (Demo Track 1,
+  engaged 2 s at wet 0.6, then off + transport stop) tail RMS per 0.25 s:
+  `0.39826874, 0.19868438, 0.09976300, 0.04935670, 0.02389289, 0.01145023,
+  0.00551588, 0.00254754` (asserted non-silent through 0.5 s and final <10% of
+  initial). Touched only assigned audio/MIDI files, CMake add-only, and STATUS.
+
 - 2026-08-15 (claude-lib4): **Per-deck FX strip UI + Serato-style library
   crates sidebar + History tab.** DeckWidget gains a compact ~20 px FX row
   below the loop/jump row: FX [ECHO|REVERB|FLANGER] QComboBox (dispatches
@@ -205,6 +229,11 @@ the completed value on receipt of the LSB. Deck A/B below are ControlBus deck
 | CUE/LOOP CALL left / right | A / B | `90/91 51 hh` / `90/91 53 hh` | Nonzero press → `LoopHalve` / `LoopDouble` |
 | SHIFT + LOOP IN / OUT (1/2X / 2X alternate) | A / B | `90/91 4C hh` / `90/91 4E hh` | Nonzero press → `LoopHalve` / `LoopDouble`; modifier-state LEDs mirror active state |
 | Beat-jump pads 1–8 (BEAT JUMP mode) | A / B | `97/99 20..27 hh` | Nonzero presses → `BeatJump=-1,+1,-2,+2,-4,+4,-8,+8`; releases ignored |
+| BEAT FX channel assign | A / B | `94 10 hh` / `95 11 hh` | ON/OFF assignment state selects which deck(s) receive the shared Beat FX controls; before the first assignment report, controls target both decks |
+| BEAT FX SELECT / SHIFT+SELECT | Assigned | `94 63 hh` / `94 64 hh` | Nonzero press cycles `FxType` next / previous modulo echo, reverb, flanger |
+| BEAT FX BEAT left / right | Assigned | `94 4A hh` / `94 4B hh` | Nonzero press dispatches current `FxBeats * 0.5` / `* 2.0`, clamped to 0.25..4 |
+| BEAT FX LEVEL/DEPTH, 14-bit | Assigned | `B4 02 mm`, then `B4 22 ll` | `FxWet = raw / 3FFF` for every assigned deck |
+| BEAT FX ON/OFF | Assigned | `94/95 47 hh` | Nonzero press reads each assigned deck's `fxOn` atomic and dispatches the inverse; LED output `94 47 7F/00` for A and `95 47 7F/00` for B |
 
 PLAY and BEAT SYNC releases remain press-only and are ignored. CUE and hot-cue
 releases are dispatched so hold-preview and future pad-release behavior reach
@@ -212,6 +241,21 @@ the deck. Play/cue/hot-cue LED state is sent for non-MIDI-origin bus events;
 loop LEDs also update after MIDI-origin state changes because the combined
 4 BEAT/EXIT action is host-resolved. Cached play, cue-point, loop-active, and
 hot-cue state is reconciled against the engine and restored on output reconnect.
+FX ON state is likewise reconciled and restored using the assignment-specific
+Beat FX LED messages.
+
+### Per-deck FX semantics
+
+- Insert order is trim → EQ → DJ filter → FX → channel fader. Master
+  crossfader/limiter remain downstream in `AudioEngine`.
+- Echo delay is `fxBeats * 60 / effectiveBpm`, recomputed per render chunk and
+  smoothed when tempo or beats changes. Reverb uses beats only as a stored UI/
+  transition parameter; flanger LFO period is `fxBeats * 4` beats.
+- `fxWet` is a smoothed equal-power dry/wet crossfade while engaged. On
+  disengage, effect input becomes zero immediately, dry returns smoothly to
+  unity, and echo/reverb/flanger state continues until its energy is silent.
+- FX type changes clear all effect state. All delay storage is fixed-size in
+  `Deck::Impl`; `render()` performs no allocation or locking.
 
 ### Transport semantics
 
@@ -230,8 +274,9 @@ hot-cue state is reconciled against the engine and restored on output reconnect.
 - Engine sample rate fixed at 48 kHz (`kSampleRate`); all decode resamples to it.
 - Audio track replacement uses a stop-and-drain swap; the callback uses only
   atomics, fixed 256-frame scratch buffers, and allocation-free DSP.
-- Deck DSP uses linear tempo/jog resampling, RBJ three-band EQ, equal-power
-  crossfade, and a shared realtime/offline `tanh` soft-clip mix path.
+- Deck DSP uses linear tempo/jog resampling, RBJ three-band EQ, a post-filter
+  per-deck FX insert, equal-power master crossfade, and a shared
+  realtime/offline `tanh` soft-clip mix path.
 - No keylock in MVP — tempo change shifts pitch (documented TODO).
 - Beatgrid is fixed-tempo (bpm + firstBeatSec) — fine for the demo tracks.
 - ControlBus dispatch is synchronous, GUI thread only. MIDI thread must post
@@ -309,6 +354,14 @@ semantics (set/return/hold-preview), hot cues fire on press with engine-side
 set/jump, FLX4 note-off releases, transition ENTRY POINT: PERFORM/TUTORIAL
 seek to the recorded anchor beat, new ⚡ PRIME arms loop-style firing when
 playback crosses the anchor, orange "T" markers on all waveforms.
+
+Round 4 (2026-08-16) DONE: per-deck FX insert (beat-synced ECHO with
+ring-out tail, Schroeder REVERB, FLANGER; post-filter pre-fader; fully
+recordable into .gvt via fx_* controls), FX strip UI per deck, FLX4 BEAT FX
+mapping, library crate sidebar (one crate per music subfolder), [Library]
+[History] tabs with persistent play log (~/.gravitino/history.jsonl), and a
+deterministic selftest (the old "player STILL ACTIVE" flake was the offline
+renderer outrunning the player's wall-clock finish window).
 
 Next parity targets (not started): sampler pads, pitch-fader value
 readouts, 4-deck mode, iTunes import, playlist editing (crates are

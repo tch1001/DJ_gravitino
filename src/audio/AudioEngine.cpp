@@ -331,6 +331,28 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
             target.filter.store(normalizedValue(event.value),
                                 std::memory_order_relaxed);
         break;
+    case ControlId::FxType:
+        if (std::isfinite(event.value)) {
+            const double bounded = std::clamp(event.value, 0.0, 2.0);
+            target.fxType.store(
+                static_cast<int>(std::lround(bounded)),
+                std::memory_order_relaxed);
+        }
+        break;
+    case ControlId::FxOn:
+        target.fxOn.store(event.value > 0.5, std::memory_order_relaxed);
+        break;
+    case ControlId::FxWet:
+        if (std::isfinite(event.value))
+            target.fxWet.store(normalizedValue(event.value),
+                               std::memory_order_relaxed);
+        break;
+    case ControlId::FxBeats:
+        if (std::isfinite(event.value)) {
+            target.fxBeats.store(std::clamp(event.value, 0.25, 4.0),
+                                 std::memory_order_relaxed);
+        }
+        break;
     case ControlId::Jog:
         target.nudge(event.value);
         break;

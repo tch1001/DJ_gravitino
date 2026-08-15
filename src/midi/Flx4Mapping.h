@@ -21,6 +21,13 @@ public:
     static std::optional<std::array<unsigned char, 3>> ledMessage(
         DeckId deck, ControlId id, bool on) noexcept;
 
+    // The FLX4 reports its shared Beat FX channel assignment as two on/off
+    // notes. Until the first report, both decks are selected as a safe fallback.
+    std::array<bool, 2> fxAssignedDecks() const noexcept
+    {
+        return fxAssigned_;
+    }
+
 private:
     struct FourteenBitState {
         std::uint8_t msb = 0;
@@ -41,6 +48,9 @@ private:
     std::array<FourteenBitState, 2> eqLow_ {};
     std::array<FourteenBitState, 2> filter_ {};
     FourteenBitState crossfader_ {};
+    FourteenBitState fxWet_ {};
+    std::array<bool, 2> fxAssigned_ {true, true};
+    bool fxAssignmentKnown_ = false;
 };
 
 } // namespace gvt
