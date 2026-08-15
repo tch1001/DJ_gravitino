@@ -91,9 +91,13 @@ master_bpm  = 130.00    ; tempo the mix runs at during the transition
 | `fader`      | a,b     | 0..1 channel fader             |
 | `trim`       | a,b     | 0..1 gain knob                 |
 | `eq_low`,`eq_mid`,`eq_high` | a,b | 0..1 (0.5 = flat, 0 = kill) |
-| `xfader`     | x       | 0 = full A ... 1 = full B      |
+| `xfader`     | x       | 0 = outgoing ... 1 = incoming (role space) |
 | `hotcue_1..8`| a,b     | (trigger; jump to stored cue)  |
-| `jog`        | a,b     | signed nudge ticks             |
+| `jog`        | a,b     | signed nudge ticks (not recorded) |
+| `loop_auto`  | a,b     | loop length in beats (starts beat-snapped loop) |
+| `loop_in`,`loop_out`,`loop_exit`,`loop_halve`,`loop_double` | a,b | (trigger) |
+| `beat_jump`  | a,b     | signed beats to jump, beat-aligned |
+| `filter`     | a,b     | 0.5 = off, <0.5 LPF sweep, >0.5 HPF sweep |
 
 Parsers must **skip unknown controls with a warning**, never fail — future
 versions add controls, old players still perform the rest of the blend.

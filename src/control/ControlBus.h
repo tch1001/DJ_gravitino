@@ -15,6 +15,9 @@ enum class ControlId : uint8_t {
     Play, Stop, Cue, Load, TempoSync,
     HotCue1, HotCue2, HotCue3, HotCue4,
     HotCue5, HotCue6, HotCue7, HotCue8,
+    LoopIn, LoopOut,   // manual loop bounds at current position (beat-snapped)
+    LoopExit,          // exit active loop (RELOOP re-enters via LoopIn history)
+    LoopHalve, LoopDouble,
     // Continuous, normalized 0..1 unless noted
     Tempo,        // playback ratio, 1.0 = native speed (range ~0.84..1.16)
     Fader,        // channel fader
@@ -22,6 +25,9 @@ enum class ControlId : uint8_t {
     EqLow, EqMid, EqHigh,   // 0.5 = flat, 0.0 = kill
     Crossfader,   // 0 = full deck A ... 1 = full deck B (deck = kNoDeck)
     Jog,          // signed nudge ticks (deck-scoped, transient)
+    LoopAuto,     // value = loop length in beats (e.g. 4.0); starts beat-snapped loop
+    BeatJump,     // value = signed beats to jump (e.g. -8, 4), beat-aligned
+    Filter,       // per-deck DJ filter: 0.5 = off, <0.5 low-pass, >0.5 high-pass
     Count
 };
 

@@ -27,6 +27,10 @@ struct TrackData {
     // "gvfp1:<16 hex>" — see docs/TRANSITION_FORMAT.md.
     QString fingerprint;
 
+    // Musical key in Camelot notation ("8A" = A minor, "8B" = C major...);
+    // empty if detection failed. keyName is the traditional name ("Am").
+    QString camelotKey, keyName;
+
     // Mono peak per ~512-frame bin, 0..1, for waveform drawing.
     std::vector<float> overviewPeaks;
 

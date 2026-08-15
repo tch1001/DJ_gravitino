@@ -16,6 +16,10 @@ constexpr NameEntry kNames[] = {
     {ControlId::Trim, "trim"}, {ControlId::EqLow, "eq_low"},
     {ControlId::EqMid, "eq_mid"}, {ControlId::EqHigh, "eq_high"},
     {ControlId::Crossfader, "xfader"}, {ControlId::Jog, "jog"},
+    {ControlId::LoopIn, "loop_in"}, {ControlId::LoopOut, "loop_out"},
+    {ControlId::LoopExit, "loop_exit"}, {ControlId::LoopHalve, "loop_halve"},
+    {ControlId::LoopDouble, "loop_double"}, {ControlId::LoopAuto, "loop_auto"},
+    {ControlId::BeatJump, "beat_jump"}, {ControlId::Filter, "filter"},
 };
 } // namespace
 
@@ -26,7 +30,11 @@ bool controlIsTrigger(ControlId id) {
         case ControlId::HotCue1: case ControlId::HotCue2: case ControlId::HotCue3:
         case ControlId::HotCue4: case ControlId::HotCue5: case ControlId::HotCue6:
         case ControlId::HotCue7: case ControlId::HotCue8:
+        case ControlId::LoopIn: case ControlId::LoopOut:
+        case ControlId::LoopExit: case ControlId::LoopHalve:
+        case ControlId::LoopDouble:
             return true;
+        // LoopAuto/BeatJump carry a beats value; Filter is continuous.
         default:
             return false;
     }

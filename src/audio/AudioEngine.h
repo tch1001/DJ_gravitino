@@ -27,6 +27,22 @@ public:
     void jumpHotCue(int i);                  // jump if set
     void nudge(double ticks);                // transient tempo bend from jog
 
+    // Loops (all GUI thread; beat-snapped to the track grid; audio thread
+    // wraps position inside [loopStartSec, loopEndSec) while loopActive).
+    void loopAuto(double beats);             // start N-beat loop at current beat
+    void loopIn();                           // set/replace loop start (pending)
+    void loopOut();                          // set end + activate (after loopIn)
+    void loopExit();                         // deactivate, keep stored bounds
+    void loopHalve(); void loopDouble();     // resize active loop (min 1/8 beat)
+    void beatJump(double beats);             // signed, beat-aligned jump
+    std::atomic<double> loopStartSec { -1.0 };
+    std::atomic<double> loopEndSec   { -1.0 };
+    std::atomic<bool>   loopActive   { false };
+
+    // DJ filter knob: 0.5 = off, <0.5 sweeps a low-pass down,
+    // >0.5 sweeps a high-pass up. Processed after EQ in render.
+    std::atomic<float> filter { 0.5f };
+
     std::atomic<double> tempoRatio { 1.0 };  // 1.0 = native
     std::atomic<float>  fader      { 1.0f };
     std::atomic<float>  trim       { 0.5f };
@@ -65,6 +81,11 @@ public:
     // Offline mode for --selftest: instead of a live device, render `frames`
     // through the exact same mix path into an interleaved stereo buffer.
     void renderOffline(float* out, int frames);
+
+    // Master-output tap (set/cleared from the GUI thread; the audio thread
+    // calls tap->feed(interleavedStereo, frames) after the limiter when set).
+    // MasterRecorder::feed is RT-safe (lock-free ring). See MasterRecorder.h.
+    std::atomic<class MasterRecorder*> masterTap { nullptr };
 
     // Called by ControlBus subscription (wired in constructor): applies any
     // ControlEvent to engine state. Replay/MIDI/UI all land here.
