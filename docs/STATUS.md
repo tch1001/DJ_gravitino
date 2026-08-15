@@ -206,6 +206,21 @@ Both reviewers converged on the same top defects; all fixed and re-verified
   right key); full drain-counter handshake for MIDI teardown; EQ "kill" is
   -26 dB not -inf (ARCHITECTURE.md wording).
 
+## Serato-parity roadmap (user goal: match Serato DJ Pro)
+
+Round 2 (2026-08-15 afternoon) DONE: 50/50 deck halves with mirrored outer
+tempo sliders, full-width stacked zoomed band-colored waveforms (fixed center
+playhead, wheel/buttons zoom 4–30 s), horizontal mixer strip, Serato cue
+semantics (set/return/hold-preview), hot cues fire on press with engine-side
+set/jump, FLX4 note-off releases, transition ENTRY POINT: PERFORM/TUTORIAL
+seek to the recorded anchor beat, new ⚡ PRIME arms loop-style firing when
+playback crosses the anchor, orange "T" markers on all waveforms.
+
+Next parity targets (not started): loops (auto/manual + entering stored
+loops), FX section, beat jump, sampler pads, colored overview waveforms,
+key detection/display, pitch-fader value readouts, 4-deck mode, master
+recording, library crates/playlists + iTunes import, history panel.
+
 ## TODO backlog (post-MVP)
 
 - Fill the deck dead space (below hot cues) with loop / FX / beat-jump
