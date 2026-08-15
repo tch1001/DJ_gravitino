@@ -7,6 +7,7 @@ namespace gvt {
 namespace {
 
 constexpr std::uint8_t kNoteOn = 0x90;
+constexpr std::uint8_t kNoteOff = 0x80;
 constexpr std::uint8_t kControlChange = 0xB0;
 
 constexpr std::uint8_t kDeck1Channel = 0x00;
@@ -110,22 +111,25 @@ std::optional<ControlEvent> Flx4Mapping::parse(
         return parseControlChange(channel, data1, data2);
     }
 
-    // FLX4 buttons use NOTE ON with velocity 0 for release. MVP trigger
-    // controls are actions, so releases (and explicit NOTE OFF messages) are
-    // intentionally ignored.
-    if (command != kNoteOn || data2 == 0) {
+    if (command != kNoteOn && command != kNoteOff) {
         return std::nullopt;
     }
+    const bool pressed = command == kNoteOn && data2 != 0;
 
     if (isDeckChannel(channel)) {
         const DeckId deck = deckForChannel(channel);
         switch (data1) {
         case kPlayNote:
-            return ControlEvent {deck, ControlId::Play, 1.0};
+            if (pressed)
+                return ControlEvent {deck, ControlId::Play, 1.0};
+            return std::nullopt;
         case kCueNote:
-            return ControlEvent {deck, ControlId::Cue, 1.0};
+            return ControlEvent {
+                deck, ControlId::Cue, pressed ? 1.0 : 0.0};
         case kBeatSyncNote:
-            return ControlEvent {deck, ControlId::TempoSync, 1.0};
+            if (pressed)
+                return ControlEvent {deck, ControlId::TempoSync, 1.0};
+            return std::nullopt;
         default:
             return std::nullopt;
         }
@@ -134,7 +138,8 @@ std::optional<ControlEvent> Flx4Mapping::parse(
     if ((channel == kDeck1HotCueChannel || channel == kDeck2HotCueChannel)
         && data1 < 8) {
         const DeckId deck = channel == kDeck1HotCueChannel ? 0 : 1;
-        return ControlEvent {deck, hotCueId(data1), 1.0};
+        return ControlEvent {
+            deck, hotCueId(data1), pressed ? 1.0 : 0.0};
     }
 
     return std::nullopt;

@@ -53,7 +53,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     list_->setMinimumHeight(52);
     list_->setMaximumHeight(96);
     leftCol->addWidget(list_, 1);
-    root->addLayout(leftCol, 1);
+    root->addLayout(leftCol, 2);
 
     // Right: controls.
     auto* rightCol = new QVBoxLayout;
@@ -69,7 +69,12 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
         tr("Practice this transition: prompts appear 4 beats ahead,\n"
            "your moves are scored against the recording."));
     abortBtn_ = new QPushButton(tr("⏹ ABORT"));
-    for (auto* b : {recBtn_, stopSaveBtn_, performBtn_, tutorialBtn_, abortBtn_})
+    primeBtn_ = new QPushButton(tr("⚡ PRIME"));
+    primeBtn_->setToolTip(
+        tr("Arm the selected transition without seeking: it fires\n"
+           "automatically when playback reaches the marked entry beat\n"
+           "(like entering a stored loop)."));
+    for (auto* b : {recBtn_, stopSaveBtn_, performBtn_, primeBtn_, tutorialBtn_, abortBtn_})
         buttons->addWidget(b);
     rightCol->addLayout(buttons);
 
@@ -97,8 +102,11 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
             &TransitionPanel::onStopSave);
     connect(performBtn_, &QPushButton::clicked, this,
             &TransitionPanel::onPerform);
+    connect(primeBtn_, &QPushButton::clicked, this, &TransitionPanel::onPrime);
+    connect(list_, &QListWidget::currentRowChanged, this,
+            [this](int) { announceEntryMarker(); });
     connect(tutorialBtn_, &QPushButton::clicked, this,
-            [this] { startReplay(PlayerMode::Tutorial); });
+            [this] { startReplay(PlayerMode::Tutorial, /*prime=*/false); });
     connect(abortBtn_, &QPushButton::clicked, this, &TransitionPanel::onAbort);
 
     connect(store_, &TransitionStore::changed, this,
@@ -231,9 +239,27 @@ void TransitionPanel::onStopSave()
     // Store emits changed() -> refreshMatches().
 }
 
-void TransitionPanel::onPerform() { startReplay(PlayerMode::Perform); }
+void TransitionPanel::announceEntryMarker()
+{
+    const int idx = selectedMatch();
+    if (idx < 0) {
+        emit entryMarkerChanged(0, -1.0);
+        emit entryMarkerChanged(1, -1.0);
+        return;
+    }
+    const Match& m = matches_[(size_t)idx];
+    double sec = -1.0;
+    if (TrackDataPtr t = engine_->deck(m.fromDeck).track())
+        sec = t->secAtBeat(m.file->anchorFromBeat);
+    emit entryMarkerChanged(m.fromDeck, sec);
+    emit entryMarkerChanged(m.fromDeck == 0 ? 1 : 0, -1.0);
+}
 
-void TransitionPanel::startReplay(PlayerMode mode)
+void TransitionPanel::onPerform() { startReplay(PlayerMode::Perform, /*prime=*/false); }
+
+void TransitionPanel::onPrime() { startReplay(PlayerMode::Perform, /*prime=*/true); }
+
+void TransitionPanel::startReplay(PlayerMode mode, bool prime)
 {
     int idx = selectedMatch();
     if (idx < 0) {
@@ -241,19 +267,35 @@ void TransitionPanel::startReplay(PlayerMode mode)
         return;
     }
     const Match& m = matches_[(size_t)idx];
-    // A stopped from-deck means the beat clock never advances; start it.
-    if (!engine_->deck(m.fromDeck).playing.load())
-        bus_->dispatch({m.fromDeck, ControlId::Play, 1.0}, Origin::System);
     transitionPlayerSetMode(player_, mode);
+
+    if (!prime) {
+        // PERFORM/TUTORIAL start AT the recorded entry point: seek the
+        // outgoing deck to the transition's anchor beat and roll from there.
+        if (TrackDataPtr t = engine_->deck(m.fromDeck).track())
+            engine_->deck(m.fromDeck).seekSec(t->secAtBeat(m.file->anchorFromBeat));
+        if (!engine_->deck(m.fromDeck).playing.load())
+            bus_->dispatch({m.fromDeck, ControlId::Play, 1.0}, Origin::System);
+    }
+    // Always arm on the beat clock (startNow=false): events fire as playback
+    // crosses the anchor — immediately after the seek above, or whenever the
+    // music reaches the marked beat when primed (like entering a stored loop).
     QString error;
-    if (!player_->arm(*m.file, m.fromDeck, /*startNow=*/true, &error)) {
+    if (!player_->arm(*m.file, m.fromDeck, /*startNow=*/false, &error)) {
         emit statusMessage(tr("Can't start: %1").arg(error), 6000);
         return;
     }
-    emit statusMessage(mode == PlayerMode::Tutorial
-                           ? tr("Tutorial: \"%1\" — follow the prompts!").arg(m.file->name)
-                           : tr("Performing \"%1\"…").arg(m.file->name),
-                       4000);
+    if (prime)
+        emit statusMessage(tr("Primed \"%1\" — fires when deck %2 reaches beat %3")
+                               .arg(m.file->name)
+                               .arg(m.fromDeck == 0 ? QStringLiteral("A") : QStringLiteral("B"))
+                               .arg(m.file->anchorFromBeat, 0, 'f', 1),
+                           6000);
+    else
+        emit statusMessage(mode == PlayerMode::Tutorial
+                               ? tr("Tutorial: \"%1\" — follow the prompts!").arg(m.file->name)
+                               : tr("Performing \"%1\"…").arg(m.file->name),
+                           4000);
 }
 
 void TransitionPanel::onAbort()

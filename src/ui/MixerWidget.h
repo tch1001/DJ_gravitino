@@ -7,9 +7,11 @@ class QSlider;
 
 namespace gvt {
 
-// Two channel strips (trim, EQ hi/mid/low, channel fader) + crossfader.
-// User actions dispatch onto the ControlBus (Origin::Ui); bus events from
-// MIDI/Replay are mirrored back into the controls without re-dispatching.
+// Compact horizontal mixer strip (<= ~110 px tall): per channel inline
+// TRIM + HI/MID/LOW knobs and a small vertical fader, with the crossfader
+// in the center. User actions dispatch onto the ControlBus (Origin::Ui);
+// bus events from MIDI/Replay are mirrored back into the controls without
+// re-dispatching.
 class MixerWidget : public QWidget {
     Q_OBJECT
 public:

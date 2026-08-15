@@ -21,6 +21,12 @@ float normalizedValue(double value) noexcept
     return static_cast<float>(std::clamp(value, 0.0, 1.0));
 }
 
+bool isReleaseAwareTrigger(ControlId id) noexcept
+{
+    return id == ControlId::Cue ||
+        (id >= ControlId::HotCue1 && id <= ControlId::HotCue8);
+}
+
 } // namespace
 
 struct AudioEngine::Impl {
@@ -170,9 +176,11 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
 {
     (void)origin;
 
-    if (controlIsTrigger(event.id) &&
-        (!std::isfinite(event.value) || event.value <= 0.0)) {
-        return;
+    if (controlIsTrigger(event.id)) {
+        if (!std::isfinite(event.value))
+            return;
+        if (!isReleaseAwareTrigger(event.id) && event.value <= 0.0)
+            return;
     }
 
     if (event.id == ControlId::Crossfader) {
@@ -194,7 +202,7 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
         target.stop();
         break;
     case ControlId::Cue:
-        target.cueJump();
+        target.handleCue(event.value >= 0.5);
         break;
     case ControlId::Load:
         // TransitionPlayer resolves and loads the TrackData before dispatch.
@@ -232,10 +240,29 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
     case ControlId::HotCue5:
     case ControlId::HotCue6:
     case ControlId::HotCue7:
-    case ControlId::HotCue8:
-        target.jumpHotCue(static_cast<int>(event.id) -
-                          static_cast<int>(ControlId::HotCue1));
+    case ControlId::HotCue8: {
+        if (event.value < 0.5)
+            break;
+
+        const int index = static_cast<int>(event.id) -
+                          static_cast<int>(ControlId::HotCue1);
+        const TrackDataPtr currentTrack = target.track();
+        if (!currentTrack)
+            break;
+
+        const double hotCueSec = currentTrack->hotCues[index];
+        if (!std::isfinite(hotCueSec) || hotCueSec < 0.0) {
+            target.setHotCue(index);
+            break;
+        }
+
+        const bool wasPlaying =
+            target.playing.load(std::memory_order_acquire);
+        target.jumpHotCue(index);
+        if (!wasPlaying)
+            target.play();
         break;
+    }
     case ControlId::Tempo:
         if (std::isfinite(event.value) && event.value > 0.0) {
             target.tempoRatio.store(std::clamp(event.value, 0.01, 4.0),

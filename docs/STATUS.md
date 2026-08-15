@@ -6,6 +6,36 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-15 (claude-ui2): **UI restructured toward Serato DJ Pro parity.**
+  New layout (top to bottom): Row 1 = Deck A | Deck B panels at exactly 1:1
+  stretch (no center mixer column); each deck has a compact 44 px overview
+  waveform (click-to-seek, slot-colored hotcue flags, cue-point notch,
+  orange "T" transition-entry marker), title/artist/BPM→effective/elapsed-
+  remaining info lines, PLAY/CUE/SYNC transport, 2x4 square hot-cue pads,
+  and a vertical tempo slider on the OUTER edge (left for A, right for B).
+  Row 2 = new full-width `DetailWaveformView` (src/ui/DetailWaveformView.*,
+  added to CMakeLists gravitino sources): two 72 px scrolling zoomed lanes
+  (A over B), fixed center playhead, band-colored bars from
+  overviewLow/Mid/High (#e0554d/#54c17a/#5a8fe8, low in back; gray
+  overviewPeaks fallback), per-beat grid ticks (strong every 4), hot-cue
+  flags, cue point, transition-entry marker, lane-click seek, wheel/± zoom
+  4..30 s (default 8 s), ~30 Hz repaint while playing. Row 3 = compact
+  horizontal MixerWidget (≤110 px: inline TRIM/HI/MID/LOW knobs + 64 px
+  fader per channel, 200 px center crossfader) side by side with the
+  TransitionPanel. Row 4 = library. Semantics: hot-cue pads and CUE now
+  dispatch on pressed() with value 1.0 and released() with 0.0 (engine owns
+  hold-to-preview); PLAY stays a checkable toggled() wire; all actions
+  still flow through the bus with the QSignalBlocker mirror pattern;
+  right-/shift-click still clears a hotcue. New public slot
+  `MainWindow::setTransitionEntryMarker(int deck, double sec)` (sec<0 =
+  clear) relays to both deck overviews and the detail view — orchestrator:
+  call this from the entry-point logic. TransitionPanel.cpp untouched.
+  Verified: full build clean, all 4 UI TUs warning-clean (-Wall -Wextra),
+  GUI launches. NOTE: `--selftest` currently fails ("player STILL ACTIVE")
+  on the fresh build but passes on the pre-existing binary; selftest has
+  zero src/ui dependency, so this is the concurrent audio cue-semantics
+  work in flight, not the UI restructure.
+
 - 2026-08-15 ~05:00: **MVP complete and verified end-to-end.** All modules
   implemented, app builds/links clean, 4/4 unit tests pass, `--selftest` green
   (decode ▸ BPM ▸ .gvt parse/serialize ▸ offline transition render ▸ recorder
@@ -54,10 +84,10 @@ FLX4 may or may not be plugged in — MidiEngine must never crash without it.
 |---|---|---|
 | control/ControlBus.* | orchestrator | DONE |
 | audio/{AudioEngine,Deck,Eq}.cpp | codex-audio | DONE |
-| analysis/{TrackData,BeatAnalyzer}.cpp, library/*.cpp | claude-analysis | DONE — decode/tags/fingerprint/beatgrid + library model/cache + TransitionStore (incl. gvt::matchTrack). Demo Track 1 → 128.0 BPM, Demo Track 2 → 120.0 BPM. tests/test_beats.cpp + tests/test_fingerprint.cpp pass standalone; ctest link pending peers' objects. |
+| analysis/{TrackData,BeatAnalyzer}.cpp, library/*.cpp | claude-analysis | DONE — decode/tags/fingerprint/beatgrid + library model/cache + TransitionStore (incl. gvt::matchTrack). Demo Track 1 → 128.0 BPM, Demo Track 2 → 120.0 BPM. tests/test_beats.cpp + tests/test_fingerprint.cpp pass standalone; ctest link pending peers' objects. 2026-08-15 (claude-analysis2): added Serato-style band waveform data — `TrackData::overviewLow/Mid/High` (per-512-frame-bin peak abs of one-pole-filtered mono: low <200 Hz, mid 200–2000, high >2000; all three normalized by one shared global max, always sized like overviewPeaks, silent→zeros/no NaN). Computed in loadAndAnalyzeTrack and recomputed from PCM on library cache hits via `detail::computeBandOverviews` (AnalysisInternal.h) — NOT stored in the JSON cache, cache format unchanged. Verified: TrackData.cpp.o + TrackLibrary.cpp.o compile warning-clean; standalone probe on Demo Track 1 prints 16166 bins per band, non-zero, sizes equal to overviewPeaks. |
 | transitions/{GvtFormat,TransitionRecorder,TransitionPlayer}.cpp, tests | claude-transitions | DONE |
 | midi/{MidiEngine,Flx4Mapping}.cpp | codex-midi | DONE |
-| ui/*.cpp, app/* | claude-ui | DONE — ui/{MainWindow,DeckWidget,MixerWidget,LibraryWidget,TransitionPanel,Theme}.h+cpp, app/main.cpp, app/SelfTest.h (declares `gvt::runSelfTest`; SelfTest.cpp is the orchestrator's). All 6 TUs + moc outputs compile warning-clean (-Wall -Wextra). Notes: (1) pinned TrackLibrary.h/TransitionEngine.h pImpl classes (TransitionStore/Recorder/Player) declare no destructor, so any TU destroying them fails to compile — main.cpp heap-allocates them with process lifetime as a workaround; header owners should add declared dtors (moc/mocs_compilation may hit the same issue). (2) `gvt::transitionPlayerSetMode` doesn't exist and `arm()` has no PlayerMode arg, so the TUTORIAL button is disabled ("coming soon"); tutorialPrompt/tutorialScored signals are wired (banner + accuracy toasts) and light up once the player emits them. (3) Hotcue clear writes `track->hotCues[i] = -1` directly (no Deck clear API). (4) UI mirrors Play state by polling `deck.playing` at 30 Hz; continuous controls mirror via bus events with QSignalBlocker. |
+| ui/*.cpp, app/* | claude-ui / claude-ui2 | DONE — Serato-parity restructure 2026-08-15 (see Current state above): equal deck halves + outer tempo sliders, new DetailWaveformView center lanes, horizontal mixer strip, press/release Cue + hot-cue dispatch, MainWindow::setTransitionEntryMarker. Original notes:  ui/{MainWindow,DeckWidget,MixerWidget,LibraryWidget,TransitionPanel,Theme}.h+cpp, app/main.cpp, app/SelfTest.h (declares `gvt::runSelfTest`; SelfTest.cpp is the orchestrator's). All 6 TUs + moc outputs compile warning-clean (-Wall -Wextra). Notes: (1) pinned TrackLibrary.h/TransitionEngine.h pImpl classes (TransitionStore/Recorder/Player) declare no destructor, so any TU destroying them fails to compile — main.cpp heap-allocates them with process lifetime as a workaround; header owners should add declared dtors (moc/mocs_compilation may hit the same issue). (2) `gvt::transitionPlayerSetMode` doesn't exist and `arm()` has no PlayerMode arg, so the TUTORIAL button is disabled ("coming soon"); tutorialPrompt/tutorialScored signals are wired (banner + accuracy toasts) and light up once the player emits them. (3) Hotcue clear writes `track->hotCues[i] = -1` directly (no Deck clear API). (4) UI mirrors Play state by polling `deck.playing` at 30 Hz; continuous controls mirror via bus events with QSignalBlocker. |
 | integration/selftest | orchestrator | DONE — see Verification below |
 
 ### DDJ-FLX4 MIDI messages mapped
@@ -69,11 +99,11 @@ the completed value on receipt of the LSB. Deck A/B below are ControlBus deck
 
 | Control | Deck | MIDI input (hex) | ControlBus mapping / MIDI LED output |
 |---|---:|---|---|
-| PLAY/PAUSE | A / B | `90 0B hh` / `91 0B hh` | Nonzero press toggles `Play`/`Stop`; LED `90 0B 7F/00` / `91 0B 7F/00` |
-| Deck CUE | A / B | `90 0C hh` / `91 0C hh` | Nonzero press → `Cue`; LED `90 0C 7F/00` / `91 0C 7F/00` |
+| PLAY/PAUSE | A / B | `90 0B hh` / `91 0B hh` | Nonzero NOTE ON toggles `Play`/`Stop`; velocity-zero NOTE ON and NOTE OFF are ignored; LED `90 0B 7F/00` / `91 0B 7F/00` |
+| Deck CUE | A / B | `90 0C hh` / `91 0C hh` | Nonzero NOTE ON → `Cue=1`; velocity-zero NOTE ON or `80/81 0C hh` NOTE OFF → `Cue=0`; LED is on while `cuePointSec >= 0` |
 | BEAT SYNC | A / B | `90 58 hh` / `91 58 hh` | Nonzero press → `TempoSync` |
-| Hot-cue pads 1–8 (HOT CUE mode) | A | `97 00..07 hh` | Nonzero press → `HotCue1..8`; LED `97 00..07 7F/00` |
-| Hot-cue pads 1–8 (HOT CUE mode) | B | `99 00..07 hh` | Nonzero press → `HotCue1..8`; LED `99 00..07 7F/00` |
+| Hot-cue pads 1–8 (HOT CUE mode) | A | `97 00..07 hh` | Nonzero NOTE ON → `HotCue1..8=1`; velocity-zero NOTE ON or NOTE OFF → `HotCue1..8=0`; LED `97 00..07 7F/00` |
+| Hot-cue pads 1–8 (HOT CUE mode) | B | `99 00..07 hh` | Nonzero NOTE ON → `HotCue1..8=1`; velocity-zero NOTE ON or NOTE OFF → `HotCue1..8=0`; LED `99 00..07 7F/00` |
 | TEMPO slider, 14-bit | A / B | `B0/B1 00 mm`, then `B0/B1 20 ll` | Raw `0000`/`2000`/`3FFF` → ratio `0.92`/`1.00`/`1.08`; physical `+`/down/toward-user end is faster |
 | Channel fader, 14-bit | A / B | `B0/B1 13 mm`, then `B0/B1 33 ll` | `Fader = raw / 3FFF` |
 | TRIM, 14-bit | A / B | `B0/B1 04 mm`, then `B0/B1 24 ll` | `Trim = raw / 3FFF` |
@@ -83,10 +113,23 @@ the completed value on receipt of the LSB. Deck A/B below are ControlBus deck
 | Crossfader, 14-bit | Global | `B6 1F mm`, then `B6 3F ll` | `Crossfader = raw / 3FFF`; `0000` = full left/deck A, `3FFF` = full right/deck B |
 | Jog side / platter (vinyl on / vinyl off) | A / B | `B0/B1 21/22/23 vv` | `Jog = signed(vv - 40)` ticks; `41` = +1 clockwise, `3F` = -1 counterclockwise, `40` ignored; all modes nudge for MVP |
 
-Button NOTE ON messages with velocity `00` (release), and explicit NOTE OFF
-messages, are ignored because these MVP controls are actions. LED state is
-sent only for non-MIDI-origin bus events to prevent feedback loops; cached
-play, cue, and hot-cue state is restored when the output port reconnects.
+PLAY and BEAT SYNC releases remain press-only and are ignored. CUE and hot-cue
+releases are dispatched so hold-preview and future pad-release behavior reach
+the deck. LED state is sent only for non-MIDI-origin bus events to prevent
+feedback loops; cached play, cue-point, and hot-cue state is reconciled against
+the engine and restored when the output port reconnects.
+
+### Transport semantics
+
+- Loading a track stops it, rewinds it, and initializes the deck cue point to
+  `firstBeatSec`.
+- CUE while playing stops and returns to the deck cue point (falling back to
+  `firstBeatSec` only if no cue is set). While paused, CUE within 50 ms of the
+  cue point previews for as long as the button is held, returning on release;
+  pressing CUE elsewhere stores the current position without starting playback.
+- Pressing an unset hot cue stores the current position. Pressing a set hot cue
+  jumps to it and starts playback if the deck was paused. Hot-cue release is a
+  dispatched no-op in this pass.
 
 ## Known decisions & gotchas
 

@@ -10,28 +10,36 @@ class QTimer;
 
 namespace gvt {
 
-// Custom-painted track overview: peak bars, played tint, playhead, beatgrid
-// ticks, numbered hotcue flags. Click to seek.
+// Compact whole-track overview waveform (~44 px): peak bars, played tint,
+// playhead, beatgrid ticks, numbered hotcue flags in slot colors, cue point
+// and transition-entry markers. Click to seek.
 class WaveformView : public QWidget {
     Q_OBJECT
 public:
     WaveformView(int deckIndex, Deck* deck, QWidget* parent = nullptr);
+    void setTransitionEntry(double sec); // sec < 0 = none
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
 private:
     int deckIndex_;
     Deck* deck_;
+    double transitionEntrySec_ = -1.0;
 };
 
-// One deck: waveform, track labels, transport, sync, tempo slider, hotcues.
+// One deck panel (Serato-style): overview waveform, track info lines,
+// PLAY/CUE/SYNC transport, 2x4 hot-cue pads, and a narrow vertical tempo
+// slider on the outer edge (left for deck A, right for deck B).
 // All user actions go through the ControlBus (Origin::Ui) except the
-// documented direct-API calls (seek, load, hotcue set/jump).
+// documented direct-API calls (seek, load, hotcue clear).
 class DeckWidget : public QWidget {
     Q_OBJECT
 public:
     DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
                QWidget* parent = nullptr);
+
+    // Relay from MainWindow::setTransitionEntryMarker; sec < 0 = none.
+    void setTransitionEntry(double sec);
 
 public slots:
     void trackChanged();   // call after a track (un)load to refresh labels
@@ -40,7 +48,6 @@ private slots:
     void onBusEvent(const gvt::ControlEvent& e, gvt::Origin origin);
     void refresh();        // ~30 Hz UI poll
     void onTempoSlider(int value);
-    void onHotCueClicked(int i);
 
 private:
     void dispatch(ControlId id, double value = 1.0);

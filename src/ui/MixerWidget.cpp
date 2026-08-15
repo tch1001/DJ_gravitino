@@ -2,7 +2,6 @@
 #include "Theme.h"
 
 #include <QDial>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QSignalBlocker>
@@ -26,7 +25,7 @@ static QLabel* caption(const QString& text)
 {
     auto* l = new QLabel(text);
     l->setAlignment(Qt::AlignHCenter);
-    l->setStyleSheet(QStringLiteral("color:%1; font-size:10px;")
+    l->setStyleSheet(QStringLiteral("color:%1; font-size:9px;")
                          .arg(themeDimText().name()));
     return l;
 }
@@ -36,28 +35,23 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
 {
     setObjectName(QStringLiteral("mixerWidget"));
     setProperty("panel", true);
+    setMaximumHeight(110);
 
-    auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(6, 4, 6, 4);
-    root->setSpacing(3);
+    // One horizontal row: [channel A] | crossfader | [channel B].
+    auto* row = new QHBoxLayout(this);
+    row->setContentsMargins(8, 4, 8, 4);
+    row->setSpacing(10);
 
-    auto* header = new QLabel(tr("MIXER"));
-    header->setAlignment(Qt::AlignHCenter);
-    header->setStyleSheet(QStringLiteral("color:%1; font-weight:bold; "
-                                         "letter-spacing:2px;")
-                              .arg(themeText().name()));
-    root->addWidget(header);
+    row->addWidget(buildStrip(0));
 
-    auto* stripsRow = new QHBoxLayout;
-    stripsRow->setSpacing(8);
-    stripsRow->addWidget(buildStrip(0));
-    stripsRow->addWidget(buildStrip(1));
-    root->addLayout(stripsRow, 1);
-
-    // Crossfader.
+    // Center: crossfader (~200 px).
+    auto* xfCol = new QVBoxLayout;
+    xfCol->setSpacing(2);
+    xfCol->addStretch(1);
     crossfader_ = new QSlider(Qt::Horizontal);
     crossfader_->setRange(0, kSteps);
     crossfader_->setValue(0);
+    crossfader_->setFixedWidth(200);
     crossfader_->setToolTip(tr("Crossfader: A ↔ B"));
     connect(crossfader_, &QSlider::valueChanged, this, [this](int v) {
         if (!crossfader_->signalsBlocked())
@@ -66,6 +60,7 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
                 Origin::Ui);
     });
     auto* xfRow = new QHBoxLayout;
+    xfRow->setSpacing(4);
     auto* aLbl = new QLabel(QStringLiteral("A"));
     aLbl->setStyleSheet(QStringLiteral("color:%1; font-weight:bold;")
                             .arg(deckAccent(0).name()));
@@ -73,10 +68,15 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
     bLbl->setStyleSheet(QStringLiteral("color:%1; font-weight:bold;")
                             .arg(deckAccent(1).name()));
     xfRow->addWidget(aLbl);
-    xfRow->addWidget(crossfader_, 1);
+    xfRow->addWidget(crossfader_);
     xfRow->addWidget(bLbl);
-    root->addLayout(xfRow);
-    root->addWidget(caption(tr("CROSSFADER")));
+    xfCol->addLayout(xfRow);
+    xfCol->addWidget(caption(tr("CROSSFADER")));
+    xfCol->addStretch(1);
+    row->addLayout(xfCol);
+
+    row->addWidget(buildStrip(1));
+    row->addStretch(1);
 
     connect(bus_, &ControlBus::eventDispatched, this,
             &MixerWidget::onBusEvent);
@@ -87,7 +87,7 @@ void MixerWidget::wireDial(QDial* d, int deck, ControlId id, double initial)
     d->setRange(0, kSteps);
     d->setValue(toSteps(initial));
     d->setNotchesVisible(true);
-    d->setFixedSize(36, 36);
+    d->setFixedSize(32, 32);
     connect(d, &QDial::valueChanged, this, [this, d, deck, id](int v) {
         if (!d->signalsBlocked())
             bus_->dispatch(ControlEvent{deck, id, fromSteps(v)}, Origin::Ui);
@@ -96,51 +96,55 @@ void MixerWidget::wireDial(QDial* d, int deck, ControlId id, double initial)
 
 QWidget* MixerWidget::buildStrip(int deck)
 {
+    // Inline horizontal channel strip:
+    // [A] [TRIM] [HI] [MID] [LOW] [fader]
     auto* w = new QWidget(this);
-    auto* col = new QVBoxLayout(w);
-    col->setContentsMargins(0, 0, 0, 0);
-    col->setSpacing(2);
+    auto* row = new QHBoxLayout(w);
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(4);
 
     auto* deckLbl = new QLabel(deck == 0 ? QStringLiteral("A")
                                          : QStringLiteral("B"));
-    deckLbl->setAlignment(Qt::AlignHCenter);
     deckLbl->setStyleSheet(QStringLiteral("color:%1; font-weight:bold;")
                                .arg(deckAccent(deck).name()));
-    col->addWidget(deckLbl);
+    row->addWidget(deckLbl);
 
     Strip& s = strips_[deck];
-    s.trim = new QDial(w);
-    wireDial(s.trim, deck, ControlId::Trim, 0.5);
-    col->addWidget(s.trim, 0, Qt::AlignHCenter);
-    col->addWidget(caption(tr("TRIM")));
+    auto addKnob = [&](QDial*& dial, ControlId id, const QString& name) {
+        auto* col = new QVBoxLayout;
+        col->setSpacing(1);
+        dial = new QDial(w);
+        wireDial(dial, deck, id, 0.5);
+        col->addStretch(1);
+        col->addWidget(dial, 0, Qt::AlignHCenter);
+        col->addWidget(caption(name));
+        col->addStretch(1);
+        row->addLayout(col);
+    };
+    addKnob(s.trim, ControlId::Trim, tr("TRIM"));
+    addKnob(s.eqHigh, ControlId::EqHigh, tr("HI"));
+    addKnob(s.eqMid, ControlId::EqMid, tr("MID"));
+    addKnob(s.eqLow, ControlId::EqLow, tr("LOW"));
 
-    s.eqHigh = new QDial(w);
-    wireDial(s.eqHigh, deck, ControlId::EqHigh, 0.5);
-    col->addWidget(s.eqHigh, 0, Qt::AlignHCenter);
-    col->addWidget(caption(tr("HI")));
-
-    s.eqMid = new QDial(w);
-    wireDial(s.eqMid, deck, ControlId::EqMid, 0.5);
-    col->addWidget(s.eqMid, 0, Qt::AlignHCenter);
-    col->addWidget(caption(tr("MID")));
-
-    s.eqLow = new QDial(w);
-    wireDial(s.eqLow, deck, ControlId::EqLow, 0.5);
-    col->addWidget(s.eqLow, 0, Qt::AlignHCenter);
-    col->addWidget(caption(tr("LOW")));
-
+    auto* faderCol = new QVBoxLayout;
+    faderCol->setSpacing(1);
     s.fader = new QSlider(Qt::Vertical, w);
     s.fader->setRange(0, kSteps);
     s.fader->setValue(kSteps);
-    s.fader->setMinimumHeight(72);
+    s.fader->setFixedHeight(64);
+    // The app stylesheet's QSlider:vertical min-height (84px) would defeat
+    // the compact strip; override locally.
+    s.fader->setStyleSheet(
+        QStringLiteral("QSlider:vertical { min-height: 64px; }"));
     connect(s.fader, &QSlider::valueChanged, this, [this, deck](int v) {
         QSlider* f = strips_[deck].fader;
         if (!f->signalsBlocked())
             bus_->dispatch(ControlEvent{deck, ControlId::Fader, fromSteps(v)},
                            Origin::Ui);
     });
-    col->addWidget(s.fader, 1, Qt::AlignHCenter);
-    col->addWidget(caption(tr("FADER")));
+    faderCol->addWidget(s.fader, 0, Qt::AlignHCenter);
+    faderCol->addWidget(caption(tr("FADER")));
+    row->addLayout(faderCol);
     return w;
 }
 

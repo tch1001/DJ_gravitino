@@ -93,8 +93,11 @@ struct TransitionPlayer::Impl {
             sinceLastBeat.restart();
             return b;
         }
+        // Extrapolate only once the transition is underway (rel >= 0): while
+        // PRIMED and waiting for the deck to reach the anchor, a paused deck
+        // must freeze the clock, not creep toward beat 0 on wall time.
         const double bpm = file.masterBpm > 0.0 ? file.masterBpm : d.effectiveBpm();
-        if (haveLastBeat && bpm > 0.0)
+        if (haveLastBeat && lastBeat >= 0.0 && bpm > 0.0)
             return lastBeat + sinceLastBeat.nsecsElapsed() * 1e-9 * bpm / 60.0;
         return d.beatPosition() - anchorFrom;
     }

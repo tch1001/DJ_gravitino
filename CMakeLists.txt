@@ -43,6 +43,7 @@ add_executable(gravitino MACOSX_BUNDLE
     src/app/SelfTest.cpp
     src/ui/MainWindow.cpp
     src/ui/DeckWidget.cpp
+    src/ui/DetailWaveformView.cpp
     src/ui/MixerWidget.cpp
     src/ui/LibraryWidget.cpp
     src/ui/TransitionPanel.cpp

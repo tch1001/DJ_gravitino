@@ -79,6 +79,53 @@ std::vector<float> computeOverviewPeaks(const std::vector<float>& stereoPcm)
     return peaks;
 }
 
+void computeBandOverviews(const std::vector<float>& stereoPcm,
+                          std::vector<float>& low,
+                          std::vector<float>& mid,
+                          std::vector<float>& high)
+{
+    constexpr int kBin = 512; // frames per bin — must match computeOverviewPeaks
+    const int64_t frames = (int64_t)stereoPcm.size() / 2;
+    const size_t nBins = (size_t)((frames + kBin - 1) / kBin);
+    low.assign(nBins, 0.0f);
+    mid.assign(nBins, 0.0f);
+    high.assign(nBins, 0.0f);
+    if (nBins == 0) return;
+
+    // Two independent one-pole lowpasses; bands by difference:
+    //   low = lp200, mid = lp2000 - lp200, high = mono - lp2000.
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    const float aLo = 1.0f - std::exp(-kTwoPi * 200.0f  / (float)kSampleRate);
+    const float aHi = 1.0f - std::exp(-kTwoPi * 2000.0f / (float)kSampleRate);
+    float lp200 = 0.0f, lp2000 = 0.0f;
+
+    for (int64_t i = 0; i < frames; ++i) {
+        const float m = 0.5f * (stereoPcm[(size_t)(2 * i)] +
+                                stereoPcm[(size_t)(2 * i + 1)]);
+        lp200  += aLo * (m - lp200);
+        lp2000 += aHi * (m - lp2000);
+        const size_t b = (size_t)(i / kBin);
+        const float lo = std::fabs(lp200);
+        const float md = std::fabs(lp2000 - lp200);
+        const float hi = std::fabs(m - lp2000);
+        if (lo > low[b])  low[b]  = lo;
+        if (md > mid[b])  mid[b]  = md;
+        if (hi > high[b]) high[b] = hi;
+    }
+
+    // Normalize all three bands by the same global max so relative band
+    // balance is preserved. Silent track -> gmax ~0 -> vectors stay all-zero.
+    float gmax = 0.0f;
+    for (const auto* v : {&low, &mid, &high})
+        for (float x : *v)
+            if (x > gmax) gmax = x;
+    if (gmax <= 1e-9f) return;
+    const float inv = 1.0f / gmax;
+    for (auto* v : {&low, &mid, &high})
+        for (float& x : *v)
+            x = std::min(1.0f, x * inv);
+}
+
 std::vector<float> monoMixdown(const std::vector<float>& stereoPcm)
 {
     const int64_t frames = (int64_t)stereoPcm.size() / 2;
@@ -123,6 +170,7 @@ TrackDataPtr loadAndAnalyzeTrack(const QString& mp3Path, QString* error)
     detail::readTags(mp3Path, t->title, t->artist, t->album);
     t->durationSec = (double)t->frameCount() / (double)kSampleRate;
     t->overviewPeaks = detail::computeOverviewPeaks(t->pcm);
+    detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh);
     t->fingerprint = computeFingerprint(t->pcm.data(), t->frameCount());
 
     const std::vector<float> mono = detail::monoMixdown(t->pcm);

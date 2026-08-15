@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "DeckWidget.h"
+#include "DetailWaveformView.h"
 #include "LibraryWidget.h"
 #include "MixerWidget.h"
 #include "Theme.h"
@@ -89,23 +90,32 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     root->setContentsMargins(6, 6, 6, 6);
     root->setSpacing(4);
 
-    // Row 1: Deck A | Mixer | Deck B.
+    // Row 1: Deck A | Deck B — exactly equal halves (Serato-style, no
+    // center mixer column; tempo sliders sit on the outer edges).
     deckA_ = new DeckWidget(0, bus_, engine_);
     deckB_ = new DeckWidget(1, bus_, engine_);
-    mixer_ = new MixerWidget(bus_);
     auto* deckRow = new QHBoxLayout;
     deckRow->setSpacing(6);
-    deckRow->addWidget(deckA_, 4);
-    deckRow->addWidget(mixer_, 2);
-    deckRow->addWidget(deckB_, 4);
+    deckRow->addWidget(deckA_, 1);
+    deckRow->addWidget(deckB_, 1);
     root->addLayout(deckRow);
 
-    // Row 2: transition panel.
+    // Row 2: full-width scrolling detail waveforms (A lane over B lane,
+    // fixed center playhead).
+    detailWave_ = new DetailWaveformView(engine_);
+    root->addWidget(detailWave_);
+
+    // Row 3: compact horizontal mixer strip | transition panel.
+    mixer_ = new MixerWidget(bus_);
     transitionPanel_ =
         new TransitionPanel(bus_, engine_, store_, recorder, player);
-    root->addWidget(transitionPanel_);
+    auto* mixRow = new QHBoxLayout;
+    mixRow->setSpacing(6);
+    mixRow->addWidget(mixer_);
+    mixRow->addWidget(transitionPanel_, 2);
+    root->addLayout(mixRow);
 
-    // Row 3: library (takes the remaining space).
+    // Row 4: library (takes the remaining space).
     libraryWidget_ = new LibraryWidget(library_, engine_);
     root->addWidget(libraryWidget_, 2);
 
@@ -137,6 +147,8 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             [this](const QString& msg, int timeoutMs) {
                 statusBar()->showMessage(msg, timeoutMs);
             });
+    connect(transitionPanel_, &TransitionPanel::entryMarkerChanged, this,
+            &MainWindow::setTransitionEntryMarker);
     connect(transitionPanel_, &TransitionPanel::statusMessage, this,
             [this](const QString& msg, int timeoutMs) {
                 statusBar()->showMessage(msg, timeoutMs);
@@ -185,7 +197,15 @@ void MainWindow::onMidiConnection(bool connected, const QString& name)
 void MainWindow::notifyTrackLoaded(int deck)
 {
     (deck == 0 ? deckA_ : deckB_)->trackChanged();
+    detailWave_->update();
     transitionPanel_->refreshMatches();
+}
+
+void MainWindow::setTransitionEntryMarker(int deck, double sec)
+{
+    if (deck != 0 && deck != 1) return;
+    (deck == 0 ? deckA_ : deckB_)->setTransitionEntry(sec);
+    detailWave_->setTransitionEntry(deck, sec);
 }
 
 } // namespace gvt

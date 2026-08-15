@@ -361,7 +361,9 @@ struct MidiEngine::Impl {
         }
 
         if (event.id == ControlId::Cue) {
-            cue[deck] = event.value > 0.0;
+            cue[deck] = engine != nullptr &&
+                engine->deck(event.deck).cuePointSec.load(
+                    std::memory_order_relaxed) >= 0.0;
             if (mirrorToController) {
                 sendLed(event.deck, ControlId::Cue, cue[deck]);
             }
@@ -374,9 +376,16 @@ struct MidiEngine::Impl {
         if (idValue < firstHotCue || idValue > lastHotCue) {
             return;
         }
+        if (event.value < 0.5)
+            return;
 
         const auto pad = static_cast<std::size_t>(idValue - firstHotCue);
-        hotCue[deck][pad] = event.value > 0.0;
+        const TrackDataPtr currentTrack = engine != nullptr
+            ? engine->deck(event.deck).track()
+            : TrackDataPtr {};
+        hotCue[deck][pad] = currentTrack
+            ? currentTrack->hotCues[pad] >= 0.0
+            : true;
         if (mirrorToController) {
             sendLed(event.deck, event.id, hotCue[deck][pad]);
         }
@@ -400,8 +409,9 @@ struct MidiEngine::Impl {
         }
     }
 
-    // Cached transport state can drift from the engine (deck stops itself at
-    // end-of-track with no bus event; Play refused with no track loaded).
+    // Cached deck state can drift from the engine (deck stops itself at EOF,
+    // tracks load outside the bus, and cue/hot-cue LEDs represent stored
+    // points rather than momentary button state).
     // Poll the engine truth and push LED deltas.
     void reconcileTransportLeds() noexcept
     {
@@ -418,6 +428,31 @@ struct MidiEngine::Impl {
                     sendLed(deck, ControlId::Play, actual);
                 }
             }
+
+            const bool actualCue =
+                engine->deck(deck).cuePointSec.load(
+                    std::memory_order_relaxed) >= 0.0;
+            if (cue[index] != actualCue) {
+                cue[index] = actualCue;
+                if (connected)
+                    sendLed(deck, ControlId::Cue, actualCue);
+            }
+
+            const TrackDataPtr currentTrack = engine->deck(deck).track();
+            for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
+                const bool actualHotCue = currentTrack
+                    ? currentTrack->hotCues[pad] >= 0.0
+                    : false;
+                if (hotCue[index][pad] == actualHotCue)
+                    continue;
+
+                hotCue[index][pad] = actualHotCue;
+                if (connected) {
+                    const auto id = static_cast<ControlId>(
+                        static_cast<unsigned int>(ControlId::HotCue1) + pad);
+                    sendLed(deck, id, actualHotCue);
+                }
+            }
         }
     }
 
@@ -425,6 +460,21 @@ struct MidiEngine::Impl {
     {
         for (DeckId deck = 0; deck < 2; ++deck) {
             const auto index = static_cast<std::size_t>(deck);
+            if (engine != nullptr) {
+                playing[index].store(
+                    engine->deck(deck).playing.load(std::memory_order_relaxed),
+                    std::memory_order_relaxed);
+                cue[index] = engine->deck(deck).cuePointSec.load(
+                    std::memory_order_relaxed) >= 0.0;
+
+                const TrackDataPtr currentTrack = engine->deck(deck).track();
+                for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
+                    hotCue[index][pad] = currentTrack
+                        ? currentTrack->hotCues[pad] >= 0.0
+                        : false;
+                }
+            }
+
             sendLed(
                 deck, ControlId::Play,
                 playing[index].load(std::memory_order_relaxed));

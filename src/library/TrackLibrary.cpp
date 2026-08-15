@@ -117,6 +117,7 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
     for (int i = 0; i < 8 && i < cues.size(); ++i) t->hotCues[i] = cues[i].toDouble(-1.0);
     if (t->title.isEmpty()) t->title = QFileInfo(path).completeBaseName();
     t->overviewPeaks = detail::computeOverviewPeaks(t->pcm);
+    detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh);
     return t;
 }
 

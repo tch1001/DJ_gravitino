@@ -20,7 +20,9 @@ public:
     // GUI thread
     void loadTrack(TrackDataPtr t);          // stops, rewinds, swaps track
     TrackDataPtr track() const;              // may be null
-    void play(); void stop(); void cueJump();// cue = jump to firstBeat or hotcue0
+    void play(); void stop();
+    void handleCue(bool pressed);           // press/hold-preview/release semantics
+    void cueJump();                         // jump to the stored deck cue point
     void setHotCue(int i);                   // store current pos
     void jumpHotCue(int i);                  // jump if set
     void nudge(double ticks);                // transient tempo bend from jog
@@ -30,6 +32,7 @@ public:
     std::atomic<float>  trim       { 0.5f };
     std::atomic<float>  eqLow      { 0.5f }, eqMid { 0.5f }, eqHigh { 0.5f };
     std::atomic<bool>   playing    { false };
+    std::atomic<double> cuePointSec { -1.0 };
 
     // Audio thread: render `frames` of post-fader stereo into out (add nothing,
     // overwrite). Advances position.

@@ -11,6 +11,7 @@ class QLabel;
 namespace gvt {
 
 class DeckWidget;
+class DetailWaveformView;
 class MixerWidget;
 class LibraryWidget;
 class TransitionPanel;
@@ -25,6 +26,12 @@ public:
     // Dev hook (--autoload): a track was loaded onto `deck` outside the
     // library widget; refresh deck display + transition matches.
     void notifyTrackLoaded(int deck);
+
+public slots:
+    // Relays the transition entry point (sec < 0 = none) to the deck
+    // overview waveform and the center detail waveforms. Called by the
+    // orchestrator's transition entry-point logic.
+    void setTransitionEntryMarker(int deck, double sec);
 
 private slots:
     void openMusicFolder();
@@ -41,6 +48,7 @@ private:
 
     DeckWidget* deckA_ = nullptr;
     DeckWidget* deckB_ = nullptr;
+    DetailWaveformView* detailWave_ = nullptr;
     MixerWidget* mixer_ = nullptr;
     LibraryWidget* libraryWidget_ = nullptr;
     TransitionPanel* transitionPanel_ = nullptr;

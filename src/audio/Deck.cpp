@@ -14,6 +14,7 @@ namespace {
 
 constexpr double kJogRatioPerTick = 0.004;
 constexpr double kMaximumJogRatio = 0.25;
+constexpr double kCuePreviewToleranceSec = 0.05;
 // Reaches 0.1% of the initial bend after approximately 200 ms at 48 kHz.
 constexpr double kJogDecayPerFrame = 0.999280701;
 
@@ -45,6 +46,7 @@ struct Deck::Impl {
     std::atomic<int64_t> trackFrameCount { 0 };
     std::atomic<unsigned int> activeRenders { 0 };
     std::atomic<double> pendingJogRatio { 0.0 };
+    std::atomic<bool> cuePreviewing { false };
     double jogRatio = 0.0; // Audio-thread-owned after a safe track swap.
     Eq eq;
 
@@ -79,17 +81,20 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->ownedTrack = std::move(track);
     impl_->positionFrames.store(0.0, std::memory_order_release);
     impl_->pendingJogRatio.store(0.0, std::memory_order_release);
+    impl_->cuePreviewing.store(false, std::memory_order_release);
     impl_->jogRatio = 0.0;
     impl_->eq.reset();
 
     TrackData* const rawTrack = impl_->ownedTrack.get();
     if (rawTrack == nullptr) {
+        cuePointSec.store(-1.0, std::memory_order_release);
         impl_->trackBpm.store(0.0, std::memory_order_release);
         impl_->firstBeatSec.store(0.0, std::memory_order_release);
         impl_->trackFrameCount.store(0, std::memory_order_release);
         return;
     }
 
+    cuePointSec.store(rawTrack->firstBeatSec, std::memory_order_release);
     impl_->trackBpm.store(rawTrack->bpm, std::memory_order_release);
     impl_->firstBeatSec.store(rawTrack->firstBeatSec, std::memory_order_release);
     impl_->trackFrameCount.store(rawTrack->frameCount(), std::memory_order_release);
@@ -119,15 +124,53 @@ void Deck::stop()
     playing.store(false, std::memory_order_release);
 }
 
-void Deck::cueJump()
+void Deck::handleCue(bool pressed)
 {
     const TrackDataPtr currentTrack = track();
     if (!currentTrack)
         return;
 
-    const double cueSec = currentTrack->hotCues[0] >= 0.0
-        ? currentTrack->hotCues[0]
-        : currentTrack->firstBeatSec;
+    if (!pressed) {
+        if (!impl_->cuePreviewing.exchange(false, std::memory_order_acq_rel))
+            return;
+
+        stop();
+        cueJump();
+        return;
+    }
+
+    if (playing.load(std::memory_order_acquire)) {
+        impl_->cuePreviewing.store(false, std::memory_order_release);
+        stop();
+
+        double targetSec = cuePointSec.load(std::memory_order_acquire);
+        if (!std::isfinite(targetSec) || targetSec < 0.0)
+            targetSec = currentTrack->firstBeatSec;
+        seekSec(targetSec);
+        return;
+    }
+
+    const double targetSec = cuePointSec.load(std::memory_order_acquire);
+    const double currentSec = positionSec();
+    if (std::isfinite(targetSec) && targetSec >= 0.0 &&
+        std::abs(currentSec - targetSec) <= kCuePreviewToleranceSec) {
+        impl_->cuePreviewing.store(true, std::memory_order_release);
+        play();
+        return;
+    }
+
+    impl_->cuePreviewing.store(false, std::memory_order_release);
+    cuePointSec.store(currentSec, std::memory_order_release);
+}
+
+void Deck::cueJump()
+{
+    if (!track())
+        return;
+
+    const double cueSec = cuePointSec.load(std::memory_order_acquire);
+    if (!std::isfinite(cueSec) || cueSec < 0.0)
+        return;
     seekSec(cueSec);
 }
 

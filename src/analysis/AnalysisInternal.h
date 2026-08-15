@@ -16,6 +16,18 @@ void readTags(const QString& path, QString& title, QString& artist, QString& alb
 // Mono max-abs per 512-frame bin, 0..1 (for waveform overview drawing).
 std::vector<float> computeOverviewPeaks(const std::vector<float>& stereoPcm);
 
+// Serato-style band overviews: per 512-frame bin peak abs of the mono signal
+// split into low (<200 Hz), mid (200–2000 Hz), high (>2000 Hz) via one-pole
+// lowpasses. All three vectors are sized exactly like computeOverviewPeaks'
+// result and normalized by one shared global max so relative band balance is
+// preserved. Silent input -> all zeros, never NaN. Called both on fresh
+// analysis and on library cache hits (bands are recomputed from PCM, not
+// stored in the JSON cache).
+void computeBandOverviews(const std::vector<float>& stereoPcm,
+                          std::vector<float>& low,
+                          std::vector<float>& mid,
+                          std::vector<float>& high);
+
 // 0.5*(L+R) mixdown.
 std::vector<float> monoMixdown(const std::vector<float>& stereoPcm);
 

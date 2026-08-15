@@ -30,6 +30,11 @@ struct TrackData {
     // Mono peak per ~512-frame bin, 0..1, for waveform drawing.
     std::vector<float> overviewPeaks;
 
+    // Per ~512-frame bin band energies, 0..1, same bin count as overviewPeaks.
+    // low <200 Hz, mid 200–2000 Hz, high >2000 Hz — for Serato-style colored
+    // waveforms. All three share one normalization (band balance preserved).
+    std::vector<float> overviewLow, overviewMid, overviewHigh;
+
     // Hot cue positions in seconds; <0 = unset. Index 0..7.
     double hotCues[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
 };

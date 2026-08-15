@@ -45,10 +45,15 @@ static QString formatTime(double sec)
 WaveformView::WaveformView(int deckIndex, Deck* deck, QWidget* parent)
     : QWidget(parent), deckIndex_(deckIndex), deck_(deck)
 {
-    setMinimumHeight(64);
-    setMaximumHeight(100);
+    setFixedHeight(44); // compact Serato-style overview strip
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     setCursor(Qt::PointingHandCursor);
+}
+
+void WaveformView::setTransitionEntry(double sec)
+{
+    transitionEntrySec_ = sec;
+    update();
 }
 
 void WaveformView::paintEvent(QPaintEvent*)
@@ -98,18 +103,46 @@ void WaveformView::paintEvent(QPaintEvent*)
         p.drawLine(x, mid - half, x, mid + half);
     }
 
-    // Hotcue flags.
-    p.setFont(QFont(font().family(), 8, QFont::Bold));
+    // Cue point marker (Deck::cuePointSec) — small accent notch.
+    {
+        const double cue = deck_->cuePointSec.load();
+        if (cue >= 0.0 && cue <= t->durationSec) {
+            int x = (int)(cue / t->durationSec * w);
+            p.setPen(QPen(accent.lighter(140), 1));
+            p.drawLine(x, 0, x, h);
+            QPolygon tri;
+            tri << QPoint(x - 3, 0) << QPoint(x + 3, 0) << QPoint(x, 5);
+            p.setBrush(accent.lighter(140));
+            p.setPen(Qt::NoPen);
+            p.drawPolygon(tri);
+            p.setBrush(Qt::NoBrush);
+        }
+    }
+
+    // Hotcue flags in slot colors.
+    p.setFont(QFont(font().family(), 7, QFont::Bold));
     for (int i = 0; i < 8; ++i) {
         if (t->hotCues[i] < 0) continue;
         int x = (int)(t->hotCues[i] / t->durationSec * w);
-        QColor flag = accent.lighter(125);
+        QColor flag = hotCueColor(i);
         p.setPen(flag);
         p.drawLine(x, 0, x, h);
-        QRect flagRect(x + 1, 1, 12, 12);
+        QRect flagRect(x + 1, 1, 10, 10);
         p.fillRect(flagRect, flag);
         p.setPen(Qt::black);
         p.drawText(flagRect, Qt::AlignCenter, QString::number(i + 1));
+    }
+
+    // Transition entry marker: orange line + "T" tag.
+    if (transitionEntrySec_ >= 0.0 && transitionEntrySec_ <= t->durationSec) {
+        int x = (int)(transitionEntrySec_ / t->durationSec * w);
+        const QColor c = transitionEntryColor();
+        p.setPen(QPen(c, 2));
+        p.drawLine(x, 0, x, h);
+        QRect tag(x + 2, h - 11, 10, 10);
+        p.fillRect(tag, c);
+        p.setPen(Qt::black);
+        p.drawText(tag, Qt::AlignCenter, QStringLiteral("T"));
     }
 
     // Playhead.
@@ -139,18 +172,24 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     setObjectName(QStringLiteral("deckWidget%1").arg(deckIndex_));
     setProperty("panel", true);
 
-    auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(6, 4, 6, 4);
-    root->setSpacing(3);
+    // The main column (waveform/info/transport/pads) sits next to a narrow
+    // vertical tempo slider on the OUTER edge: left for deck A, right for
+    // deck B (mirrored like Serato).
+    auto* outer = new QHBoxLayout(this);
+    outer->setContentsMargins(6, 4, 6, 4);
+    outer->setSpacing(4);
+
+    auto* mainCol = new QVBoxLayout;
+    mainCol->setSpacing(3);
 
     auto* header = new QLabel(deckIndex_ == 0 ? tr("DECK A") : tr("DECK B"));
     header->setStyleSheet(QStringLiteral("color:%1; font-weight:bold; "
                                          "letter-spacing:2px;")
                               .arg(accent.name()));
-    root->addWidget(header);
+    mainCol->addWidget(header);
 
     waveform_ = new WaveformView(deckIndex_, &engine_->deck(deckIndex_), this);
-    root->addWidget(waveform_);
+    mainCol->addWidget(waveform_);
 
     titleLabel_ = new QLabel(tr("—"));
     titleLabel_->setStyleSheet("font-size:12px; font-weight:bold;");
@@ -167,17 +206,13 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     info->addWidget(bpmLabel_, 0, 1, Qt::AlignRight);
     info->addWidget(artistLabel_, 1, 0);
     info->addWidget(timeLabel_, 1, 1, Qt::AlignRight);
-    root->addLayout(info);
+    mainCol->addLayout(info);
 
-    // Transport row + vertical tempo slider on the side.
-    auto* middle = new QHBoxLayout;
-    middle->setSpacing(4);
-
-    auto* transportCol = new QVBoxLayout;
+    // Transport row: PLAY, CUE, SYNC.
     auto* transport = new QHBoxLayout;
     playBtn_ = new QPushButton(tr("PLAY"));
     playBtn_->setCheckable(true);
-    cueBtn_ = new QPushButton(tr("CUE"));
+    cueBtn_ = new QPushButton(tr("CUE")); // hold-to-preview: NOT checkable
     syncBtn_ = new QPushButton(tr("SYNC"));
     for (QPushButton* b : {playBtn_, cueBtn_, syncBtn_})
         b->setMinimumHeight(26);
@@ -188,22 +223,39 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     transport->addWidget(playBtn_);
     transport->addWidget(cueBtn_);
     transport->addWidget(syncBtn_);
-    transportCol->addLayout(transport);
+    mainCol->addLayout(transport);
 
-    // 8 hotcue buttons, 2 rows of 4.
+    // 8 hot-cue pads, 2 rows of 4 small squares. Fire on PRESS (1.0) and
+    // send a release (0.0) — future preview semantics live in the engine.
     auto* cues = new QGridLayout;
     cues->setSpacing(3);
     for (int i = 0; i < 8; ++i) {
         auto* b = new QPushButton(QString::number(i + 1));
-        b->setFixedHeight(21);
-        b->setToolTip(tr("Hot cue %1 — click: set/jump, right- or "
+        b->setFixedSize(26, 26);
+        b->setToolTip(tr("Hot cue %1 — press: set/jump, right- or "
                          "shift-click: clear")
                           .arg(i + 1));
         b->setContextMenuPolicy(Qt::CustomContextMenu);
         hotcueBtns_[i] = b;
-        cues->addWidget(b, i / 4, i % 4);
-        connect(b, &QPushButton::clicked, this,
-                [this, i] { onHotCueClicked(i); });
+        cues->addWidget(b, i / 4, i % 4, Qt::AlignLeft);
+        const auto hotCueId =
+            (ControlId)((int)ControlId::HotCue1 + i);
+        connect(b, &QPushButton::pressed, this, [this, i, hotCueId] {
+            if (QGuiApplication::keyboardModifiers().testFlag(
+                    Qt::ShiftModifier)) {
+                if (TrackDataPtr t = engine_->deck(deckIndex_).track()) {
+                    t->hotCues[i] = -1; // clear via TrackData hotCues array
+                    syncHotCueButtons();
+                    waveform_->update();
+                }
+                return;
+            }
+            dispatch(hotCueId, 1.0);
+            syncHotCueButtons();
+            waveform_->update();
+        });
+        connect(b, &QPushButton::released, this,
+                [this, hotCueId] { dispatch(hotCueId, 0.0); });
         connect(b, &QPushButton::customContextMenuRequested, this, [this, i] {
             if (TrackDataPtr t = engine_->deck(deckIndex_).track()) {
                 t->hotCues[i] = -1; // clear via TrackData hotCues array
@@ -212,10 +264,11 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
             }
         });
     }
-    transportCol->addLayout(cues);
-    transportCol->addStretch(1);
-    middle->addLayout(transportCol, 1);
+    cues->setColumnStretch(4, 1);
+    mainCol->addLayout(cues);
+    mainCol->addStretch(1);
 
+    // Narrow vertical tempo slider column.
     auto* tempoCol = new QVBoxLayout;
     tempoLabel_ = new QLabel(tr("+0.0%"));
     tempoLabel_->setAlignment(Qt::AlignHCenter);
@@ -233,9 +286,15 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     tempoCaption->setStyleSheet(
         QStringLiteral("color:%1; font-size:10px;").arg(themeDimText().name()));
     tempoCol->addWidget(tempoCaption);
-    middle->addLayout(tempoCol);
 
-    root->addLayout(middle, 1);
+    // Mirror: tempo on the outer edge.
+    if (deckIndex_ == 0) {
+        outer->addLayout(tempoCol);
+        outer->addLayout(mainCol, 1);
+    } else {
+        outer->addLayout(mainCol, 1);
+        outer->addLayout(tempoCol);
+    }
 
     // --- wiring: user actions -> bus (Origin::Ui) ---
     // toggled (not clicked): fires for mouse, keyboard, and accessibility
@@ -243,8 +302,11 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     connect(playBtn_, &QPushButton::toggled, this, [this](bool checked) {
         dispatch(checked ? ControlId::Play : ControlId::Stop);
     });
-    connect(cueBtn_, &QPushButton::clicked, this,
-            [this] { dispatch(ControlId::Cue); });
+    // CUE: press 1.0 / release 0.0 — hold-to-preview lives in the engine.
+    connect(cueBtn_, &QPushButton::pressed, this,
+            [this] { dispatch(ControlId::Cue, 1.0); });
+    connect(cueBtn_, &QPushButton::released, this,
+            [this] { dispatch(ControlId::Cue, 0.0); });
     connect(syncBtn_, &QPushButton::clicked, this,
             [this] { dispatch(ControlId::TempoSync); });
     connect(tempoSlider_, &QSlider::valueChanged, this,
@@ -266,6 +328,11 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     trackChanged();
 }
 
+void DeckWidget::setTransitionEntry(double sec)
+{
+    waveform_->setTransitionEntry(sec);
+}
+
 void DeckWidget::dispatch(ControlId id, double value)
 {
     bus_->dispatch(ControlEvent{deckIndex_, id, value}, Origin::Ui);
@@ -281,33 +348,14 @@ void DeckWidget::onTempoSlider(int value)
     // Effective BPM label refreshes on the timer tick.
 }
 
-void DeckWidget::onHotCueClicked(int i)
-{
-    Deck& deck = engine_->deck(deckIndex_);
-    TrackDataPtr t = deck.track();
-    if (!t) return;
-    const bool shift =
-        QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
-    if (shift) {
-        t->hotCues[i] = -1; // clear via TrackData hotCues array
-    } else if (t->hotCues[i] < 0) {
-        deck.setHotCue(i);  // direct API per contract
-    } else {
-        deck.jumpHotCue(i); // direct API per contract
-    }
-    syncHotCueButtons();
-    waveform_->update();
-}
-
 void DeckWidget::syncHotCueButtons()
 {
     TrackDataPtr t = engine_->deck(deckIndex_).track();
-    const QColor accent = deckAccent(deckIndex_);
     for (int i = 0; i < 8; ++i) {
         bool set = t && t->hotCues[i] >= 0;
         hotcueBtns_[i]->setStyleSheet(
             set ? QStringLiteral("background:%1; color:black; font-weight:bold;")
-                      .arg(accent.name())
+                      .arg(hotCueColor(i).name())
                 : QString());
     }
 }

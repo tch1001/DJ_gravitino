@@ -28,6 +28,10 @@ public:
 
 signals:
     void statusMessage(const QString& msg, int timeoutMs);
+    // Recorded entry point of the selected transition, for waveform markers:
+    // deck = physical deck holding the [from] track, sec = position of the
+    // anchor beat in that track (< 0 clears the marker).
+    void entryMarkerChanged(int deck, double sec);
 
 public slots:
     void refreshMatches();  // call on trackLoaded / store changed
@@ -36,7 +40,8 @@ private slots:
     void onRec();
     void onStopSave();
     void onPerform();
-    void startReplay(gvt::PlayerMode mode);
+    void onPrime();
+    void startReplay(gvt::PlayerMode mode, bool prime);
     void onAbort();
     void onProgress(double beatsIn, double beatsTotal);
     void onFinished(bool completed);
@@ -53,6 +58,7 @@ private:
     };
     void showBanner(const QString& text, const QColor& color, int timeoutMs);
     int selectedMatch() const;     // index into matches_, -1 if none
+    void announceEntryMarker();    // emit entryMarkerChanged for selection
 
     ControlBus* bus_;
     AudioEngine* engine_;
@@ -65,6 +71,7 @@ private:
     QPushButton* recBtn_ = nullptr;
     QPushButton* stopSaveBtn_ = nullptr;
     QPushButton* performBtn_ = nullptr;
+    QPushButton* primeBtn_ = nullptr;
     QPushButton* tutorialBtn_ = nullptr;
     QPushButton* abortBtn_ = nullptr;
     QProgressBar* progress_ = nullptr;
