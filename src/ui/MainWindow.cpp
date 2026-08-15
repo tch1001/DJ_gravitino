@@ -6,6 +6,7 @@
 #include "MixerWidget.h"
 #include "Theme.h"
 #include "TransitionPanel.h"
+#include "../analysis/StemSeparator.h"
 #include "../audio/MasterRecorder.h"
 #include "../library/History.h"
 
@@ -82,9 +83,10 @@ QScrollBar { background: #16181d; }
 MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
                        TrackLibrary* library, TransitionStore* store,
                        TransitionRecorder* recorder, TransitionPlayer* player,
-                       MidiEngine* midi, MasterRecorder* rec, QWidget* parent)
+                       MidiEngine* midi, MasterRecorder* rec,
+                       StemSeparator* stems, QWidget* parent)
     : QMainWindow(parent), bus_(bus), engine_(engine), library_(library),
-      store_(store), midi_(midi), rec_(rec)
+      store_(store), midi_(midi), rec_(rec), stems_(stems)
 {
     setWindowTitle(tr("Gravitino DJ"));
     setMinimumSize(1200, 720);
@@ -182,6 +184,59 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             [this](const QString& msg, int timeoutMs) {
                 statusBar()->showMessage(msg, timeoutMs);
             });
+
+    // Stem separation wiring. Every StemSeparator signal carries the track
+    // fingerprint; it is matched against each deck's CURRENT track, so
+    // results for a track that was swapped out mid-separation are dropped
+    // for that deck (the cache keeps them for the next load).
+    connect(deckA_, &DeckWidget::stemsRequested, this,
+            &MainWindow::onStemsRequested);
+    connect(deckB_, &DeckWidget::stemsRequested, this,
+            &MainWindow::onStemsRequested);
+    if (stems_) {
+        auto forEachMatchingDeck = [this](const QString& fingerprint,
+                                          auto&& fn) {
+            for (int i = 0; i < kNumDecks; ++i) {
+                TrackDataPtr t = engine_->deck(i).track();
+                if (t && t->fingerprint == fingerprint) fn(i);
+            }
+        };
+        connect(stems_, &StemSeparator::progress, this,
+                [this, forEachMatchingDeck](const QString& fp,
+                                            const QString& stage) {
+                    forEachMatchingDeck(fp, [this, &stage](int i) {
+                        deckWidget(i)->setStemsInProgress(stage);
+                    });
+                });
+        connect(stems_, &StemSeparator::stemsReady, this,
+                [this, forEachMatchingDeck](const QString& fp,
+                                            StemSetPtr stems) {
+                    forEachMatchingDeck(fp, [this, &stems](int i) {
+                        engine_->deck(i).attachStems(stems);
+                        deckWidget(i)->setStemsReady();
+                    });
+                });
+        connect(stems_, &StemSeparator::stemsFailed, this,
+                [this, forEachMatchingDeck](const QString& fp,
+                                            const QString& error) {
+                    forEachMatchingDeck(fp, [this](int i) {
+                        deckWidget(i)->setStemsIdle();
+                    });
+                    statusBar()->showMessage(
+                        tr("Stem separation failed: %1").arg(error), 8000);
+                });
+    }
+}
+
+void MainWindow::onStemsRequested(int deck)
+{
+    if (!stems_ || (deck != 0 && deck != 1)) return;
+    TrackDataPtr t = engine_->deck(deck).track();
+    if (!t) return;
+    deckWidget(deck)->setStemsInProgress(
+        stems_->hasCached(*t) ? tr("loading cached stems…")
+                              : tr("queued for separation…"));
+    stems_->requestStems(t);
 }
 
 void MainWindow::openMusicFolder()
@@ -271,6 +326,11 @@ void MainWindow::notifyTrackLoaded(int deck)
             history_->logLoad(deck, *t);
     }
     (deck == 0 ? deckA_ : deckB_)->trackChanged();
+    // Cached stems separate for free (decode-only) — auto-request them.
+    if (stems_ && (deck == 0 || deck == 1)) {
+        if (TrackDataPtr t = engine_->deck(deck).track())
+            if (stems_->hasCached(*t)) onStemsRequested(deck);
+    }
     detailWave_->update();
     transitionPanel_->refreshMatches();
 }

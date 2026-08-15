@@ -102,6 +102,18 @@ master_bpm  = 130.00    ; tempo the mix runs at during the transition
 | `fx_on`      | a,b     | state: >0.5 engaged, <=0.5 off |
 | `fx_wet`     | a,b     | 0..1 dry/wet |
 | `fx_beats`   | a,b     | echo/flanger time base in beats (0.25..4) |
+| `stem_vocals` | a,b    | 0..1 vocal stem level (0 = muted) |
+| `stem_melody` | a,b    | 0..1 melody stem level (0 = muted) |
+| `stem_bass`  | a,b     | 0..1 bass stem level (0 = muted) |
+| `stem_drums` | a,b     | 0..1 drums stem level (0 = muted) |
+
+`stem_*` levels only audibly apply when the replaying machine has separated
+stems attached to that deck (separation is per-machine, cached under
+`~/.gravitino/stems/`). Without stems the events still set the deck's stem
+atomics harmlessly — the engine keeps playing the original PCM whenever no
+stems are attached (and also short-circuits back to plain PCM while all four
+gains are >= 0.99) — so such transitions replay gracefully, just without the
+stem mutes.
 
 Parsers must **skip unknown controls with a warning**, never fail — future
 versions add controls, old players still perform the rest of the blend.

@@ -6,6 +6,39 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-16 (claude-stems): **Stem separation pipeline + stem pads UI.**
+  New `src/analysis/StemSeparator.{h,cpp}` (gvtcore): GUI-thread QObject that
+  runs the demucs CLI (`/Users/fish/.local/bin/demucs -n htdemucs -d mps`)
+  via QProcess — FIFO queue, one process at a time, no timeout (minutes per
+  track), tqdm "NN%" stderr lines forwarded as `progress(fingerprint,
+  stage)`; duplicate requests for an in-flight fingerprint just wait. Output
+  wavs (demucs `other` = our `melody`) are moved from a temp dir into the
+  per-track cache `~/.gravitino/stems/<fp-hex>/{vocals,other,bass,drums}.wav`
+  on success; cached tracks skip demucs entirely (`hasCached`). Decode runs
+  on QtConcurrent: miniaudio `ma_decoder` at s16/2ch/48k (resamples the
+  44.1k wavs), each stem padded/truncated to the track's frameCount,
+  delivered as `stemsReady(fingerprint, StemSetPtr)` on the GUI thread;
+  demucs missing/nonzero exit → `stemsFailed` with the stderr tail.
+  DeckWidget gained a STEMS row below FX: state machine Idle ([STEMS]
+  request button; pads checked+disabled) → InProgress (stage/percent label)
+  → Ready (pads enabled); pads [VOCAL #38c9b8][MELODY #e8a13a][BASS #7a5ae8]
+  [DRUMS #e05a8a] are checkable, dispatch `{deck, StemX, 1/0}` Origin::Ui on
+  toggle, and mirror the deck stem atomics at 30 Hz under QSignalBlocker.
+  MainWindow matches every StemSeparator signal against each deck's CURRENT
+  track fingerprint (track swapped mid-separation → result dropped for that
+  deck, cache keeps it), calls `Deck::attachStems` on match, shows failures
+  in the status bar, resets the row on track load, and auto-requests the
+  cheap decode-only path when `hasCached()` hits. main.cpp constructs the
+  separator and passes it to MainWindow (new trailing ctor param, default
+  nullptr = feature inert). docs/TRANSITION_FORMAT.md: `stem_*` rows added
+  with graceful-replay-without-stems note. Verified: all 4 touched TUs
+  compile -Wall -Wextra clean; standalone cache/decode proof (cache seeded
+  from the orchestrator's pre-separated Demo Track 1 wavs, fp
+  912f445668f4ccba): "test_stemsep OK" — 4 stems, each 8276846 frames ==
+  track frameCount, rms vocals .0099 / melody .0376 / bass .1955 / drums
+  .1567; duplicate-request no-op covered. Full gravitino link still blocked
+  on peer `Deck::attachStems` (codex-stems-audio, in flight) — everything
+  else links; retry `ninja -C build-stemsui` once it lands.
 - 2026-08-16 (codex-fx): **Per-deck RT-safe FX insert + DDJ-FLX4 Beat FX
   mapping complete.** `Deck::render` now runs FX after the DJ filter and before
   the channel fader. New preallocated `DeckFx` provides: stereo 0.5-feedback
@@ -196,6 +229,7 @@ FLX4 may or may not be plugged in — MidiEngine must never crash without it.
 | midi/{MidiEngine,Flx4Mapping}.cpp | codex-midi | DONE |
 | ui/*.cpp, app/*, library/History.* | claude-ui / claude-ui2 / claude-ui3 / claude-lib4 | DONE — 2026-08-15 (claude-lib4): per-deck FX strip, crate sidebar + Library/History tabs, gvt::History JSONL log (see Current state above). 2026-08-15 (claude-ui3): loop/beat-jump row, loop-region shading (overview + detail lanes), FILTER knobs, band-colored deck overview, camelot key in the info line, MainWindow MasterRecorder* param + status-bar "● REC MASTER" button (see Current state above). Serato-parity restructure 2026-08-15 (see Current state above): equal deck halves + outer tempo sliders, new DetailWaveformView center lanes, horizontal mixer strip, press/release Cue + hot-cue dispatch, MainWindow::setTransitionEntryMarker. Original notes:  ui/{MainWindow,DeckWidget,MixerWidget,LibraryWidget,TransitionPanel,Theme}.h+cpp, app/main.cpp, app/SelfTest.h (declares `gvt::runSelfTest`; SelfTest.cpp is the orchestrator's). All 6 TUs + moc outputs compile warning-clean (-Wall -Wextra). Notes: (1) pinned TrackLibrary.h/TransitionEngine.h pImpl classes (TransitionStore/Recorder/Player) declare no destructor, so any TU destroying them fails to compile — main.cpp heap-allocates them with process lifetime as a workaround; header owners should add declared dtors (moc/mocs_compilation may hit the same issue). (2) `gvt::transitionPlayerSetMode` doesn't exist and `arm()` has no PlayerMode arg, so the TUTORIAL button is disabled ("coming soon"); tutorialPrompt/tutorialScored signals are wired (banner + accuracy toasts) and light up once the player emits them. (3) Hotcue clear writes `track->hotCues[i] = -1` directly (no Deck clear API). (4) UI mirrors Play state by polling `deck.playing` at 30 Hz; continuous controls mirror via bus events with QSignalBlocker. |
 | integration/selftest | orchestrator | DONE — see Verification below |
+| analysis/StemSeparator.*, ui stems row (DeckWidget/MainWindow additions), main.cpp wiring | claude-stems | DONE 2026-08-16 — demucs pipeline + cache + decode + stem pads UI (see Current state above). Awaiting peer Deck::attachStems for the full link. |
 | audio/MasterRecorder.cpp (+ pinned .h), tests/test_masterrec.cpp | claude-recmaster | DONE 2026-08-15 — master WAV recorder: feed() is audio-thread lock-free (SPSC ring, 2^18 floats ≈ 2.7 s, atomic head/tail acq/rel; full ring drops the whole chunk + atomic counter, qWarning once on stop). Worker std::thread drains every 10 ms → 16-bit LE PCM; start("") resolves ~/Music/Gravitino/Recordings/gravitino-YYYYMMDD-HHMMSS.wav (dirs created), placeholder 44-byte header (16-bit/2ch/48k) patched with RIFF/data sizes on stop(). stop() clears the atomic 'active' gate BEFORE joining, so concurrent feed() at worst writes into the still-allocated ring. recordedSec() from atomic frame counter; recordingChanged(bool,path) emitted on start/stop; dtor stops cleanly. Added to gvtcore in CMakeLists (add-only). Verified: MasterRecorder.cpp.o compiles clean in build-rec; test_masterrec built standalone (MasterRecorder.cpp + moc + QtCore, -Wall -Wextra clean) and passes: "test_masterrec OK: 2.000 s recorded, 384000 data bytes, peak 16384" (2 s of 440 Hz sine, header validated 16-bit/2ch/48k, data size exact, 0 drops). ctest picks it up via the tests glob once peers' objects link. NOT yet wired into AudioEngine/UI — orchestrator: call feed() from the master render output after the limiter. |
 
 ### DDJ-FLX4 MIDI messages mapped

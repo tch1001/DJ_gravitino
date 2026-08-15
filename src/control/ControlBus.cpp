@@ -22,6 +22,8 @@ constexpr NameEntry kNames[] = {
     {ControlId::BeatJump, "beat_jump"}, {ControlId::Filter, "filter"},
     {ControlId::FxType, "fx_type"}, {ControlId::FxOn, "fx_on"},
     {ControlId::FxWet, "fx_wet"}, {ControlId::FxBeats, "fx_beats"},
+    {ControlId::StemVocals, "stem_vocals"}, {ControlId::StemMelody, "stem_melody"},
+    {ControlId::StemBass, "stem_bass"}, {ControlId::StemDrums, "stem_drums"},
 };
 } // namespace
 

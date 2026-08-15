@@ -49,6 +49,15 @@ public:
     std::atomic<float>  fxWet   { 0.5f };
     std::atomic<double> fxBeats { 0.5 };   // echo delay / flanger period
 
+    // Stems: attach/detach separated stems for the CURRENT track (GUI thread;
+    // same safe-swap discipline as loadTrack; loadTrack detaches). While
+    // attached and any level < ~0.99, render mixes the four stem buffers
+    // (int16 -> float) instead of TrackData::pcm.
+    void attachStems(StemSetPtr stems);
+    bool stemsAttached() const;
+    std::atomic<float> stemVocals { 1.0f }, stemMelody { 1.0f },
+                       stemBass   { 1.0f }, stemDrums  { 1.0f };
+
     std::atomic<double> tempoRatio { 1.0 };  // 1.0 = native
     std::atomic<float>  fader      { 1.0f };
     std::atomic<float>  trim       { 0.5f };

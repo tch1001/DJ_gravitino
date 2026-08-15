@@ -44,6 +44,15 @@ struct TrackData {
 };
 using TrackDataPtr = std::shared_ptr<TrackData>;
 
+// Separated stems for one track: interleaved stereo int16 at kSampleRate,
+// all four the same frame count as the track's pcm (padded/truncated).
+// Produced asynchronously by StemSeparator; attached to a Deck for playback.
+struct StemSet {
+    std::vector<int16_t> vocals, melody, bass, drums;
+    int64_t frameCount() const { return (int64_t)vocals.size() / 2; }
+};
+using StemSetPtr = std::shared_ptr<StemSet>;
+
 // Blocking: decode + tags + fingerprint + BPM analysis. Returns nullptr and
 // sets *error on failure. Thread-safe; call from a worker thread.
 TrackDataPtr loadAndAnalyzeTrack(const QString& mp3Path, QString* error);

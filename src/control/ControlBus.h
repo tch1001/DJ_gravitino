@@ -32,6 +32,8 @@ enum class ControlId : uint8_t {
     FxOn,         // trigger: 1.0 = engage, 0.0 = disengage (state, not toggle)
     FxWet,        // 0..1 dry/wet
     FxBeats,      // echo/flanger time base in beats (0.25..4, default 0.5)
+    // Stem levels, 0..1 (0 = muted). Active only once stems are separated.
+    StemVocals, StemMelody, StemBass, StemDrums,
     Count
 };
 

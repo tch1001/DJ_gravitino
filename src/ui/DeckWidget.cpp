@@ -495,6 +495,70 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
             [dispatchBeats] { dispatchBeats(2.0); });
     fxRow->addStretch(1);
     mainCol->addLayout(fxRow);
+
+    // STEMS row: [STEMS] request button + four checkable pads
+    // [VOCAL][MELODY][BASS][DRUMS] + stage/status label. States are driven
+    // by MainWindow (setStemsIdle/InProgress/Ready) from StemSeparator
+    // signals; pad toggles dispatch stem levels via the bus, and refresh()
+    // mirrors the deck's stem* atomics back under QSignalBlocker.
+    auto* stemsRow = new QHBoxLayout;
+    stemsRow->setSpacing(2);
+    {
+        auto* l = new QLabel(tr("STEMS"), this);
+        l->setStyleSheet(QStringLiteral("color:%1; font-size:8px;")
+                             .arg(themeDimText().name()));
+        stemsRow->addWidget(l);
+    }
+    stemsBtn_ = new QPushButton(tr("STEMS"), this);
+    stemsBtn_->setFixedHeight(18);
+    stemsBtn_->setStyleSheet(QString::fromLatin1(kLoopBtnBase));
+    stemsBtn_->setFocusPolicy(Qt::NoFocus);
+    stemsBtn_->setToolTip(tr("Separate this track into stems (demucs — "
+                             "takes a few minutes; cached afterwards)"));
+    stemsRow->addWidget(stemsBtn_);
+    connect(stemsBtn_, &QPushButton::clicked, this, [this] {
+        if (stemsState_ == StemsState::Idle)
+            emit stemsRequested(deckIndex_);
+    });
+    stemsRow->addSpacing(4);
+    static const struct {
+        const char* text;
+        const char* color; // Serato stem pad colors
+        ControlId id;
+    } kStemPads[4] = {
+        {"VOCAL", "#38c9b8", ControlId::StemVocals},
+        {"MELODY", "#e8a13a", ControlId::StemMelody},
+        {"BASS", "#7a5ae8", ControlId::StemBass},
+        {"DRUMS", "#e05a8a", ControlId::StemDrums},
+    };
+    for (int i = 0; i < 4; ++i) {
+        auto* b = new QPushButton(QLatin1String(kStemPads[i].text), this);
+        b->setCheckable(true);
+        b->setChecked(true);   // all stems audible by default
+        b->setEnabled(false);  // until separation finishes
+        b->setFixedHeight(18);
+        b->setMinimumWidth(38);
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setStyleSheet(QString::fromLatin1(kLoopBtnBase) +
+                         QStringLiteral("QPushButton:checked { background:%1; "
+                                        "color:black; font-weight:bold; }")
+                             .arg(QLatin1String(kStemPads[i].color)));
+        const ControlId id = kStemPads[i].id;
+        connect(b, &QPushButton::toggled, this, [this, b, id](bool checked) {
+            if (!b->signalsBlocked())
+                dispatch(id, checked ? 1.0 : 0.0);
+        });
+        stemPads_[i] = b;
+        stemsRow->addWidget(b);
+    }
+    stemsStatusLabel_ = new QLabel(this);
+    stemsStatusLabel_->setStyleSheet(
+        QStringLiteral("color:%1; font-size:9px;").arg(themeDimText().name()));
+    stemsRow->addSpacing(4);
+    stemsRow->addWidget(stemsStatusLabel_);
+    stemsRow->addStretch(1);
+    mainCol->addLayout(stemsRow);
+    setStemsIdle();
     mainCol->addStretch(1);
 
     // Narrow vertical tempo slider column.
@@ -671,6 +735,64 @@ void DeckWidget::syncFxControls()
         fxBeatsLabel_->setText(beatsText);
 }
 
+void DeckWidget::setStemsIdle()
+{
+    stemsState_ = StemsState::Idle;
+    const bool hasTrack = engine_->deck(deckIndex_).track() != nullptr;
+    stemsBtn_->setEnabled(hasTrack);
+    stemsStatusLabel_->clear();
+    for (QPushButton* b : stemPads_) {
+        QSignalBlocker block(b);
+        b->setChecked(true);
+        b->setEnabled(false);
+        b->setToolTip(tr("separating stems…"));
+    }
+}
+
+void DeckWidget::setStemsInProgress(const QString& stage)
+{
+    stemsState_ = StemsState::InProgress;
+    stemsBtn_->setEnabled(false);
+    stemsStatusLabel_->setText(stage);
+    for (QPushButton* b : stemPads_) {
+        b->setEnabled(false);
+        b->setToolTip(tr("separating stems…"));
+    }
+}
+
+void DeckWidget::setStemsReady()
+{
+    stemsState_ = StemsState::Ready;
+    stemsBtn_->setEnabled(false);
+    stemsStatusLabel_->setText(tr("ready"));
+    static const char* kTips[4] = {
+        QT_TR_NOOP("Toggle the vocal stem"),
+        QT_TR_NOOP("Toggle the melody stem"),
+        QT_TR_NOOP("Toggle the bass stem"),
+        QT_TR_NOOP("Toggle the drums stem"),
+    };
+    for (int i = 0; i < 4; ++i) {
+        stemPads_[i]->setEnabled(true);
+        stemPads_[i]->setToolTip(tr(kTips[i]));
+    }
+    syncStemPads();
+}
+
+void DeckWidget::syncStemPads()
+{
+    if (stemsState_ != StemsState::Ready) return;
+    Deck& deck = engine_->deck(deckIndex_);
+    const float levels[4] = {deck.stemVocals.load(), deck.stemMelody.load(),
+                             deck.stemBass.load(), deck.stemDrums.load()};
+    for (int i = 0; i < 4; ++i) {
+        const bool on = levels[i] >= 0.5f;
+        if (stemPads_[i]->isChecked() != on) {
+            QSignalBlocker block(stemPads_[i]);
+            stemPads_[i]->setChecked(on);
+        }
+    }
+}
+
 void DeckWidget::trackChanged()
 {
     TrackDataPtr t = engine_->deck(deckIndex_).track();
@@ -687,6 +809,10 @@ void DeckWidget::trackChanged()
         bpmLabel_->setText(tr("BPM —"));
     }
     syncHotCueButtons();
+    // New track (or unload): back to the request state. MainWindow
+    // auto-requests the cheap cached-decode path right after when
+    // StemSeparator::hasCached() hits.
+    setStemsIdle();
     waveform_->update();
     refresh();
 }
@@ -755,6 +881,7 @@ void DeckWidget::refresh()
     }
     syncLoopButtons();
     syncFxControls();
+    syncStemPads();
 }
 
 } // namespace gvt

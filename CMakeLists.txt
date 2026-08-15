@@ -25,6 +25,7 @@ add_library(gvtcore STATIC
     src/audio/Eq.cpp
     src/audio/Fx.cpp
     src/audio/MasterRecorder.cpp
+    src/analysis/StemSeparator.cpp
     src/analysis/TrackData.cpp
     src/analysis/BeatAnalyzer.cpp
     src/analysis/KeyAnalyzer.cpp

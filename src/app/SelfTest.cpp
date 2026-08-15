@@ -224,6 +224,51 @@ int runSelfTest(const QStringList& args) {
         std::printf("FAIL: beat_jump moved %.2f beats (want ~8)\n", jumped); return 1;
     }
     std::printf("OK: loop wrap + exit + beat_jump (+%.2f beats)\n", jumped);
+
+    // ---- Stems: fake set (vocals = master, rest silent) through render ----
+    {
+        auto stemsSet = std::make_shared<StemSet>();
+        const size_t n = ta->pcm.size();
+        stemsSet->vocals.resize(n);
+        for (size_t i = 0; i < n; ++i)
+            stemsSet->vocals[i] = (int16_t)std::lround(
+                qBound(-1.0f, ta->pcm[i], 1.0f) * 32767.0f);
+        stemsSet->melody.assign(n, 0);
+        stemsSet->bass.assign(n, 0);
+        stemsSet->drums.assign(n, 0);
+        da.attachStems(stemsSet);
+        if (!da.stemsAttached()) { std::printf("FAIL: attachStems\n"); return 1; }
+        // Isolate deck A in the mix: silence deck B, crossfader full A.
+        bus.dispatch({1, ControlId::Stop, 1.0}, Origin::System);
+        bus.dispatch({kNoDeck, ControlId::Crossfader, 0.0}, Origin::System);
+        da.seekSec(30.0);
+        bus.dispatch({0, ControlId::Play, 1.0}, Origin::System);
+
+        auto renderRms = [&](double sec) {
+            std::vector<float> acc;
+            for (int i = 0; i < (int)(sec * kSampleRate / chunk); ++i) {
+                engine.renderOffline(buf.data(), chunk);
+                acc.insert(acc.end(), buf.begin(), buf.end());
+            }
+            return rmsRange(acc, 0, acc.size() / 2);
+        };
+        const double rmsFull = renderRms(1.0);          // gains all 1 → master
+        bus.dispatch({0, ControlId::StemVocals, 0.0}, Origin::System);
+        bus.dispatch({0, ControlId::StemMelody, 0.0}, Origin::System);
+        bus.dispatch({0, ControlId::StemBass, 0.0}, Origin::System);
+        bus.dispatch({0, ControlId::StemDrums, 0.0}, Origin::System);
+        renderRms(0.2); // let EQ/filter biquad state ring down (~10 ms)
+        const double rmsMuted = renderRms(1.0);         // everything muted
+        bus.dispatch({0, ControlId::StemVocals, 1.0}, Origin::System);
+        const double rmsVoc = renderRms(1.0);           // vocals-only = master
+        std::printf("stems: full=%.4f muted=%.5f vocalsOnly=%.4f\n",
+                    rmsFull, rmsMuted, rmsVoc);
+        if (rmsMuted > 1e-4 || rmsFull < 0.01 ||
+            std::fabs(rmsVoc - rmsFull) > 0.25 * rmsFull) {
+            std::printf("FAIL: stem mixing\n"); return 1;
+        }
+        std::printf("OK: stem attach + mute + solo through render path\n");
+    }
     return 0;
 }
 

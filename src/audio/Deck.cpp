@@ -1,3 +1,4 @@
+#include <QtGlobal>
 #include "AudioEngine.h"
 
 #include "Eq.h"
@@ -5,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <thread>
@@ -75,6 +77,8 @@ struct Deck::Impl {
     std::atomic<double> firstBeatSec { 0.0 };
     std::atomic<int64_t> trackFrameCount { 0 };
     std::atomic<bool> renderGate { true };
+    StemSetPtr ownedStems;                       // GUI-side retention
+    std::atomic<StemSet*> audioStems { nullptr };// audio-thread view
     std::atomic<unsigned int> activeRenders { 0 };
     std::atomic<double> pendingJogRatio { 0.0 };
     std::atomic<bool> cuePreviewing { false };
@@ -115,6 +119,8 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->waitForRender();
 
     impl_->audioTrack.store(nullptr, std::memory_order_release);
+    impl_->audioStems.store(nullptr, std::memory_order_release);
+    impl_->ownedStems.reset();
     impl_->ownedTrack = std::move(track);
     impl_->positionFrames.store(0.0, std::memory_order_release);
     impl_->pendingJogRatio.store(0.0, std::memory_order_release);
@@ -145,6 +151,39 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->trackFrameCount.store(rawTrack->frameCount(), std::memory_order_release);
     impl_->audioTrack.store(rawTrack, std::memory_order_release);
     impl_->renderGate.store(true, std::memory_order_release);
+}
+
+void Deck::attachStems(StemSetPtr stems)
+{
+    TrackData* const rawTrack = impl_->ownedTrack.get();
+    if (stems) {
+        if (rawTrack == nullptr) return;
+        const int64_t diff = std::llabs(stems->frameCount() - rawTrack->frameCount());
+        if (diff > (int64_t)kSampleRate) {
+            qWarning("attachStems: stem length differs from track by %.1fs — refused",
+                     (double)diff / kSampleRate);
+            return;
+        }
+    }
+    if (impl_->audioStems.load(std::memory_order_acquire) != nullptr) {
+        // Replacing/detaching: drain the audio thread before the old set dies.
+        impl_->renderGate.store(false, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        impl_->waitForRender();
+        impl_->audioStems.store(nullptr, std::memory_order_release);
+        impl_->ownedStems.reset();
+        impl_->renderGate.store(true, std::memory_order_release);
+    }
+    if (stems) {
+        // Attach-from-null is seamless: retain, then publish.
+        impl_->ownedStems = std::move(stems);
+        impl_->audioStems.store(impl_->ownedStems.get(), std::memory_order_release);
+    }
+}
+
+bool Deck::stemsAttached() const
+{
+    return impl_->audioStems.load(std::memory_order_acquire) != nullptr;
 }
 
 TrackDataPtr Deck::track() const
@@ -459,6 +498,16 @@ void Deck::render(float* out, int frames)
         const int64_t trackFrames = currentTrack->frameCount();
         const double inputGain = trimGain(
             trim.load(std::memory_order_relaxed));
+        const StemSet* const stems =
+            impl_->audioStems.load(std::memory_order_acquire);
+        const double gV = std::clamp((double)stemVocals.load(std::memory_order_relaxed), 0.0, 1.0);
+        const double gM = std::clamp((double)stemMelody.load(std::memory_order_relaxed), 0.0, 1.0);
+        const double gB = std::clamp((double)stemBass.load(std::memory_order_relaxed), 0.0, 1.0);
+        const double gD = std::clamp((double)stemDrums.load(std::memory_order_relaxed), 0.0, 1.0);
+        // All-full gains play the untouched master; anything less mixes stems.
+        const bool useStems = stems != nullptr &&
+            (gV < 0.99 || gM < 0.99 || gB < 0.99 || gD < 0.99);
+        const int64_t stemFrames = useStems ? stems->frameCount() : 0;
         bool loopEnabled = loopActive.load(std::memory_order_acquire);
         double loopStartFrame = 0.0;
         double loopEndFrame = 0.0;
@@ -506,13 +555,34 @@ void Deck::render(float* out, int frames)
                 static_cast<std::size_t>(frame1) * 2U;
             const int outputBase = frame * 2;
 
-            for (int channel = 0; channel < 2; ++channel) {
-                const double first = currentTrack->pcm[
-                    sample0 + static_cast<std::size_t>(channel)];
-                const double second = currentTrack->pcm[
-                    sample1 + static_cast<std::size_t>(channel)];
-                out[outputBase + channel] = static_cast<float>(
-                    (first + (second - first) * fraction) * inputGain);
+            if (useStems) {
+                const int64_t sf0 = std::min(frame0, stemFrames - 1);
+                const int64_t sf1 = std::min(frame1, stemFrames - 1);
+                for (int channel = 0; channel < 2; ++channel) {
+                    const std::size_t a = (std::size_t)sf0 * 2U + (std::size_t)channel;
+                    const std::size_t b = (std::size_t)sf1 * 2U + (std::size_t)channel;
+                    constexpr double kInv = 1.0 / 32768.0;
+                    auto stemSample = [&](const std::vector<int16_t>& v, double g) {
+                        if (g <= 0.0 || v.empty()) return 0.0;
+                        const double s0 = v[a] * kInv, s1 = v[b] * kInv;
+                        return (s0 + (s1 - s0) * fraction) * g;
+                    };
+                    const double mixed = stemSample(stems->vocals, gV) +
+                                         stemSample(stems->melody, gM) +
+                                         stemSample(stems->bass, gB) +
+                                         stemSample(stems->drums, gD);
+                    out[outputBase + channel] =
+                        static_cast<float>(mixed * inputGain);
+                }
+            } else {
+                for (int channel = 0; channel < 2; ++channel) {
+                    const double first = currentTrack->pcm[
+                        sample0 + static_cast<std::size_t>(channel)];
+                    const double second = currentTrack->pcm[
+                        sample1 + static_cast<std::size_t>(channel)];
+                    out[outputBase + channel] = static_cast<float>(
+                        (first + (second - first) * fraction) * inputGain);
+                }
             }
 
             const double playbackRatio =

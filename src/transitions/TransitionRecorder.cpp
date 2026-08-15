@@ -179,11 +179,19 @@ GvtFile TransitionRecorder::finish() {
             else
                 a = m;
         }
-        // Survivors after the first of the run glide linearly into place.
+        // Survivors after the first of the run glide linearly into place —
+        // unless the value jumped (a toggle like a stem mute or a fader slam
+        // must snap on replay, not fade across the gap since the last event).
         bool firstKept = true;
+        double prevKeptValue = 0.0;
         for (size_t idx : run) {
             if (!keep[idx]) continue;
-            im.events[idx].curve = firstKept ? Curve::Step : Curve::Linear;
+            const bool bigJump =
+                !firstKept &&
+                std::fabs(im.events[idx].value - prevKeptValue) > 0.45;
+            im.events[idx].curve =
+                (firstKept || bigJump) ? Curve::Step : Curve::Linear;
+            prevKeptValue = im.events[idx].value;
             firstKept = false;
         }
     }

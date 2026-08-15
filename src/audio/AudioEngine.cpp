@@ -331,6 +331,22 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
             target.filter.store(normalizedValue(event.value),
                                 std::memory_order_relaxed);
         break;
+    case ControlId::StemVocals:
+        target.stemVocals.store(normalizedValue(event.value),
+                                std::memory_order_relaxed);
+        break;
+    case ControlId::StemMelody:
+        target.stemMelody.store(normalizedValue(event.value),
+                                std::memory_order_relaxed);
+        break;
+    case ControlId::StemBass:
+        target.stemBass.store(normalizedValue(event.value),
+                              std::memory_order_relaxed);
+        break;
+    case ControlId::StemDrums:
+        target.stemDrums.store(normalizedValue(event.value),
+                               std::memory_order_relaxed);
+        break;
     case ControlId::FxType:
         if (std::isfinite(event.value)) {
             const double bounded = std::clamp(event.value, 0.0, 2.0);

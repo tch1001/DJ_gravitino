@@ -14,6 +14,7 @@ namespace gvt {
 
 class History;
 class MasterRecorder;
+class StemSeparator;
 class DeckWidget;
 class DetailWaveformView;
 class MixerWidget;
@@ -29,7 +30,8 @@ public:
     MainWindow(ControlBus* bus, AudioEngine* engine, TrackLibrary* library,
                TransitionStore* store, TransitionRecorder* recorder,
                TransitionPlayer* player, MidiEngine* midi,
-               MasterRecorder* rec = nullptr, QWidget* parent = nullptr);
+               MasterRecorder* rec = nullptr, StemSeparator* stems = nullptr,
+               QWidget* parent = nullptr);
     // Dev hook (--autoload): a track was loaded onto `deck` outside the
     // library widget; refresh deck display + transition matches.
     void notifyTrackLoaded(int deck);
@@ -47,6 +49,7 @@ private slots:
     void onMidiConnection(bool connected, const QString& name);
     void onRecClicked();
     void onRecordingChanged(bool active, const QString& path);
+    void onStemsRequested(int deck);
 
 private:
     ControlBus* bus_;
@@ -69,6 +72,13 @@ private:
     MasterRecorder* rec_ = nullptr;
     QPushButton* recBtn_ = nullptr;
     QTimer* recTimer_ = nullptr; // 1 s elapsed-time updates while recording
+
+    // Stem separation (null stems_ = STEMS button stays inert).
+    // Results are matched to decks by track fingerprint: a deck whose track
+    // swapped while demucs ran simply doesn't match and the result is
+    // dropped (the WAV cache keeps it for the next load).
+    StemSeparator* stems_ = nullptr;
+    DeckWidget* deckWidget(int i) { return i == 0 ? deckA_ : deckB_; }
 };
 
 } // namespace gvt

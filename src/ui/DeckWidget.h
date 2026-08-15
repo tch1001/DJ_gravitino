@@ -43,6 +43,18 @@ public:
     // Relay from MainWindow::setTransitionEntryMarker; sec < 0 = none.
     void setTransitionEntry(double sec);
 
+    // Stems row state machine (driven by MainWindow from StemSeparator
+    // signals). Idle: [STEMS] request button armed, pads disabled.
+    // InProgress: button disabled, `stage` text shown. Ready: pads enabled,
+    // mirroring the deck's stem* atomics on the 30 Hz refresh.
+    void setStemsIdle();
+    void setStemsInProgress(const QString& stage);
+    void setStemsReady();
+
+signals:
+    // [STEMS] pressed — MainWindow kicks StemSeparator for this deck's track.
+    void stemsRequested(int deck);
+
 public slots:
     void trackChanged();   // call after a track (un)load to refresh labels
 
@@ -91,6 +103,15 @@ private:
     QDial* fxWetDial_ = nullptr;
     QLabel* fxBeatsLabel_ = nullptr;
     int shownFxOn_ = -1; // -1 = unstyled yet, else 0/1
+
+    // STEMS row (below the FX row): [STEMS] request button, four checkable
+    // pads (vocal/melody/bass/drums, Serato colors), status label.
+    enum class StemsState { Idle, InProgress, Ready };
+    void syncStemPads();
+    StemsState stemsState_ = StemsState::Idle;
+    QPushButton* stemsBtn_ = nullptr;
+    QPushButton* stemPads_[4] = {};
+    QLabel* stemsStatusLabel_ = nullptr;
 
     QTimer* timer_ = nullptr;
 };
