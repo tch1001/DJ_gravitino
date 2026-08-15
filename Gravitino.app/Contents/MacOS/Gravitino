@@ -1,0 +1,4 @@
+#!/bin/zsh
+# Launcher: runs the dev build in the repo. Rebuild with:
+#   cmake --build /Users/fish/gravitino/build
+exec /Users/fish/gravitino/build/gravitino "$@"
