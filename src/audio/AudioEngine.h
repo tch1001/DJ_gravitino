@@ -43,6 +43,12 @@ public:
     // >0.5 sweeps a high-pass up. Processed after EQ in render.
     std::atomic<float> filter { 0.5f };
 
+    // Per-deck FX insert (post-filter, pre-fader). See ControlId::Fx*.
+    std::atomic<int>    fxType  { 0 };     // 0 echo, 1 reverb, 2 flanger
+    std::atomic<bool>   fxOn    { false };
+    std::atomic<float>  fxWet   { 0.5f };
+    std::atomic<double> fxBeats { 0.5 };   // echo delay / flanger period
+
     std::atomic<double> tempoRatio { 1.0 };  // 1.0 = native
     std::atomic<float>  fader      { 1.0f };
     std::atomic<float>  trim       { 0.5f };

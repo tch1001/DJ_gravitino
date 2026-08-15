@@ -28,6 +28,10 @@ enum class ControlId : uint8_t {
     LoopAuto,     // value = loop length in beats (e.g. 4.0); starts beat-snapped loop
     BeatJump,     // value = signed beats to jump (e.g. -8, 4), beat-aligned
     Filter,       // per-deck DJ filter: 0.5 = off, <0.5 low-pass, >0.5 high-pass
+    FxType,       // per-deck FX select: 0 = echo, 1 = reverb, 2 = flanger
+    FxOn,         // trigger: 1.0 = engage, 0.0 = disengage (state, not toggle)
+    FxWet,        // 0..1 dry/wet
+    FxBeats,      // echo/flanger time base in beats (0.25..4, default 0.5)
     Count
 };
 

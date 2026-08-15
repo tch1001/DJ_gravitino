@@ -20,6 +20,8 @@ constexpr NameEntry kNames[] = {
     {ControlId::LoopExit, "loop_exit"}, {ControlId::LoopHalve, "loop_halve"},
     {ControlId::LoopDouble, "loop_double"}, {ControlId::LoopAuto, "loop_auto"},
     {ControlId::BeatJump, "beat_jump"}, {ControlId::Filter, "filter"},
+    {ControlId::FxType, "fx_type"}, {ControlId::FxOn, "fx_on"},
+    {ControlId::FxWet, "fx_wet"}, {ControlId::FxBeats, "fx_beats"},
 };
 } // namespace
 
