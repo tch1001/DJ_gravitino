@@ -6,6 +6,15 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-16 (orchestrator): **STEMS ROUND COMPLETE.** Engine half done by
+  the orchestrator (codex-stems hung and was killed): Deck::attachStems with
+  seamless publish / drained replace, stem-aware render sampling (untouched
+  master when all levels = 1), applyEvent stem cases. Verified: selftest stem
+  section (full/muted/solo RMS), live pad toggles, and a live-recorded .gvt
+  containing stem_vocals/stem_drums cuts. Recorder now snaps value jumps
+  > 0.45 as Step so toggles never fade on replay. Remaining parity backlog:
+  sampler pads, 4-deck, smart crates/iTunes import, pitch readouts.
+
 - 2026-08-16 (claude-stems): **Stem separation pipeline + stem pads UI.**
   New `src/analysis/StemSeparator.{h,cpp}` (gvtcore): GUI-thread QObject that
   runs the demucs CLI (`/Users/fish/.local/bin/demucs -n htdemucs -d mps`)
