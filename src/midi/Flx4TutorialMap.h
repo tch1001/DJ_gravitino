@@ -39,7 +39,17 @@ enum class Flx4SurfaceControl : std::uint8_t {
     BeatFxBeats,
 };
 
-enum class Flx4PadMode : std::uint8_t { None, HotCue, BeatJump };
+enum class Flx4PadMode : std::uint8_t {
+    None,
+    HotCue,
+    PadFx1,
+    BeatJump,
+    Custom,
+    Keyboard,
+    PadFx2,
+    BeatLoop,
+    KeyShift,
+};
 
 struct Flx4TutorialMapping {
     Flx4SurfaceControl surface = Flx4SurfaceControl::PlayPause;

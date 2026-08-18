@@ -2,6 +2,7 @@
 // Owner: claude-transitions. NOTE: gvt::matchTrack() lives in
 // src/library/TransitionStore.cpp (analysis agent) — not here.
 #include "Transition.h"
+#include "../performance/PerformancePads.h"
 
 #include <QFile>
 #include <QRegularExpression>
@@ -36,6 +37,46 @@ bool parseBool(const QString& s) {
     const QString value = s.trimmed().toLower();
     return value == QLatin1String("true") || value == QLatin1String("yes") ||
            value == QLatin1String("on") || value.toDouble() != 0.0;
+}
+
+QString gestureModeName(int mode)
+{
+    switch (static_cast<PerformancePadMode>(mode)) {
+    case PerformancePadMode::HotCue:   return QStringLiteral("hot_cue");
+    case PerformancePadMode::PadFx1:    return QStringLiteral("pad_fx1");
+    case PerformancePadMode::BeatJump:  return QStringLiteral("beat_jump");
+    case PerformancePadMode::Sampler:
+    case PerformancePadMode::SavedLoop:return QStringLiteral("custom");
+    case PerformancePadMode::Keyboard:  return QStringLiteral("keyboard");
+    case PerformancePadMode::PadFx2:    return QStringLiteral("pad_fx2");
+    case PerformancePadMode::BeatLoop:  return QStringLiteral("beat_loop");
+    case PerformancePadMode::KeyShift:  return QStringLiteral("key_shift");
+    case PerformancePadMode::Count:     return {};
+    }
+    return {};
+}
+
+bool gestureModeFromName(const QString& name, int& mode)
+{
+    const QString value = name.trimmed().toLower();
+    static const std::pair<const char*, PerformancePadMode> modes[] = {
+        {"hot_cue", PerformancePadMode::HotCue},
+        {"pad_fx1", PerformancePadMode::PadFx1},
+        {"beat_jump", PerformancePadMode::BeatJump},
+        {"custom", PerformancePadMode::Sampler},
+        {"sampler", PerformancePadMode::Sampler}, // early development files
+        {"keyboard", PerformancePadMode::Keyboard},
+        {"pad_fx2", PerformancePadMode::PadFx2},
+        {"beat_loop", PerformancePadMode::BeatLoop},
+        {"key_shift", PerformancePadMode::KeyShift},
+    };
+    for (const auto& [key, candidate] : modes) {
+        if (value == QLatin1String(key)) {
+            mode = static_cast<int>(candidate);
+            return true;
+        }
+    }
+    return false;
 }
 
 // Smallest fixed precision in [minDec..maxDec] that reproduces v exactly
@@ -233,13 +274,39 @@ bool parseEventLine(const QString& line, int lineNo, GvtFile& out,
         e.value = v;
         ++idx;
     }
-    if (idx < tok.size()) {
+    if (idx < tok.size() && !tok[idx].startsWith(QLatin1String("via="))) {
         if (!curveFromName(tok[idx], e.curve))
             warn(warnings, QStringLiteral("line %1: unknown curve '%2', treated as step").arg(lineNo).arg(tok[idx]));
         ++idx;
     }
-    if (idx < tok.size())
-        warn(warnings, QStringLiteral("line %1: trailing tokens ignored").arg(lineNo));
+    for (; idx < tok.size(); ++idx) {
+        if (!tok[idx].startsWith(QLatin1String("via="))) {
+            warn(warnings, QStringLiteral("line %1: trailing token '%2' ignored")
+                               .arg(lineNo).arg(tok[idx]));
+            continue;
+        }
+        const QString hint = tok[idx].mid(4);
+        const int at = hint.indexOf(QLatin1Char('@'));
+        const QString control = at < 0 ? hint : hint.left(at);
+        const QByteArray encoded = control.toUtf8();
+        if (!controlFromName(encoded.constData(), e.gestureControl)) {
+            e.gestureControl = ControlId::Count;
+            warn(warnings, QStringLiteral("line %1: unknown gesture '%2', ignored")
+                               .arg(lineNo).arg(control));
+            continue;
+        }
+        if (at >= 0) {
+            bool ok = false;
+            const int mode = hint.mid(at + 1).toInt(&ok);
+            if (ok) e.gesturePadMode = mode;
+            else if (gestureModeFromName(hint.mid(at + 1),
+                                         e.gesturePadMode)) {
+                // Parsed the stable human-readable layer name.
+            }
+            else warn(warnings, QStringLiteral("line %1: bad gesture mode in '%2', ignored")
+                                   .arg(lineNo).arg(hint));
+        }
+    }
     out.events.push_back(e);
     return true;
 }
@@ -509,7 +576,7 @@ QString gvtSerialize(const GvtFile& f) {
     }
 
     s += QStringLiteral("[events]\n");
-    s += QStringLiteral("; beat | target | control | value | curve\n");
+    s += QStringLiteral("; beat | target | control | value | curve | optional via=gesture@mode\n");
 
     std::vector<GvtEvent> evs = f.events;
     std::stable_sort(evs.begin(), evs.end(),
@@ -523,6 +590,16 @@ QString gvtSerialize(const GvtFile& f) {
             line += QStringLiteral(" %1").arg(fmtNum(e.value, 2, 6), -6);
             if (!controlIsTrigger(e.control) && e.curve != Curve::Step)
                 line += QStringLiteral(" %1").arg(QLatin1String(curveName(e.curve)));
+        }
+        if (e.gestureControl != ControlId::Count) {
+            line += QStringLiteral(" via=%1")
+                        .arg(QLatin1String(controlName(e.gestureControl)));
+            if (e.gesturePadMode >= 0) {
+                const QString mode = gestureModeName(e.gesturePadMode);
+                line += mode.isEmpty()
+                            ? QStringLiteral("@%1").arg(e.gesturePadMode)
+                            : QStringLiteral("@%1").arg(mode);
+            }
         }
         // Trim right padding.
         while (line.endsWith(QLatin1Char(' '))) line.chop(1);

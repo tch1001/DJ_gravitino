@@ -1,6 +1,7 @@
 #include "TransitionPanel.h"
 #include "FitButton.h"
 #include "Flx4TutorialWidget.h"
+#include "../performance/PerformancePads.h"
 #include "../transitions/TransitionPlayerExt.h"
 #include "Theme.h"
 
@@ -20,6 +21,7 @@
 #include <QProgressBar>
 #include <QSettings>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QLineEdit>
 #include <QTableWidget>
@@ -72,6 +74,23 @@ std::vector<int> summarizedEventIndices(const GvtFile& file) {
     return indices;
 }
 
+Flx4PadMode tutorialPadMode(int recordedMode)
+{
+    switch (static_cast<PerformancePadMode>(recordedMode)) {
+    case PerformancePadMode::HotCue:   return Flx4PadMode::HotCue;
+    case PerformancePadMode::PadFx1:    return Flx4PadMode::PadFx1;
+    case PerformancePadMode::BeatJump:  return Flx4PadMode::BeatJump;
+    case PerformancePadMode::Sampler:
+    case PerformancePadMode::SavedLoop:return Flx4PadMode::Custom;
+    case PerformancePadMode::Keyboard:  return Flx4PadMode::Keyboard;
+    case PerformancePadMode::PadFx2:    return Flx4PadMode::PadFx2;
+    case PerformancePadMode::BeatLoop:  return Flx4PadMode::BeatLoop;
+    case PerformancePadMode::KeyShift:  return Flx4PadMode::KeyShift;
+    case PerformancePadMode::Count:     return Flx4PadMode::None;
+    }
+    return Flx4PadMode::None;
+}
+
 } // namespace
 
 static QString qualityBadge(MatchQuality q)
@@ -107,6 +126,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
 
     // Left: matching transitions list.
     auto* leftPane = new QWidget(contentSplitter);
+    tutorialLeftPane_ = leftPane;
     leftPane->setMinimumWidth(140);
     auto* leftCol = new QVBoxLayout(leftPane);
     leftCol->setContentsMargins(0, 0, 4, 0);
@@ -132,6 +152,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
 
     // Center: deterministic sequence preview for the selected transition.
     auto* previewPane = new QWidget(contentSplitter);
+    tutorialPreviewPane_ = previewPane;
     previewPane->setMinimumWidth(220);
     auto* previewCol = new QVBoxLayout(previewPane);
     previewCol->setContentsMargins(4, 0, 4, 0);
@@ -160,7 +181,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     preview_->horizontalHeader()->setStretchLastSection(true);
     preview_->setColumnWidth(0, 52);
     preview_->setColumnWidth(1, 68);
-    preview_->setColumnWidth(2, 92);
+    preview_->setColumnWidth(2, 150); // includes "CUSTOM PAD 3 → play"
     preview_->setColumnWidth(3, 72);
     previewCol->addWidget(preview_, 1);
     contentSplitter->addWidget(previewPane);
@@ -180,10 +201,14 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     performBtn_ = new FitPushButton(tr("▶ PERFORM"));
     performBtn_->setStyleSheet(
         QStringLiteral("color:%1; font-weight:bold;").arg(deckAccent(0).name()));
-    tutorialBtn_ = new FitPushButton(tr("🎓 TUTORIAL"));
+    tutorialBtn_ = new FitPushButton(tr("TUTOR VIEW"));
+    tutorialBtn_->setCheckable(true);
     tutorialBtn_->setToolTip(
-        tr("Practice this transition: prompts appear 4 beats ahead,\n"
-           "your moves are scored against the recording."));
+        tr("Open the compact tutorial view without starting playback.\n"
+           "Then use Perform or Prime for an 8-beat guided countdown."));
+    tutorialBtn_->setStyleSheet(
+        "QPushButton:checked { background:#f1c75b; color:#111318; "
+        "font-weight:bold; }");
     abortBtn_ = new FitPushButton(tr("⏹ ABORT"));
     primeBtn_ = new FitPushButton(tr("⚡ PRIME"));
     primeBtn_->setToolTip(
@@ -275,11 +300,12 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
                 announceEntryMarker();
                 updateSetupStatus();
                 updateControls();
+                if (tutorialViewOpen_) refreshTutorialView();
             });
     connect(preview_, &QTableWidget::itemSelectionChanged, this,
             &TransitionPanel::updateControls);
-    connect(tutorialBtn_, &QPushButton::clicked, this,
-            [this] { startReplay(PlayerMode::Tutorial, /*prime=*/false); });
+    connect(tutorialBtn_, &QPushButton::toggled, this,
+            &TransitionPanel::onTutorialViewToggled);
     connect(abortBtn_, &QPushButton::clicked, this, &TransitionPanel::onAbort);
     connect(renameBtn_, &QPushButton::clicked, this, &TransitionPanel::onRename);
     connect(deleteBtn_, &QPushButton::clicked, this, &TransitionPanel::onDelete);
@@ -323,7 +349,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     connect(stateTimer_, &QTimer::timeout, this, [this] {
         updateControls();
         updateSetupStatus();
-        if (tutorialActive_) layoutTutorialOverlay();
+        if (tutorialViewOpen_) layoutTutorialOverlay();
     });
     stateTimer_->start();
 
@@ -624,6 +650,20 @@ void TransitionPanel::updatePreview()
                                 ? tr("crossfade start")
                                 : tr("crossfade end"));
         }
+        if (event.gestureControl >= ControlId::PerformancePad1 &&
+            event.gestureControl <= ControlId::PerformancePad8 &&
+            event.gesturePadMode >= 0 &&
+            event.gesturePadMode <
+                static_cast<int>(PerformancePadMode::Count)) {
+            const int pad = static_cast<int>(event.gestureControl) -
+                            static_cast<int>(ControlId::PerformancePad1) + 1;
+            const auto mode =
+                static_cast<PerformancePadMode>(event.gesturePadMode);
+            action = tr("%1 PAD %2 → %3")
+                         .arg(QLatin1String(performancePadModeLabel(mode)))
+                         .arg(pad)
+                         .arg(action);
+        }
         preview_->setItem(row, 2, new QTableWidgetItem(action));
 
         QString value;
@@ -878,7 +918,10 @@ void TransitionPanel::updateControls()
                                : beat < match.file->anchorFromBeat - 0.05;
     }
     primeBtn_->setEnabled(selected && !busy && primeTimingReady);
-    tutorialBtn_->setEnabled(selected && !busy);
+    // The checked TUTOR VIEW remains closable during a guided run. It cannot be
+    // opened on top of an unrelated automatic Perform or while recording.
+    tutorialBtn_->setEnabled(
+        selected && !recording && (!replaying || tutorialActive_));
     abortBtn_->setEnabled(busy);
     renameBtn_->setEnabled(selected && !busy);
     deleteBtn_->setEnabled(selected && !busy);
@@ -1167,9 +1210,19 @@ void TransitionPanel::onLabelCue()
                        4000);
 }
 
-void TransitionPanel::onPerform() { startReplay(PlayerMode::Perform, /*prime=*/false); }
+void TransitionPanel::onPerform()
+{
+    startReplay(tutorialViewOpen_ ? PlayerMode::Tutorial
+                                  : PlayerMode::Perform,
+                /*prime=*/false);
+}
 
-void TransitionPanel::onPrime() { startReplay(PlayerMode::Perform, /*prime=*/true); }
+void TransitionPanel::onPrime()
+{
+    startReplay(tutorialViewOpen_ ? PlayerMode::Tutorial
+                                  : PlayerMode::Perform,
+                /*prime=*/true);
+}
 
 void TransitionPanel::startReplay(PlayerMode mode, bool prime)
 {
@@ -1194,7 +1247,7 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         !hasIncomingStartEvent) {
         emit statusMessage(
             tr("Can't perform “%1” accurately: the recording has no incoming "
-               "PLAY or hot-cue event. Re-record it with the current saved-loop fix.")
+               "PLAY or hot-cue event. Re-record it with the current CUSTOM-loop capture.")
                 .arg(m.file->name),
             9000);
         return;
@@ -1245,9 +1298,17 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         // be missed between the seek and scheduler activation.
         applyInitialSetup(m, false, /*prepareFromTransport=*/true,
                           /*prepareToTransport=*/true);
-        if (TrackDataPtr track = engine_->deck(m.fromDeck).track())
+        if (TrackDataPtr track = engine_->deck(m.fromDeck).track()) {
+            // Guided Perform starts eight beats before the entry whenever the
+            // track has that much runway. This makes button countdowns useful
+            // even for a recorded action at transition beat zero.
+            const double startBeat = mode == PlayerMode::Tutorial
+                                         ? std::max(0.0,
+                                             m.file->anchorFromBeat - 8.0)
+                                         : m.file->anchorFromBeat;
             engine_->deck(m.fromDeck).seekSec(
-                track->secAtBeat(m.file->anchorFromBeat));
+                track->secAtBeat(startBeat));
+        }
     }
 
     QString error;
@@ -1264,6 +1325,11 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
     tutorialBeatsIn_ = 0.0;
     tutorialPrompts_.clear();
     if (tutorialActive_) {
+        tutorialViewOpen_ = true;
+        {
+            QSignalBlocker block(tutorialBtn_);
+            tutorialBtn_->setChecked(true);
+        }
         ensureTutorialOverlay();
         const QStringList warnings = tutorialWarnings(m);
         tutorialOverlay_->setWaiting(
@@ -1276,19 +1342,21 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         tutorialOverlay_->show();
         tutorialOverlay_->raise();
         tutorialOverlay_->setFocus(Qt::OtherFocusReason);
-    } else {
+    } else if (!tutorialViewOpen_) {
         closeTutorialOverlay();
     }
     if (!prime)
         bus_->dispatch({m.fromDeck, ControlId::Play, 1.0}, Origin::System);
     updateControls();
     if (prime)
-        emit statusMessage(tr("Primed \"%1\" — full pre-state verified; "
-                              "fires when deck %2 reaches beat %3")
-                               .arg(m.file->name)
-                               .arg(m.fromDeck == 0 ? QStringLiteral("A") : QStringLiteral("B"))
-                               .arg(m.file->anchorFromBeat, 0, 'f', 1),
-                           6000);
+        emit statusMessage(
+            (mode == PlayerMode::Tutorial
+                 ? tr("Tutorial primed: \"%1\" — guidance begins before deck %2 reaches beat %3")
+                 : tr("Primed \"%1\" — full pre-state verified; fires when deck %2 reaches beat %3"))
+                .arg(m.file->name)
+                .arg(m.fromDeck == 0 ? QStringLiteral("A") : QStringLiteral("B"))
+                .arg(m.file->anchorFromBeat, 0, 'f', 1),
+            6000);
     else
         emit statusMessage(mode == PlayerMode::Tutorial
                                ? tr("Tutorial: \"%1\" — follow the prompts!").arg(m.file->name)
@@ -1310,7 +1378,7 @@ void TransitionPanel::onAbort()
     }
     progress_->setValue(0);
     if (banner_) banner_->hide();
-    closeTutorialOverlay();
+    finishTutorialRun();
     updateControls();
 }
 
@@ -1339,7 +1407,7 @@ void TransitionPanel::onFinished(bool completed)
     }
     progress_->setValue(completed ? 1000 : 0);
     if (banner_) banner_->hide();
-    closeTutorialOverlay();
+    finishTutorialRun();
     updateControls();
     emit statusMessage(completed ? tr("Transition complete")
                                  : tr("Transition stopped"),
@@ -1387,8 +1455,26 @@ QString TransitionPanel::tutorialWarningForEvent(
 {
     QString control = QString::fromUtf8(controlName(event.control));
     control.replace(QLatin1Char('_'), QLatin1Char(' '));
-    if (!flx4TutorialMapping(event.control, event.value))
+    if (!tutorialMappingForEvent(event))
         return tr("%1 has no exact FLX4 control mapping").arg(control);
+
+    if (event.gestureControl >= ControlId::PerformancePad1 &&
+        event.gestureControl <= ControlId::PerformancePad8 &&
+        (event.gesturePadMode == static_cast<int>(PerformancePadMode::Sampler) ||
+         event.gesturePadMode == static_cast<int>(PerformancePadMode::SavedLoop))) {
+        if (event.role == Role::Mixer)
+            return tr("CUSTOM pad gesture has no deck target");
+        const int pad = static_cast<int>(event.gestureControl) -
+                        static_cast<int>(ControlId::PerformancePad1);
+        const int deck = event.role == Role::FromDeck
+                             ? match.fromDeck : 1 - match.fromDeck;
+        const TrackDataPtr track = engine_->deck(deck).track();
+        if (!track || !track->savedLoops[pad].isSet()) {
+            return tr("Deck %1 CUSTOM pad %2 has no captured loop")
+                .arg(deck == 0 ? QStringLiteral("A") : QStringLiteral("B"))
+                .arg(pad + 1);
+        }
+    }
 
     if (event.control < ControlId::HotCue1 ||
         event.control > ControlId::HotCue8)
@@ -1446,7 +1532,19 @@ QStringList TransitionPanel::tutorialWarnings(const Match& match) const
 bool TransitionPanel::tutorialEventCanActivate(
     const Match& match, const GvtEvent& event) const
 {
-    if (!flx4TutorialMapping(event.control, event.value)) return false;
+    if (!tutorialMappingForEvent(event)) return false;
+    if (event.gestureControl >= ControlId::PerformancePad1 &&
+        event.gestureControl <= ControlId::PerformancePad8 &&
+        (event.gesturePadMode == static_cast<int>(PerformancePadMode::Sampler) ||
+         event.gesturePadMode == static_cast<int>(PerformancePadMode::SavedLoop))) {
+        if (event.role == Role::Mixer) return false;
+        const int pad = static_cast<int>(event.gestureControl) -
+                        static_cast<int>(ControlId::PerformancePad1);
+        const int deck = event.role == Role::FromDeck
+                             ? match.fromDeck : 1 - match.fromDeck;
+        const TrackDataPtr track = engine_->deck(deck).track();
+        if (!track || !track->savedLoops[pad].isSet()) return false;
+    }
     if (event.control < ControlId::HotCue1 ||
         event.control > ControlId::HotCue8)
         return true;
@@ -1468,6 +1566,21 @@ bool TransitionPanel::tutorialEventCanActivate(
     // known mismatch is disabled because clicking it would teach the wrong cue.
     return !std::isfinite(expectedBeat) || expectedBeat < 0.0 ||
            std::fabs(track->beatAtSec(track->hotCues[pad]) - expectedBeat) <= 0.05;
+}
+
+std::optional<Flx4TutorialMapping>
+TransitionPanel::tutorialMappingForEvent(const GvtEvent& event) const
+{
+    if (event.gestureControl >= ControlId::PerformancePad1 &&
+        event.gestureControl <= ControlId::PerformancePad8) {
+        const int pad = static_cast<int>(event.gestureControl) -
+                        static_cast<int>(ControlId::PerformancePad1);
+        const Flx4PadMode mode = tutorialPadMode(event.gesturePadMode);
+        if (mode == Flx4PadMode::None) return std::nullopt;
+        return Flx4TutorialMapping {Flx4SurfaceControl::PerformancePad,
+                                    pad, mode, false};
+    }
+    return flx4TutorialMapping(event.control, event.value);
 }
 
 ControlEvent TransitionPanel::tutorialPhysicalEvent(const GvtEvent& event) const
@@ -1492,6 +1605,26 @@ QString TransitionPanel::tutorialInstruction(
                          : physical.deck == 1 ? tr("Deck B") : tr("mixer");
     const int hotCue = static_cast<int>(event.control) -
                        static_cast<int>(ControlId::HotCue1) + 1;
+    if (event.gestureControl >= ControlId::PerformancePad1 &&
+        event.gestureControl <= ControlId::PerformancePad8 &&
+        event.gesturePadMode >= 0 &&
+        event.gesturePadMode < static_cast<int>(PerformancePadMode::Count)) {
+        const int pad = static_cast<int>(event.gestureControl) -
+                        static_cast<int>(ControlId::PerformancePad1) + 1;
+        const auto mode = static_cast<PerformancePadMode>(event.gesturePadMode);
+        const QString modeName =
+            QLatin1String(performancePadModeLabel(mode));
+        const bool release =
+            (event.control == ControlId::Cue ||
+             (event.control >= ControlId::HotCue1 &&
+              event.control <= ControlId::HotCue8)) &&
+            event.value < 0.5;
+        return release
+                   ? tr("Release %1 pad %2 on %3")
+                         .arg(modeName).arg(pad).arg(deck)
+                   : tr("Select %1, then press pad %2 on %3")
+                         .arg(modeName).arg(pad).arg(deck);
+    }
     switch (event.control) {
     case ControlId::Play: return tr("Press PLAY/PAUSE on %1").arg(deck);
     case ControlId::Stop: return tr("Press PLAY/PAUSE to stop %1").arg(deck);
@@ -1598,6 +1731,10 @@ QString TransitionPanel::tutorialDetail(const GvtEvent& event) const
         if (label.isEmpty()) label = automaticCueLabel(event);
         if (!label.isEmpty()) parts.append(label);
     }
+    if (event.gestureControl >= ControlId::PerformancePad1 &&
+        event.gestureControl <= ControlId::PerformancePad8) {
+        parts.append(tr("recorded button gesture preserved"));
+    }
     parts.append(tr("physical FLX4 or highlighted virtual control"));
     return parts.join(QStringLiteral(" · "));
 }
@@ -1612,8 +1749,15 @@ void TransitionPanel::ensureTutorialOverlay()
             [this](const ControlEvent& event) {
                 bus_->dispatch(event, Origin::Ui);
             });
-    connect(tutorialOverlay_, &Flx4TutorialWidget::abortRequested,
-            this, &TransitionPanel::onAbort);
+    connect(tutorialOverlay_, &Flx4TutorialWidget::performancePadActivated,
+            this, &TransitionPanel::tutorialPerformancePadRequested);
+    connect(tutorialOverlay_, &Flx4TutorialWidget::abortRequested, this,
+            [this] {
+                // The overlay's ×/Esc closes the view. If a guided transition
+                // is running, abort it first rather than leaving invisible
+                // tutorial scoring active in the background.
+                tutorialBtn_->setChecked(false);
+            });
 }
 
 void TransitionPanel::layoutTutorialOverlay()
@@ -1621,14 +1765,93 @@ void TransitionPanel::layoutTutorialOverlay()
     if (!tutorialOverlay_) return;
     QWidget* host = window();
     if (!host) return;
-    tutorialOverlay_->setGeometry(host->rect().adjusted(18, 18, -18, -18));
+    if (!tutorialLeftPane_ || !tutorialPreviewPane_) return;
+
+    // Cover exactly the transition list + event sequence horizontally. Extend
+    // from their top through the library below, leaving the right-hand
+    // Perform/Prime controls visible and usable as the tutorial-mode controls.
+    const QPoint topLeft = tutorialLeftPane_->mapTo(host, QPoint(0, 0));
+    const QPoint previewRight = tutorialPreviewPane_->mapTo(
+        host, QPoint(tutorialPreviewPane_->width(), 0));
+    const int bottom = std::max(topLeft.y() + 260, host->height() - 30);
+    QRect geometry(topLeft.x(), topLeft.y(),
+                   std::max(420, previewRight.x() - topLeft.x()),
+                   bottom - topLeft.y());
+    geometry = geometry.intersected(host->rect().adjusted(4, 4, -4, -4));
+    tutorialOverlay_->setGeometry(geometry);
     tutorialOverlay_->raise();
+}
+
+void TransitionPanel::onTutorialViewToggled(bool open)
+{
+    if (open) {
+        if (player_->isActive() && !tutorialActive_) {
+            QSignalBlocker block(tutorialBtn_);
+            tutorialBtn_->setChecked(false);
+            emit statusMessage(
+                tr("Finish or abort the current Perform before opening Tutorial view"),
+                4000);
+            return;
+        }
+        tutorialViewOpen_ = true;
+        refreshTutorialView();
+        emit statusMessage(
+            tr("Tutorial view open — use Perform for an 8-beat count-in or Prime to arm guidance"),
+            5000);
+    } else {
+        tutorialViewOpen_ = false;
+        if (tutorialActive_ && player_->isActive())
+            player_->abort();
+        closeTutorialOverlay();
+    }
+    updateControls();
+}
+
+void TransitionPanel::refreshTutorialView()
+{
+    if (!tutorialViewOpen_) return;
+    ensureTutorialOverlay();
+    if (!tutorialOverlay_) return;
+
+    const int idx = selectedMatch();
+    if (idx < 0) {
+        tutorialOverlay_->setWaiting(
+            tr("No transition selected"),
+            tr("Select a transition to prepare guided Perform or Prime"));
+    } else {
+        const Match& match = matches_[static_cast<std::size_t>(idx)];
+        const QStringList warnings = tutorialWarnings(match);
+        tutorialOverlay_->setWaiting(
+            match.file->name,
+            warnings.isEmpty()
+                ? QString()
+                : tr("%1 mapping warning(s); unavailable steps will appear in amber")
+                      .arg(warnings.size()));
+    }
+    layoutTutorialOverlay();
+    tutorialOverlay_->show();
+    tutorialOverlay_->raise();
+}
+
+void TransitionPanel::finishTutorialRun()
+{
+    tutorialActive_ = false;
+    tutorialPrompts_.clear();
+    if (tutorialViewOpen_)
+        refreshTutorialView();
+    else if (tutorialOverlay_)
+        tutorialOverlay_->hide();
 }
 
 void TransitionPanel::closeTutorialOverlay()
 {
     tutorialActive_ = false;
+    tutorialViewOpen_ = false;
     tutorialPrompts_.clear();
+    if (tutorialBtn_) {
+        QSignalBlocker block(tutorialBtn_);
+        tutorialBtn_->setChecked(false);
+    }
     if (tutorialOverlay_) tutorialOverlay_->hide();
 }
 
@@ -1649,12 +1872,15 @@ void TransitionPanel::showNextTutorialPrompt()
         physical, tutorialInstruction(event, physical), tutorialDetail(event),
         event.beat - tutorialBeatsIn_,
         tutorialEventCanActivate(match, event),
-        tutorialWarningForEvent(match, event));
+        tutorialWarningForEvent(match, event),
+        tutorialMappingForEvent(event), event.gesturePadMode);
 }
 
 void TransitionPanel::onTutorialPrompt(const GvtEvent& e, double beatsAhead)
 {
-    Q_UNUSED(beatsAhead);
+    // The prompt is emitted before the same timer tick's progress signal, so
+    // seed the countdown from its authoritative lead instead of flashing NOW.
+    tutorialBeatsIn_ = e.beat - beatsAhead;
     const auto sameEvent = [&e](const GvtEvent& queued) {
         return queued.role == e.role && queued.control == e.control &&
                std::fabs(queued.beat - e.beat) < 0.0005 &&

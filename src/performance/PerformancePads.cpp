@@ -71,12 +71,12 @@ const char* performancePadModeLabel(PerformancePadMode mode)
     case PerformancePadMode::HotCue:   return "HOT CUE";
     case PerformancePadMode::PadFx1:    return "PAD FX1";
     case PerformancePadMode::BeatJump:  return "BEAT JUMP";
-    case PerformancePadMode::Sampler:   return "SAMPLER / SAVED LOOPS";
+    case PerformancePadMode::Sampler:   return "CUSTOM";
     case PerformancePadMode::Keyboard:  return "KEYBOARD";
     case PerformancePadMode::PadFx2:    return "PAD FX2";
     case PerformancePadMode::BeatLoop:  return "BEAT LOOP";
     case PerformancePadMode::KeyShift:  return "KEY SHIFT";
-    case PerformancePadMode::SavedLoop: return "SAVED LOOP";
+    case PerformancePadMode::SavedLoop: return "CUSTOM";
     case PerformancePadMode::Count:     return "HOT CUE";
     }
     return "HOT CUE";

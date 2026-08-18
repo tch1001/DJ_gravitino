@@ -88,6 +88,19 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
         // Only human origins are recorded — never Replay or System.
         if (origin != Origin::Ui && origin != Origin::Midi) return;
 
+        // Performance-pad controls are host gesture hints rather than audio
+        // events. Preserve the selected layer and attach it to the immediately
+        // following audible state change so Tutorial can teach the button that
+        // caused PLAY/LOOP/FX instead of only describing the resulting state.
+        if (e.id >= ControlId::PerformancePad1 &&
+            e.id <= ControlId::PerformancePad8) {
+            im.gesturePending = true;
+            im.gestureDeck = e.deck;
+            im.gestureControl = e.id;
+            im.gesturePadMode = static_cast<int>(std::lround(e.value));
+            return;
+        }
+
         // Jog nudges are transient rate bends; headphone monitoring is local
         // to the DJ and never part of the audible transition. Skip both.
         if (e.id == ControlId::Jog ||
@@ -130,6 +143,14 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
         g.value = (e.id == ControlId::Crossfader && im.fromDeck != 0)
                       ? 1.0 - e.value : e.value;
         g.curve = Curve::Step;
+        if (im.gesturePending && im.gestureDeck == e.deck) {
+            g.gestureControl = im.gestureControl;
+            g.gesturePadMode = im.gesturePadMode;
+            im.gesturePending = false;
+            im.gestureDeck = kNoDeck;
+            im.gestureControl = ControlId::Count;
+            im.gesturePadMode = -1;
+        }
 
         // Coalesce dense runs of the same continuous (role, control) into
         // fixed 0.05-beat buckets: update the bucket's value but NEVER move
@@ -142,6 +163,10 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
                 const double delta = g.beat - it->beat;
                 if (delta >= 0.0 && delta < kCoalesceBeats) {
                     it->value = g.value;
+                    if (g.gestureControl != ControlId::Count) {
+                        it->gestureControl = g.gestureControl;
+                        it->gesturePadMode = g.gesturePadMode;
+                    }
                     emit eventCaptured((int)im.events.size());
                     return;
                 }
@@ -187,6 +212,10 @@ void TransitionRecorder::start(int fromDeck) {
     im.fromHotCueBeats.fill(-1.0);
     im.toHotCueBeats.fill(-1.0);
     im.events.clear();
+    im.gesturePending = false;
+    im.gestureDeck = kNoDeck;
+    im.gestureControl = ControlId::Count;
+    im.gesturePadMode = -1;
     im.recording = true;
 }
 
@@ -195,6 +224,7 @@ bool TransitionRecorder::isRecording() const { return impl_->recording; }
 void TransitionRecorder::cancel() {
     impl_->recording = false;
     impl_->events.clear();
+    impl_->gesturePending = false;
 }
 
 GvtFile TransitionRecorder::finish() {

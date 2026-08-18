@@ -19,6 +19,11 @@ struct GvtEvent {
     ControlId control = ControlId::Crossfader;
     double    value = 1.0;     // triggers: ignored
     Curve     curve = Curve::Step;
+    // Optional physical input that produced this state change. Replay still
+    // executes `control`; Tutorial uses this hint to teach the actual button
+    // (for example CUSTOM pad 3 rather than the resulting generic PLAY state).
+    ControlId gestureControl = ControlId::Count;
+    int       gesturePadMode = -1; // PerformancePadMode value, when relevant
 };
 
 struct GvtTrackRef {

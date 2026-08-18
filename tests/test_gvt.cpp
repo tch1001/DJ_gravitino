@@ -77,7 +77,9 @@ filter      = 0.500
 
 bool eventsEqual(const gvt::GvtEvent& a, const gvt::GvtEvent& b) {
     return near(a.beat, b.beat) && a.role == b.role && a.control == b.control &&
-           near(a.value, b.value) && a.curve == b.curve;
+           near(a.value, b.value) && a.curve == b.curve &&
+           a.gestureControl == b.gestureControl &&
+           a.gesturePadMode == b.gesturePadMode;
 }
 
 bool refsEqual(const gvt::GvtTrackRef& a, const gvt::GvtTrackRef& b) {
@@ -322,6 +324,23 @@ int main() {
         GvtFile parsed;
         CHECK(gvtParse(gvtSerialize(precise), parsed, nullptr, nullptr));
         CHECK(filesEqual(precise, parsed));
+    }
+
+    // Physical gesture hints survive without changing the replay action.
+    {
+        GvtFile hinted = f;
+        hinted.events[4].gestureControl = ControlId::PerformancePad3;
+        hinted.events[4].gesturePadMode = 3;
+        const QString text = gvtSerialize(hinted);
+        CHECK(text.contains(QStringLiteral("via=performance_pad_3@custom")));
+        GvtFile parsed;
+        QStringList w2;
+        CHECK(gvtParse(text, parsed, nullptr, &w2));
+        CHECK(w2.isEmpty());
+        CHECK(filesEqual(hinted, parsed));
+        CHECK(parsed.events[4].control == ControlId::Play);
+        CHECK(parsed.events[4].gestureControl == ControlId::PerformancePad3);
+        CHECK(parsed.events[4].gesturePadMode == 3);
     }
 
     // ---- structural failure: bad magic ------------------------------------

@@ -2,10 +2,12 @@
 #include <QList>
 #include <QStringList>
 #include <QWidget>
+#include <optional>
 #include <vector>
 #include "../audio/AudioEngine.h"
 #include "../control/ControlBus.h"
 #include "../library/TrackLibrary.h"
+#include "../midi/Flx4TutorialMap.h"
 #include "../transitions/Transition.h"
 #include "../transitions/TransitionEngine.h"
 #include "../transitions/TransitionTolerance.h"
@@ -45,6 +47,8 @@ signals:
                            const QStringList& labels);
     void hardwareTakeoverTrackingStarted();
     void hardwareTakeoverTrackingFinished();
+    void tutorialPerformancePadRequested(int deck, int mode, int pad,
+                                         bool pressed);
 
 public slots:
     void refreshMatches();  // call on trackLoaded / store changed
@@ -55,6 +59,7 @@ private slots:
     void onStopSave();
     void onPerform();
     void onPrime();
+    void onTutorialViewToggled(bool open);
     void startReplay(gvt::PlayerMode mode, bool prime);
     void onAbort();
     void onRename();
@@ -95,12 +100,16 @@ private:
                                     const GvtEvent& event) const;
     bool tutorialEventCanActivate(const Match& match,
                                   const GvtEvent& event) const;
+    std::optional<Flx4TutorialMapping> tutorialMappingForEvent(
+        const GvtEvent& event) const;
     ControlEvent tutorialPhysicalEvent(const GvtEvent& event) const;
     QString tutorialInstruction(const GvtEvent& event,
                                 const ControlEvent& physical) const;
     QString tutorialDetail(const GvtEvent& event) const;
     void ensureTutorialOverlay();
     void layoutTutorialOverlay();
+    void refreshTutorialView();
+    void finishTutorialRun();
     void showNextTutorialPrompt();
     void closeTutorialOverlay();
 
@@ -134,10 +143,13 @@ private:
     int capturedCount_ = 0;
     QString selectedPath_;
     Flx4TutorialWidget* tutorialOverlay_ = nullptr;
+    QWidget* tutorialLeftPane_ = nullptr;
+    QWidget* tutorialPreviewPane_ = nullptr;
     std::vector<GvtEvent> tutorialPrompts_;
     int tutorialFromDeck_ = 0;
     double tutorialBeatsIn_ = 0.0;
     bool tutorialActive_ = false;
+    bool tutorialViewOpen_ = false;
     bool takeoverTrackingActive_ = false;
     TransitionSetupTolerances setupTolerances_;
 };

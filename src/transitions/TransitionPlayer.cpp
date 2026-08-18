@@ -14,7 +14,7 @@ namespace {
 
 constexpr int    kTickMs        = 5;
 constexpr double kGraceBeats    = 1.0;  // after the last event before finished()
-constexpr double kTutorialLead  = 4.0;  // prompt this many beats ahead
+constexpr double kTutorialLead  = 8.0;  // longer runway, especially for buttons
 constexpr double kTutorialMiss  = 4.0;  // auto-advance past events this late
 
 // Mode side-table: the pinned TransitionEngine.h declares PlayerMode but no
@@ -127,7 +127,9 @@ TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
             }
         }
 
-        emit progressChanged(std::clamp(rel, 0.0, im2.totalBeats), im2.totalBeats);
+        // Report negative pre-anchor time too. The UI clamps its progress bar,
+        // while Tutorial uses the raw value for an honest 8-beat countdown.
+        emit progressChanged(rel, im2.totalBeats);
 
         if (rel >= im2.totalBeats + kGraceBeats) {
             im2.active = false;

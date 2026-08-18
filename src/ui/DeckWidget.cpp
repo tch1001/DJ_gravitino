@@ -411,7 +411,12 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
         tr("Hold to preview from cue; press PLAY while held to continue playing"));
     for (QPushButton* b : {playBtn_, cueBtn_, syncBtn_, quantizeBtn_})
         b->setMinimumHeight(26);
+    playBtn_->setFixedWidth(48);
+    cueBtn_->setFixedWidth(44);
+    syncBtn_->setFixedWidth(46);
+    quantizeBtn_->setFixedWidth(52);
     gridBtn_->setMinimumHeight(26);
+    gridBtn_->setFixedWidth(54);
     playBtn_->setStyleSheet(
         QStringLiteral("QPushButton:checked { background:%1; color:black; "
                        "font-weight:bold; }")
@@ -463,7 +468,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
         auto* b = new FitPushButton(
             QLatin1String(performancePadModeLabel(kNormalModes[i])), this);
         b->setFixedHeight(24);
-        b->setMinimumWidth(68);
+        b->setFixedWidth(58);
         b->setFocusPolicy(Qt::NoFocus);
         b->setToolTip(tr("Select %1 performance pads")
                           .arg(QLatin1String(
@@ -472,7 +477,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
         connect(b, &QPushButton::clicked, this,
                 [this, mode] { setPerformancePadMode(mode); });
         normalModeBtns_[i] = b;
-        modes->addWidget(b, i / 3, i % 3);
+        modes->addWidget(b, i / 2, i % 2);
     }
 
     shiftedModesBtn_ = new FitToolButton(this);
@@ -493,7 +498,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
                 [this, mode] { setPerformancePadMode(mode); });
     }
     shiftedModesBtn_->setMenu(shiftedMenu);
-    modes->addWidget(shiftedModesBtn_, 2, 0, 1, 3);
+    modes->addWidget(shiftedModesBtn_, 2, 0, 1, 2);
     padsAndModes->addLayout(modes);
     padsAndModes->addStretch(1);
     padsSection->addLayout(padsAndModes);
@@ -913,8 +918,8 @@ void DeckWidget::setPerformancePadMode(PerformancePadMode mode)
         QLatin1String(performancePadModeLabel(padMode_));
     if (padMode_ == PerformancePadMode::Sampler) {
         showPadFeedback(
-            tr("SAMPLER / SAVED LOOPS · empty pad saves the active loop; "
-               "filled loop starts it; sampler files remain programmable"));
+            tr("CUSTOM · empty pad captures the active loop; filled loop "
+               "starts it; custom audio files remain programmable"));
     } else if (padMode_ == PerformancePadMode::Keyboard ||
                padMode_ == PerformancePadMode::KeyShift) {
         showPadFeedback(tr("%1 is programmable; pitch-shift audio is not available yet")
@@ -947,6 +952,25 @@ void DeckWidget::clearHotCue(int pad)
         waveform_->update();
         showPadFeedback(tr("Removed hot cue %1").arg(pad + 1));
     }
+}
+
+void DeckWidget::requestHotCueClear(int pad)
+{
+    if (pad < 0 || pad >= kPerformancePadCount)
+        return;
+    emit hotCueRemovalRequested(deckIndex_, pad);
+}
+
+void DeckWidget::dispatchPerformancePadGesture(PerformancePadMode mode, int pad)
+{
+    if (pad < 0 || pad >= kPerformancePadCount)
+        return;
+    const auto control = static_cast<ControlId>(
+        static_cast<int>(ControlId::PerformancePad1) + pad);
+    // The value carries the selected layer. AudioEngine ignores these host-only
+    // controls; TransitionRecorder consumes the event as a physical-gesture
+    // hint for the immediately following audible state change.
+    dispatch(control, static_cast<double>(static_cast<int>(mode)));
 }
 
 unsigned int DeckWidget::performancePadLedMask(
@@ -1092,14 +1116,14 @@ void DeckWidget::syncPerformancePadUi()
                 color = QStringLiteral("#e8a13a");
                 button->setText(slot->label.isEmpty()
                     ? tr("L%1").arg(pad + 1) : slot->label.left(8));
-                tooltip = tr("Start saved loop %1 (%2–%3 s); every press "
+                tooltip = tr("Start captured loop %1 (%2–%3 s); every press "
                              "restarts from its beginning. Use LOOP EXIT to leave it. "
                              "Right-click to rename, replace, or clear")
                               .arg(pad + 1)
                               .arg(slot->startSec, 0, 'f', 2)
                               .arg(slot->endSec, 0, 'f', 2);
             } else {
-                tooltip = tr("Empty saved-loop slot %1; activate a loop, then press to save it")
+                tooltip = tr("Empty CUSTOM slot %1; activate a loop, then press to capture it")
                               .arg(pad + 1);
             }
             break;
@@ -1110,18 +1134,18 @@ void DeckWidget::syncPerformancePadUi()
                 color = QStringLiteral("#e8a13a");
                 button->setText(slot->label.isEmpty()
                     ? tr("L%1").arg(pad + 1) : slot->label.left(8));
-                tooltip = tr("Start saved loop %1 (%2–%3 s); every press restarts "
+                tooltip = tr("Start captured loop %1 (%2–%3 s); every press restarts "
                              "from its beginning. Use LOOP EXIT to leave it. "
-                             "Right-click to edit the loop or sampler assignment")
+                             "Right-click to edit the CUSTOM assignment")
                               .arg(pad + 1)
                               .arg(slot->startSec, 0, 'f', 2)
                               .arg(slot->endSec, 0, 'f', 2);
             } else {
                 color = QStringLiteral("#d15a96");
                 tooltip = assignment.resource.empty()
-                    ? tr("Empty sampler / saved-loop slot; activate a loop and press "
-                         "to save it, or right-click to assign audio")
-                    : tr("Sampler assigned: %1 (sample playback is not available yet); "
+                    ? tr("Empty CUSTOM slot; activate a loop and press to capture it, "
+                         "or right-click to assign audio")
+                    : tr("Custom audio assigned: %1 (sample playback is not available yet); "
                          "an active loop can still be saved here")
                           .arg(QString::fromStdString(assignment.resource));
             }
@@ -1168,10 +1192,12 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
         const auto& assignment =
             padAssignments_[static_cast<int>(pressedMode)][pad];
         if (assignment.action == PerformancePadAction::HotCue) {
+            dispatchPerformancePadGesture(pressedMode, pad);
             const auto id = static_cast<ControlId>(
                 static_cast<int>(ControlId::HotCue1) + pad);
             dispatch(id, 0.0);
         } else if (assignment.action == PerformancePadAction::FxHold) {
+            dispatchPerformancePadGesture(pressedMode, pad);
             endPadFx(pad);
         }
         padIsPressed_[pad] = false;
@@ -1189,11 +1215,7 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
     }
     if (assignment.action == PerformancePadAction::HotCue &&
         QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
-        track->hotCues[pad] = -1.0;
-        emit trackPerformanceMetadataChanged(deckIndex_);
-        syncPerformancePadUi();
-        waveform_->update();
-        showPadFeedback(tr("Removed hot cue %1").arg(pad + 1));
+        requestHotCueClear(pad);
         return;
     }
 
@@ -1201,6 +1223,7 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
     pressedPadModes_[pad] = padMode_;
     switch (assignment.action) {
     case PerformancePadAction::HotCue: {
+        dispatchPerformancePadGesture(padMode_, pad);
         const bool wasSet = track->hotCues[pad] >= 0.0;
         const auto id = static_cast<ControlId>(
             static_cast<int>(ControlId::HotCue1) + pad);
@@ -1211,12 +1234,15 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
         break;
     }
     case PerformancePadAction::FxHold:
+        dispatchPerformancePadGesture(padMode_, pad);
         beginPadFx(pad, assignment);
         break;
     case PerformancePadAction::BeatJump:
+        dispatchPerformancePadGesture(padMode_, pad);
         dispatch(ControlId::BeatJump, assignment.value);
         break;
     case PerformancePadAction::BeatLoop:
+        dispatchPerformancePadGesture(padMode_, pad);
         dispatch(ControlId::LoopAuto, assignment.value);
         waveform_->update();
         break;
@@ -1231,9 +1257,9 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
                 !std::isfinite(end) || !(end > start)) {
                 showPadFeedback(
                     assignment.resource.empty()
-                        ? tr("Activate a loop to save it here, or right-click to "
-                             "assign a sampler file")
-                        : tr("Sampler assignment saved, but sample playback is not "
+                        ? tr("Activate a loop to capture it here, or right-click to "
+                             "assign a custom audio file")
+                        : tr("Custom audio assignment saved, but sample playback is not "
                              "available yet"));
                 break;
             }
@@ -1249,12 +1275,13 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
                 // recording captures both its outgoing-relative time and the
                 // incoming deck's exact loop-start anchor. Replay seeks to
                 // that anchor before applying PLAY.
+                dispatchPerformancePadGesture(padMode_, pad);
                 dispatch(ControlId::Play);
                 showPadFeedback(tr("Started %1").arg(
-                    slot.label.isEmpty() ? tr("saved loop %1").arg(pad + 1)
+                    slot.label.isEmpty() ? tr("captured loop %1").arg(pad + 1)
                                          : slot.label));
             } else {
-                showPadFeedback(tr("Could not start saved loop %1")
+                showPadFeedback(tr("Could not start captured loop %1")
                                     .arg(pad + 1));
             }
         }
@@ -1334,11 +1361,7 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
     TrackDataPtr track = engine_->deck(deckIndex_).track();
     if (padMode_ == PerformancePadMode::HotCue) {
         if (track) {
-            track->hotCues[pad] = -1.0;
-            emit trackPerformanceMetadataChanged(deckIndex_);
-            syncPerformancePadUi();
-            waveform_->update();
-            showPadFeedback(tr("Removed hot cue %1").arg(pad + 1));
+            requestHotCueClear(pad);
         }
         return;
     }
@@ -1346,7 +1369,7 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
     if (padMode_ == PerformancePadMode::Sampler ||
         padMode_ == PerformancePadMode::SavedLoop) {
         if (!track) {
-            showPadFeedback(tr("Load a track before editing sampler / saved-loop pads"));
+            showPadFeedback(tr("Load a track before editing CUSTOM pads"));
             return;
         }
         SavedLoopSlot& slot = track->savedLoops[pad];
@@ -1361,7 +1384,7 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
 
         QMenu menu(this);
         QAction* heading = menu.addAction(
-            tr("SAMPLER / SAVED LOOPS · PAD %1").arg(pad + 1));
+            tr("CUSTOM · PAD %1").arg(pad + 1));
         heading->setEnabled(false);
         menu.addSeparator();
         QAction* capture = menu.addAction(
@@ -1377,13 +1400,13 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
             syncPerformancePadUi();
             showPadFeedback(tr("Saved active loop to %1").arg(changed.label));
         });
-        QAction* rename = menu.addAction(tr("Rename saved loop…"));
+        QAction* rename = menu.addAction(tr("Rename captured loop…"));
         rename->setEnabled(slot.isSet());
         connect(rename, &QAction::triggered, this, [this, track, pad] {
             SavedLoopSlot& changed = track->savedLoops[pad];
             bool ok = false;
             const QString label = QInputDialog::getText(
-                this, tr("Rename saved loop"), tr("Short label:"),
+                this, tr("Rename captured loop"), tr("Short label:"),
                 QLineEdit::Normal,
                 changed.label.isEmpty() ? tr("L%1").arg(pad + 1)
                                         : changed.label,
@@ -1392,25 +1415,25 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
             changed.label = label.left(8);
             emit trackPerformanceMetadataChanged(deckIndex_);
             syncPerformancePadUi();
-            showPadFeedback(tr("Renamed saved loop to %1").arg(changed.label));
+            showPadFeedback(tr("Renamed captured loop to %1").arg(changed.label));
         });
-        QAction* clear = menu.addAction(tr("Clear saved loop"));
+        QAction* clear = menu.addAction(tr("Clear captured loop"));
         clear->setEnabled(slot.isSet());
         connect(clear, &QAction::triggered, this, [this, track, pad] {
             track->savedLoops[pad] = SavedLoopSlot {};
             emit trackPerformanceMetadataChanged(deckIndex_);
             syncPerformancePadUi();
-            showPadFeedback(tr("Cleared saved loop %1").arg(pad + 1));
+            showPadFeedback(tr("Cleared captured loop %1").arg(pad + 1));
         });
 
         menu.addSeparator();
-        QAction* chooseSample = menu.addAction(tr("Assign sampler audio file…"));
+        QAction* chooseSample = menu.addAction(tr("Assign custom audio file…"));
         connect(chooseSample, &QAction::triggered, this, [this, pad] {
             auto& changed = padAssignments_[
                 static_cast<int>(PerformancePadMode::Sampler)][pad];
             const QString existing = QString::fromStdString(changed.resource);
             const QString path = QFileDialog::getOpenFileName(
-                this, tr("Assign sampler slot"), existing,
+                this, tr("Assign custom slot"), existing,
                 tr("Audio files (*.wav *.aif *.aiff *.flac *.mp3 *.m4a);;All files (*)"));
             if (path.isEmpty()) return;
             changed.resource = path.toStdString();
@@ -1420,10 +1443,10 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
                                 .toStdString();
             savePerformancePadAssignment(PerformancePadMode::Sampler, pad);
             syncPerformancePadUi();
-            showPadFeedback(tr("Saved sampler assignment for pad %1")
+            showPadFeedback(tr("Saved custom assignment for pad %1")
                                 .arg(pad + 1));
         });
-        QAction* clearSample = menu.addAction(tr("Clear sampler audio assignment"));
+        QAction* clearSample = menu.addAction(tr("Clear custom audio assignment"));
         clearSample->setEnabled(!sampler.resource.empty());
         connect(clearSample, &QAction::triggered, this, [this, pad] {
             auto& changed = padAssignments_[
@@ -1432,7 +1455,7 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
                 PerformancePadMode::Sampler, pad);
             savePerformancePadAssignment(PerformancePadMode::Sampler, pad);
             syncPerformancePadUi();
-            showPadFeedback(tr("Cleared sampler assignment for pad %1")
+            showPadFeedback(tr("Cleared custom assignment for pad %1")
                                 .arg(pad + 1));
         });
         menu.exec(position);
@@ -1550,7 +1573,7 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
             const QString existing =
                 QString::fromStdString(assignment.resource);
             const QString path = QFileDialog::getOpenFileName(
-                this, tr("Assign sampler slot"), existing,
+                this, tr("Assign custom slot"), existing,
                 tr("Audio files (*.wav *.aif *.aiff *.flac *.mp3 *.m4a);;All files (*)"));
             if (path.isEmpty()) return;
             assignment.resource = path.toStdString();

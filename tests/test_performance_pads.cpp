@@ -38,7 +38,7 @@ int main()
     CHECK(performancePadModeIsShifted(PerformancePadMode::KeyShift));
     CHECK(!performancePadModeIsShifted(PerformancePadMode::SavedLoop));
     CHECK(std::string(performancePadModeLabel(PerformancePadMode::Sampler)) ==
-          "SAMPLER / SAVED LOOPS");
+          "CUSTOM");
 
     const auto savedLoop = defaultPerformancePadAssignment(
         PerformancePadMode::SavedLoop, 5);

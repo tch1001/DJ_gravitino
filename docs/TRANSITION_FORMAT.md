@@ -139,7 +139,7 @@ b1          = 32.000
   assignments. Legacy files without this section still load normally.
 - **`[events]`** holds one event per line, whitespace-separated columns:
 
-  `beat  target  control  [value]  [curve]`
+  `beat  target  control  [value]  [curve]  [via=gesture@mode]`
 
   - `beat` — decimal beats since transition start (anchor). Sorted ascending.
   - `target` — `a` (outgoing deck), `b` (incoming deck), `x` (mixer/global).
@@ -152,6 +152,13 @@ b1          = 32.000
   - `curve` — optional: `step` (default), `linear`, `scurve`. Non-step means
     "glide from this control's previous value, arriving at `value` on `beat`,
     starting where the previous event for the same (target, control) ended."
+  - `via` — optional physical gesture that produced the state change. Replay
+    still executes `control`; Tutorial uses `via` for accurate coaching. For
+    example, `play via=performance_pad_3@custom` means CUSTOM pad 3 started a
+    captured loop, so the tutor highlights that pad instead of PLAY. Stable pad
+    mode names are `hot_cue`, `pad_fx1`, `beat_jump`, `custom`, `keyboard`,
+    `pad_fx2`, `beat_loop`, and `key_shift`. Files without `via` remain fully
+    compatible and are taught from their state control as before.
 
 ## Controls (v1)
 

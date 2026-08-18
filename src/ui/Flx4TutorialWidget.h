@@ -21,7 +21,9 @@ public:
     void setWaiting(const QString& transitionName, const QString& warning);
     void setExpected(const ControlEvent& event, const QString& instruction,
                      const QString& detail, double beatsAhead,
-                     bool activationEnabled, const QString& warning);
+                     bool activationEnabled, const QString& warning,
+                     const std::optional<Flx4TutorialMapping>& mapping,
+                     int gesturePadMode = -1);
     void updateCountdown(double beatsAhead);
     void setFeedback(const QString& text, const QColor& color);
     void clearExpected();
@@ -29,6 +31,7 @@ public:
 
 signals:
     void controlActivated(const gvt::ControlEvent& event);
+    void performancePadActivated(int deck, int mode, int pad, bool pressed);
     void abortRequested();
 
 protected:
@@ -52,6 +55,7 @@ private:
     QColor feedbackColor_;
     double beatsAhead_ = 0.0;
     bool activationEnabled_ = false;
+    int gesturePadMode_ = -1;
     bool pulse_ = false;
     int animationPhase_ = 0;
     std::optional<double> hardwareValue_;

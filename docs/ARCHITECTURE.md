@@ -107,7 +107,10 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
    channel/EQ/filter, loop, FX and stem state, plus the mixer crossfader.
 3. Every ControlEvent is logged with a timestamp in **beats relative to anchor**
    (master-deck beats). Beats, not seconds — so a transition recorded at 120 BPM
-   replays correctly at 128.
+   replays correctly at 128. When a performance pad caused the audible event,
+   the recorder also stores an optional physical `via=` gesture hint. Replay
+   remains state-based; Tutorial can therefore say “CUSTOM pad 3” instead of
+   misleadingly reducing the gesture to its resulting `play` event.
 4. Stop recording → normalize (dedupe, quantize option) → save `.gvt`.
 5. Replay: user loads the same pair (matched by audio fingerprint/title), picks
    a transition, then uses **Perform** to reconstruct the recorded pre-state
@@ -122,6 +125,14 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
    moves are consumed. Crossing the target releases that control; the final
    pickup re-enables the controller without ever applying a discontinuous
    hardware value to audio.
+
+The top workspace is `Deck A | compact FLX4 mixer | Deck B`; the centered mixer
+starts below the overview-waveform baseline, and the transition panel owns the
+full lower width. TUTOR VIEW is persistent UI state, not a replay command:
+opening it creates a compact overlay over the transition list/event sequence
+and the library below while leaving Perform/Prime visible. Perform gives the
+guided run up to eight beats of pre-anchor countdown; Prime arms the same
+guidance against the live outgoing deck.
 
 ## Testing
 
@@ -144,4 +155,6 @@ Hot-plug: MidiEngine polls port list every 2 s; connect/disconnect anytime.
 Controller disconnect clears any pending soft-takeover gate. Tutorial mode
 does not arm takeover: its FLX4 diagram instead animates continuous controls
 toward their recorded targets and keeps the prompt alive until the value is
-actually reached.
+actually reached. Recorded performance-pad `via=` hints illuminate the actual
+pad layer and pad number, while transition-critical hot-cue mappings are
+checked before a cue can be deleted.

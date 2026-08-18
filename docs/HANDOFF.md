@@ -1,22 +1,49 @@
 # Gravitino Agent Handoff
 
-Updated: 2026-08-18 (Asia/Singapore)
+Updated: 2026-08-19 (Asia/Singapore)
 
 ## Current state
 
-All queued DJ-controller follow-ups through Saved Loops, true platter scratch,
-Quantize-aware manual loops, phase-only SYNC, and transition-edge loading are
-integrated in the working tree. The stable pre-work baseline is commit
-`1b9958e feat: expand transition workflow and FLX4 integration`; the changes
-described below are intentionally uncommitted pending the user's next
-checkpoint request.
+All queued DJ-controller follow-ups through post-transition FLX4 pickup were
+checkpointed at commit `ecdb7c2` (`Checkpoint DJ controls and transition
+workflow`) before the current task, exactly as requested. The centered mixer,
+compact CUSTOM pad UI, persistent Tutorial view, recorded physical-gesture
+hints, and hot-cue dependency guard described below are intentionally
+uncommitted pending the user's next checkpoint request.
 
 The user explicitly permits stopping a running Gravitino process when a
 restart is needed. Always resolve the process narrowly with
 `ps -axo pid,etime,command | rg '[b]uild/gravitino$'` so Serato or unrelated
 audio programs are never touched.
 
+The intended future Git push target is
+`git@github.com:tch1001/DJ_gravitino.git`. Do not push until the user asks;
+there is currently no Git remote configured, so add/verify the remote at that
+time rather than changing repository configuration preemptively.
+
 ## Implemented in this working tree
+
+- **Centered mixer and compact deck controls:** the `TRIM → HIGH → MID → LOW →
+  FILTER` channel strips and volume faders now occupy a narrow center panel in
+  the deck row, aligned below the overview waveforms. Transition/event panels
+  regain the full lower width. PLAY/CUE/SYNC/QUANT/GRID use compact fixed
+  widths, normal pad-mode buttons use a 2×2 grid, and the combined loop/audio
+  pad bank is presented as CUSTOM (the old Sampler/Saved Loops names remain
+  only as internal compatibility identifiers).
+- **Persistent compact Tutorial view:** TUTOR VIEW only opens/closes the view;
+  it never seeks or starts a track. The overlay spans the transition list and
+  event sequence, then extends downward over the library, leaving the right
+  Perform/Prime controls available. With the view open, Perform starts up to
+  eight beats before the anchor for countdown runway; Prime arms Tutorial at
+  the recorded entry. The view stays open after completion/abort.
+- **Recorded button intent and protected hot cues:** performance-pad actions
+  attach a human-readable `via=performance_pad_N@mode` hint to the audible
+  `.gvt` event. Replay still uses the deterministic state event, while Tutorial
+  highlights/invokes the recorded pad and the event sequence shows the source,
+  avoiding a misleading PLAY instruction for CUSTOM loop starts. Missing
+  CUSTOM loop mappings warn. UI shift-click, context-menu, and FLX4 shift-pad
+  hot-cue deletion all consult every stored transition and require explicit
+  confirmation when that cue is referenced.
 
 - **Post-transition FLX4 soft takeover:** Perform tracks every replay/setup
   change to the physical TEMPO, channel fader, TRIM, HIGH/MID/LOW, FILTER, and
@@ -53,12 +80,11 @@ audio programs are never touched.
   that began stopped but contain neither an incoming PLAY nor hot-cue event,
   rather than silently performing without the new track; affected bug-era
   files must be re-recorded because their missing start timestamp is absent.
-- **Space-efficient, draggable transition workspace:** each mixer channel's
-  HI/MID/LOW EQ knobs are stacked vertically, reducing the mixer's horizontal
-  footprint. A persistent horizontal splitter resizes mixer versus transition
-  workspace; inside the transition panel, persistent handles independently
-  resize the transition list, event sequence, and controls. The existing
-  transition/library vertical splitter now persists its position as well.
+- **Space-efficient transition workspace:** each mixer channel's HI/MID/LOW EQ
+  knobs is stacked vertically in the centered deck-row mixer, so the transition
+  panel now owns the full lower width. Inside that panel, persistent handles
+  independently resize the transition list, event sequence, and controls. The
+  transition/library vertical splitter still persists its position.
 - **Configurable Close Enough transition setup:** the transition panel has a
   persisted CLOSE ENOUGH checkbox plus a TOLERANCE… dialog. Strict matching
   remains the default. When enabled, BPM, volume controls (channel fader,
@@ -69,10 +95,10 @@ audio programs are never touched.
   live readiness label says explicitly when a state was accepted only because
   it was close enough; PRIME uses the same readiness policy after its robust
   pre-state preparation.
-- **Combined SAMPLER / SAVED LOOPS bank:** the separate host-only SAVED LOOP
-  menu was folded into the FLX4's real SAMPLER bank and old saved-loop mode
-  selections migrate automatically. Each pad can retain a sampler-file
-  assignment while its per-track saved loop takes operational/visual priority.
+- **CUSTOM bank:** the former host-only SAVED LOOP menu was folded into the
+  FLX4 sampler bank and is now presented simply as CUSTOM; old mode selections
+  migrate automatically. Each pad can retain an audio-file assignment while
+  its per-track captured loop takes operational/visual priority.
   An empty pad captures the active loop. Every press of a filled saved-loop pad
   jumps to the stored start and plays, including retriggering an already-active
   loop like a one-shot hot cue; LOOP EXIT is the explicit way to leave it.
@@ -131,10 +157,9 @@ audio programs are never touched.
   lane displays `windowSec_ * tempoRatio` source seconds, and pointer seeking/
   scratching uses the same transform. Two decks at the same effective BPM now
   have the same beat spacing even when their native BPM/tempo ratios differ.
-- **Saved loop persistence:** eight exact loop bounds and labels persist per
+- **Captured-loop persistence:** eight exact loop bounds and labels persist per
   track alongside hot cues and survive rescans without overwriting newer
-  grid/analysis metadata. They are exposed through the combined
-  SAMPLER / SAVED LOOPS bank described above.
+  grid/analysis metadata. They are exposed through CUSTOM as described above.
 - **True touch-gated scratch:** FLX4 platter-touch note `0x36` suspends ordinary
   transport. A stationary held top is silent; top-wheel movement renders
   signed PCM movement, including reverse, and release restores the transport
@@ -199,12 +224,14 @@ incoming transition position/timing with initially stopped or rolling decks.
 Transition replay coverage also simulates an outgoing loop wrap, verifies that
 the monotonic sequence still fires on time, checks Quantize restoration, keeps
 six-decimal recorded tempo, and preserves effective BPM after a manual regrid.
+It now also checks readable physical performance-pad gesture capture and an
+eight-beat Tutorial prompt for a button due at transition beat zero.
 `tests/test_soft_takeover.cpp` covers matching-at-arm, unknown positions,
 input freezing, target crossing, consumed pickup events, and software
 retargeting; transition coverage verifies continuous tutorial prompts remain
 active until their recorded value is reached.
 The verified UI
-binary is running as the sole `./build/gravitino` process (PID 12512 at this
+binary is running as the sole `./build/gravitino` process (PID 25603 at this
 handoff); resolve its current PID narrowly before any future restart.
 
 New focused coverage includes:
@@ -233,7 +260,7 @@ New focused coverage includes:
    and reverse turns must sound in their direction, and release must resume.
    Compare the top with the rim nudge; tune
    `kPlatterScratchSecondsPerTick` in `src/audio/Deck.cpp` only if needed.
-6. In SAMPLER / SAVED LOOPS, save, one-touch start, rename, and clear loop
+6. In CUSTOM, capture, one-touch start, rename, and clear loop
    pads; then select every other pad layer, press pads on both decks, delete a cue with
    SHIFT+HOT CUE, and confirm virtual state and controller LEDs agree.
 7. Set different tempo ratios, press BEAT SYNC, and confirm phase aligns once
@@ -244,8 +271,10 @@ New focused coverage includes:
 9. Select a transition, perturb BPM/volume/EQ just inside and outside the
    configured CLOSE ENOUGH margins, and confirm readiness changes while track,
    loop, and FX-state mismatches remain strict.
-10. Drag mixer/transition, transition-list/event/control, and
-    transition/library handles; restart and confirm all three sizes persist.
+10. Confirm the centered mixer begins below the deck overviews, the compact
+    transport + 2×2 mode grid fit without cropping, then drag the
+    transition-list/event/control and transition/library handles; restart and
+    confirm both sizes persist.
     PERFORM a newly recorded transition after deliberately moving the incoming
     deck and verify it still starts at the recorded beat/position.
 11. Re-record Clarity → Party Rock with QUANT/loops and any tempo adjustment
@@ -257,7 +286,12 @@ New focused coverage includes:
     physical control through the displayed target removes it without an audio
     jump. In Tutorial, confirm the white target marker animates in the required
     direction and remains until the value is reached.
-13. Confirm System/MacBook/Bluetooth master output and FLX4 headphone cue after
+13. Open TUTOR VIEW and confirm it does not seek or play. With it open, test
+    both Perform (eight-beat pre-anchor countdown) and Prime (live armed
+    countdown), including a newly recorded CUSTOM-loop start that must
+    highlight the actual CUSTOM pad instead of PLAY. Attempt to remove a hot
+    cue used by the transition and confirm the dependency warning appears.
+14. Confirm System/MacBook/Bluetooth master output and FLX4 headphone cue after
    restart. If duplicate audio is heard, check that Serato is stopped and that
    exactly one Gravitino process exists.
 

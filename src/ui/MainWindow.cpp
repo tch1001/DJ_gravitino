@@ -28,6 +28,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace gvt {
 
 QString appStyleSheet()
@@ -104,13 +106,16 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     root->setContentsMargins(6, 6, 6, 6);
     root->setSpacing(4);
 
-    // Row 1: Deck A | Deck B — exactly equal halves (Serato-style, no
-    // center mixer column; tempo sliders sit on the outer edges).
+    // Row 1: Deck A | compact FLX4 mixer | Deck B.  Keeping the mixer beside
+    // the deck controls (and below their overview-waveform baseline) leaves the
+    // transition/event workspace the full application width.
     deckA_ = new DeckWidget(0, bus_, engine_);
     deckB_ = new DeckWidget(1, bus_, engine_);
+    mixer_ = new MixerWidget(bus_);
     auto* deckRow = new QHBoxLayout;
     deckRow->setSpacing(6);
     deckRow->addWidget(deckA_, 1);
+    deckRow->addWidget(mixer_, 0, Qt::AlignTop);
     deckRow->addWidget(deckB_, 1);
     root->addLayout(deckRow);
 
@@ -119,30 +124,10 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     detailWave_ = new DetailWaveformView(engine_);
     root->addWidget(detailWave_);
 
-    // Lower workspace: the transition/event area and library share a vertical
-    // splitter, so the library can be pulled down when more event rows matter.
-    mixer_ = new MixerWidget(bus_);
+    // Lower workspace: transitions now use the full width; the library remains
+    // vertically adjustable so more event rows can be exposed when needed.
     transitionPanel_ =
         new TransitionPanel(bus_, engine_, store_, recorder, player);
-    auto* workspaceSplitter = new QSplitter(Qt::Horizontal);
-    workspaceSplitter->setObjectName(
-        QStringLiteral("mixerTransitionSplitter"));
-    workspaceSplitter->setChildrenCollapsible(false);
-    workspaceSplitter->addWidget(mixer_);
-    workspaceSplitter->addWidget(transitionPanel_);
-    workspaceSplitter->setStretchFactor(0, 0);
-    workspaceSplitter->setStretchFactor(1, 1);
-    workspaceSplitter->setSizes({470, 900});
-    const QByteArray workspaceState = QSettings().value(
-        QStringLiteral("layout/mixerTransitionSplitter")).toByteArray();
-    if (!workspaceState.isEmpty())
-        workspaceSplitter->restoreState(workspaceState);
-    connect(workspaceSplitter, &QSplitter::splitterMoved, this,
-            [workspaceSplitter] {
-                QSettings().setValue(
-                    QStringLiteral("layout/mixerTransitionSplitter"),
-                    workspaceSplitter->saveState());
-            });
 
     // The load history is persisted at ~/.gravitino/history.jsonl and shown
     // in the library's History tab.
@@ -151,7 +136,7 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     auto* lowerSplitter = new QSplitter(Qt::Vertical);
     lowerSplitter->setObjectName(QStringLiteral("transitionLibrarySplitter"));
     lowerSplitter->setChildrenCollapsible(false);
-    lowerSplitter->addWidget(workspaceSplitter);
+    lowerSplitter->addWidget(transitionPanel_);
     lowerSplitter->addWidget(libraryWidget_);
     lowerSplitter->setStretchFactor(0, 1);
     lowerSplitter->setStretchFactor(1, 2);
@@ -286,11 +271,79 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
                 deckWidget(deck)->triggerPerformancePad(
                     static_cast<PerformancePadMode>(mode), pad, pressed);
             });
+    connect(transitionPanel_,
+            &TransitionPanel::tutorialPerformancePadRequested, this,
+            [this](int deck, int mode, int pad, bool pressed) {
+                if ((deck != 0 && deck != 1) || pad < 0 || pad >= 8 ||
+                    mode < 0 ||
+                    mode >= static_cast<int>(PerformancePadMode::Count)) {
+                    return;
+                }
+                deckWidget(deck)->triggerPerformancePad(
+                    static_cast<PerformancePadMode>(mode), pad, pressed);
+            });
     connect(midi_, &MidiEngine::hotCueClearRequested, this,
             [this](int deck, int pad) {
                 if (deck == 0 || deck == 1)
-                    deckWidget(deck)->clearHotCue(pad);
+                    deckWidget(deck)->requestHotCueClear(pad);
             });
+    const auto guardHotCueRemoval = [this](int deck, int pad) {
+        if ((deck != 0 && deck != 1) || pad < 0 || pad >= 8)
+            return;
+        const TrackDataPtr track = engine_->deck(deck).track();
+        if (!track || track->hotCues[pad] < 0.0)
+            return;
+
+        QStringList dependentTransitions;
+        const ControlId cueControl = static_cast<ControlId>(
+            static_cast<int>(ControlId::HotCue1) + pad);
+        for (const GvtFile& file : store_->all()) {
+            const auto roleUsesCue = [&](Role role) {
+                return std::any_of(
+                    file.events.begin(), file.events.end(),
+                    [role, cueControl](const GvtEvent& event) {
+                        return event.role == role &&
+                               event.control == cueControl;
+                    });
+            };
+            const bool fromDependency =
+                matchTrack(file.from, *track) != MatchQuality::None &&
+                (file.fromHotCueBeats[static_cast<std::size_t>(pad)] >= 0.0 ||
+                 roleUsesCue(Role::FromDeck));
+            const bool toDependency =
+                matchTrack(file.to, *track) != MatchQuality::None &&
+                (file.toHotCueBeats[static_cast<std::size_t>(pad)] >= 0.0 ||
+                 roleUsesCue(Role::ToDeck));
+            if ((fromDependency || toDependency) &&
+                !dependentTransitions.contains(file.name)) {
+                dependentTransitions.append(
+                    file.name.isEmpty() ? tr("Unnamed transition") : file.name);
+            }
+        }
+
+        if (!dependentTransitions.isEmpty()) {
+            QMessageBox warning(
+                QMessageBox::Warning, tr("Hot cue used by transitions"),
+                tr("HOT CUE %1 on Deck %2 is required by:\n\n• %3\n\n"
+                   "Removing it can make Perform and Tutorial jump to the "
+                   "wrong place. Remove it anyway?")
+                    .arg(pad + 1)
+                    .arg(deck == 0 ? QStringLiteral("A")
+                                   : QStringLiteral("B"))
+                    .arg(dependentTransitions.mid(0, 8).join(
+                        QStringLiteral("\n• "))),
+                QMessageBox::Cancel | QMessageBox::Yes, this);
+            warning.setDefaultButton(QMessageBox::Cancel);
+            warning.button(QMessageBox::Yes)->setText(tr("REMOVE HOT CUE"));
+            if (warning.exec() != QMessageBox::Yes)
+                return;
+        }
+        deckWidget(deck)->clearHotCue(pad);
+    };
+    connect(deckA_, &DeckWidget::hotCueRemovalRequested, this,
+            guardHotCueRemoval);
+    connect(deckB_, &DeckWidget::hotCueRemovalRequested, this,
+            guardHotCueRemoval);
     auto wirePadLeds = [this](DeckWidget* deck) {
         connect(deck, &DeckWidget::performancePadStateChanged, midi_,
                 &MidiEngine::setPerformancePadState);

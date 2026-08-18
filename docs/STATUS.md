@@ -6,6 +6,26 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-19 (codex): **Centered mixer, compact CUSTOM pads, and persistent
+  tutorial view.** Checkpointed all prior work as commit `ecdb7c2`, then moved
+  the FLX4-ordered channel volume/EQ/filter mixer out of the transition
+  workspace and into a compact center panel below the deck overview-waveform
+  baseline. PLAY/CUE/SYNC/QUANT/GRID are fixed compact widths; the normal pad
+  modes are a tight 2×2 grid; the combined bank is now presented simply as
+  CUSTOM with no Saved Loops menu label. TUTOR VIEW now opens without seeking
+  or playing and covers only the transition list + event sequence horizontally,
+  extending over the library while leaving Perform/Prime visible. With the
+  view open, Perform starts up to eight beats before the anchor for a real
+  countdown, while Prime arms the same guided mode against live playback.
+  New recordings retain a human-readable `via=performance_pad_N@mode` gesture
+  beside the resulting state event, so captured-loop starts are taught as the
+  actual CUSTOM pad rather than PLAY. The event sequence exposes the gesture,
+  virtual pad clicks execute it, and missing CUSTOM loop mappings warn. Every
+  UI/MIDI hot-cue deletion path now warns before removing a cue referenced by
+  any transition. Verified: clean build, ctest 19/19, full
+  audio/transition/loop/stem self-test, and `git diff --check`; a physical
+  FLX4 layout/tutorial smoke test remains appropriate after restart.
+
 - 2026-08-18 (codex): **Post-transition FLX4 pickup gate and tutorial motion
   coaching.** Perform captures every automatic absolute-control change and,
   at the final event, compares Gravitino with the FLX4's last physical TEMPO,

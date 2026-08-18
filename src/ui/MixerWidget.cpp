@@ -36,17 +36,34 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
 {
     setObjectName(QStringLiteral("mixerWidget"));
     setProperty("panel", true);
-    setMinimumHeight(154);
-    setMaximumHeight(190);
-    setMinimumWidth(400);
-    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    setMinimumHeight(238);
+    setMaximumHeight(280);
+    setMinimumWidth(296);
+    setMaximumWidth(340);
+    setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+
+    // Align the mixer body below the decks' overview waveforms.  The top gap
+    // corresponds to the deck heading + 44 px overview strip, making this feel
+    // like a central continuation of the two deck panels rather than a third
+    // full-height column.
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(4, 4, 4, 4);
+    root->setSpacing(2);
+    root->addSpacing(57);
+    auto* mixerLabel = new QLabel(tr("MIXER"), this);
+    mixerLabel->setAlignment(Qt::AlignCenter);
+    mixerLabel->setStyleSheet(
+        QStringLiteral("color:%1; font-size:9px; font-weight:bold; "
+                       "letter-spacing:2px;")
+            .arg(themeDimText().name()));
+    root->addWidget(mixerLabel);
 
     // One compact, symmetric row. Each channel follows the physical FLX4
     // order from top to bottom: TRIM, HI, MID, LOW, FILTER. Channel faders
     // flank the crossfader just as they do in the controller's mixer section.
-    auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(8, 4, 8, 4);
-    row->setSpacing(10);
+    auto* row = new QHBoxLayout;
+    row->setContentsMargins(2, 0, 2, 0);
+    row->setSpacing(4);
 
     row->addStretch(1);
     row->addWidget(buildStrip(0));
@@ -58,9 +75,9 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
     crossfader_ = new QSlider(Qt::Horizontal);
     crossfader_->setRange(0, kSteps);
     crossfader_->setValue(toSteps(0.5));
-    crossfader_->setMinimumWidth(120);
-    crossfader_->setMaximumWidth(200);
-    crossfader_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    crossfader_->setFixedWidth(76);
+    crossfader_->setStyleSheet(
+        QStringLiteral("QSlider:horizontal { min-width:76px; max-width:76px; }"));
     crossfader_->setToolTip(tr("Crossfader: A ↔ B"));
     connect(crossfader_, &QSlider::valueChanged, this, [this](int v) {
         if (!crossfader_->signalsBlocked())
@@ -86,6 +103,7 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
 
     row->addWidget(buildStrip(1));
     row->addStretch(1);
+    root->addLayout(row, 1);
 
     connect(bus_, &ControlBus::eventDispatched, this,
             &MixerWidget::onBusEvent);
@@ -113,7 +131,7 @@ QWidget* MixerWidget::buildStrip(int deck)
     // the EQs. Deck B mirrors deck A so both channel faders sit toward the
     // center crossfader.
     auto* w = new QWidget(this);
-    w->setMinimumWidth(104);
+    w->setMinimumWidth(82);
     w->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
     auto* root = new QVBoxLayout(w);
     root->setContentsMargins(0, 0, 0, 0);
@@ -140,7 +158,7 @@ QWidget* MixerWidget::buildStrip(int deck)
         dial = new QDial(w);
         wireDial(dial, deck, id, 0.5);
         QLabel* cap = caption(name);
-        cap->setFixedWidth(36);
+        cap->setFixedWidth(30);
         if (deck == 0) {
             knobRow->addWidget(cap);
             knobRow->addWidget(dial);

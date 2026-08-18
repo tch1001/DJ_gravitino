@@ -95,22 +95,25 @@ void Flx4TutorialWidget::setWaiting(const QString& transitionName,
     feedback_.clear();
     hardwareValue_.reset();
     activationEnabled_ = false;
+    gesturePadMode_ = -1;
     update();
 }
 
 void Flx4TutorialWidget::setExpected(
     const ControlEvent& event, const QString& instruction,
     const QString& detail, double beatsAhead, bool activationEnabled,
-    const QString& warning)
+    const QString& warning,
+    const std::optional<Flx4TutorialMapping>& mapping, int gesturePadMode)
 {
     const bool samePhysicalControl = expected_ &&
         expected_->deck == event.deck && expected_->id == event.id;
     expected_ = event;
-    mapping_ = flx4TutorialMapping(event.id, event.value);
+    mapping_ = mapping;
     instruction_ = instruction;
     detail_ = detail;
     beatsAhead_ = beatsAhead;
     activationEnabled_ = activationEnabled && mapping_.has_value();
+    gesturePadMode_ = gesturePadMode;
     warning_ = warning;
     if (!samePhysicalControl) hardwareValue_.reset();
     update();
@@ -137,6 +140,7 @@ void Flx4TutorialWidget::clearExpected()
     detail_ = tr("Keep the outgoing track running and follow the recorded sequence");
     warning_.clear();
     activationEnabled_ = false;
+    gesturePadMode_ = -1;
     hardwareValue_.reset();
     update();
 }
@@ -409,11 +413,21 @@ void Flx4TutorialWidget::paintEvent(QPaintEvent*)
             p.setPen(glow);
             QFont modeFont = p.font(); modeFont.setBold(true); modeFont.setPixelSize(11);
             p.setFont(modeFont);
+            QString mode;
+            switch (mapping_->padMode) {
+            case Flx4PadMode::HotCue:   mode = tr("HOT CUE"); break;
+            case Flx4PadMode::PadFx1:    mode = tr("PAD FX1"); break;
+            case Flx4PadMode::BeatJump:  mode = tr("BEAT JUMP"); break;
+            case Flx4PadMode::Custom:    mode = tr("CUSTOM"); break;
+            case Flx4PadMode::Keyboard:  mode = tr("KEYBOARD"); break;
+            case Flx4PadMode::PadFx2:    mode = tr("PAD FX2"); break;
+            case Flx4PadMode::BeatLoop:  mode = tr("BEAT LOOP"); break;
+            case Flx4PadMode::KeyShift:  mode = tr("KEY SHIFT"); break;
+            case Flx4PadMode::None:      break;
+            }
             p.drawText(QRectF(expected_->deck == 0 ? 78.0 : 702.0, 434,
                               210, 17), Qt::AlignLeft,
-                       mapping_->padMode == Flx4PadMode::HotCue
-                           ? tr("PAD MODE: HOT CUE")
-                           : tr("PAD MODE: BEAT JUMP"));
+                       tr("PAD MODE: %1").arg(mode));
         }
 
         // Continuous tutorial moves get an actual motion cue, not just a
@@ -490,7 +504,19 @@ void Flx4TutorialWidget::mousePressEvent(QMouseEvent* event)
     if (expected_ && mapping_ && activationEnabled_ &&
         targetRect(*mapping_, expected_->deck).adjusted(-7, -7, 7, 7)
             .contains(point)) {
-        emit controlActivated(*expected_);
+        if (mapping_->surface == Flx4SurfaceControl::PerformancePad &&
+            gesturePadMode_ >= 0 && mapping_->pad >= 0) {
+            bool pressed = true;
+            if (expected_->id == ControlId::Cue ||
+                (expected_->id >= ControlId::HotCue1 &&
+                 expected_->id <= ControlId::HotCue8)) {
+                pressed = expected_->value >= 0.5;
+            }
+            emit performancePadActivated(expected_->deck, gesturePadMode_,
+                                         mapping_->pad, pressed);
+        } else {
+            emit controlActivated(*expected_);
+        }
         event->accept();
         return;
     }

@@ -144,6 +144,21 @@ int main(int argc, char** argv)
     }
     CHECK(foundTempo);
 
+    // A host performance-pad event is retained as the physical gesture for the
+    // audible action that follows it, while remaining absent from replay.
+    TransitionRecorder gestureRecorder(&bus, &engine);
+    gestureRecorder.start(0);
+    bus.dispatch({1, ControlId::PerformancePad4, 3.0}, Origin::Ui);
+    bus.dispatch({1, ControlId::Play, 1.0}, Origin::Ui);
+    const GvtFile gestureRecorded = gestureRecorder.finish();
+    CHECK(gestureRecorded.events.size() == 1);
+    if (gestureRecorded.events.size() == 1) {
+        CHECK(gestureRecorded.events[0].control == ControlId::Play);
+        CHECK(gestureRecorded.events[0].gestureControl ==
+              ControlId::PerformancePad4);
+        CHECK(gestureRecorded.events[0].gesturePadMode == 3);
+    }
+
     // Recorder timestamps also stay monotonic when the outgoing position
     // wraps from the end of an active loop back to its start.
     Deck& outgoing = engine.deck(0);
@@ -182,6 +197,31 @@ int main(int argc, char** argv)
     CHECK(tutorialScores == 0);
     bus.dispatch({0, ControlId::EqHigh, 0.8}, Origin::Ui);
     CHECK(tutorialScores == 1);
+    player.abort();
+
+    // An action at transition beat zero is announced eight beats before the
+    // anchor when the outgoing track has enough runway.
+    outgoing.loopActive.store(false);
+    outgoing.seekSec(outgoingTrack->secAtBeat(0.0));
+    outgoing.play();
+    GvtFile countdown;
+    countdown.anchorFromBeat = 8.0;
+    countdown.masterBpm = outgoing.effectiveBpm();
+    countdown.events.push_back(
+        {0.0, Role::FromDeck, ControlId::Play, 1.0, Curve::Step});
+    int countdownPrompts = 0;
+    double countdownLead = 0.0;
+    QObject::connect(&player, &TransitionPlayer::tutorialPrompt,
+                     [&countdownPrompts, &countdownLead](const GvtEvent&,
+                                                        double beatsAhead) {
+                         ++countdownPrompts;
+                         countdownLead = beatsAhead;
+                     });
+    transitionPlayerSetMode(&player, PlayerMode::Tutorial);
+    CHECK(player.arm(countdown, 0, false, &error));
+    spinEvents();
+    CHECK(countdownPrompts == 1);
+    CHECK(countdownLead > 7.9 && countdownLead <= 8.01);
     player.abort();
 
     if (failures != 0)

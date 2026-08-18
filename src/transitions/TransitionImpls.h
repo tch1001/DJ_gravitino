@@ -45,6 +45,10 @@ struct TransitionRecorder::Impl {
     qint64        lastTimelineNs = 0;
 
     std::vector<GvtEvent> events;
+    bool gesturePending = false;
+    DeckId gestureDeck = kNoDeck;
+    ControlId gestureControl = ControlId::Count;
+    int gesturePadMode = -1;
 
     // Beats since Record began. It follows the outgoing deck's effective BPM,
     // continues after an end-of-transition Stop, and never rewinds on loops.

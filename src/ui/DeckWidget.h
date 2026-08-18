@@ -69,6 +69,9 @@ public:
     void setPerformancePadMode(PerformancePadMode mode);
     PerformancePadMode performancePadMode() const { return padMode_; }
     void triggerPerformancePad(PerformancePadMode mode, int pad, bool pressed);
+    // Routes all removal paths through MainWindow so transitions that depend
+    // on this pad can be identified before the cue is actually cleared.
+    void requestHotCueClear(int pad);
     void clearHotCue(int pad);
     unsigned int performancePadLedMask(PerformancePadMode mode) const;
     unsigned int performancePadPressedMask() const;
@@ -93,6 +96,7 @@ signals:
     void trackPerformanceMetadataChanged(int deck);
     void beatGridEditRequested(int deck, gvt::BeatGridCommand command,
                                double value);
+    void hotCueRemovalRequested(int deck, int pad);
 
 public slots:
     void trackChanged();   // call after a track (un)load to refresh labels
@@ -111,6 +115,7 @@ private:
     void savePerformancePadMode();
     void syncPerformancePadUi();
     void handlePerformancePad(int pad, bool pressed);
+    void dispatchPerformancePadGesture(PerformancePadMode mode, int pad);
     void configurePerformancePad(int pad, const QPoint& position);
     void beginPadFx(int pad, const PerformancePadAssignment& assignment);
     void endPadFx(int pad);
@@ -134,11 +139,10 @@ private:
     QSlider* tempoSlider_ = nullptr;
     QPushButton* hotcueBtns_[8] = {};
 
-    // FLX4-style performance pad section. The hardware SAMPLER bank also owns
-    // per-track saved loops, keeping the less-used sampler and loop slots in a
-    // single visible layer. The four SHIFT modes live in shiftedModesBtn_'s
-    // menu. SavedLoop remains in the enum as a settings/API compatibility
-    // alias and is normalized to Sampler by DeckWidget.
+    // FLX4-style performance pad section. The hardware sampler bank is exposed
+    // as CUSTOM and can own per-track captured loops or assigned audio in one
+    // visible layer. The four SHIFT modes live in shiftedModesBtn_'s menu.
+    // SavedLoop remains an internal settings/API compatibility alias.
     static constexpr int kPerformanceModeCount =
         static_cast<int>(PerformancePadMode::Count);
     PerformancePadMode padMode_ = PerformancePadMode::HotCue;
