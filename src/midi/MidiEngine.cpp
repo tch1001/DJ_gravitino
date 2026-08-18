@@ -325,12 +325,30 @@ struct MidiEngine::Impl {
             // Toggle against the ENGINE's play state, not our cache — the
             // deck stops itself at end-of-track without a bus event, and a
             // stale cache would turn the next Play press into Stop.
+            const bool takingOverPreview = engine != nullptr &&
+                engine->deck(event.deck).previewActive();
             const bool wasPlaying =
                 engine != nullptr &&
                 engine->deck(event.deck).playing.load(std::memory_order_relaxed);
             playing[static_cast<std::size_t>(event.deck)].store(
-                !wasPlaying, std::memory_order_relaxed);
-            event.id = wasPlaying ? ControlId::Stop : ControlId::Play;
+                takingOverPreview || !wasPlaying, std::memory_order_relaxed);
+            event.id = wasPlaying && !takingOverPreview
+                           ? ControlId::Stop : ControlId::Play;
+        }
+
+        if (event.deck >= 0 && event.deck < 2 &&
+            event.id == ControlId::HeadphoneCue && event.value > 0.0) {
+            const bool enabled = engine != nullptr &&
+                engine->headphoneCue[event.deck].load(
+                    std::memory_order_relaxed);
+            event.value = enabled ? 0.0 : 1.0;
+        }
+
+        if (event.deck == kNoDeck && event.id == ControlId::MasterCue &&
+            event.value > 0.0) {
+            const bool enabled = engine != nullptr &&
+                engine->masterCue.load(std::memory_order_relaxed);
+            event.value = enabled ? 0.0 : 1.0;
         }
 
         if (event.deck >= 0 && event.deck < 2 &&
@@ -443,6 +461,17 @@ struct MidiEngine::Impl {
             if (mirrorToController) {
                 sendLed(event.deck, ControlId::Cue, cue[deck]);
             }
+            return;
+        }
+
+        if (event.id == ControlId::HeadphoneCue) {
+            const bool actual = engine != nullptr &&
+                engine->headphoneCue[event.deck].load(
+                    std::memory_order_relaxed);
+            headphoneCue[deck] = actual;
+            // The FLX4 channel-CUE LED is host-controlled, so acknowledge
+            // physical MIDI presses as well as UI/system-origin changes.
+            sendLed(event.deck, ControlId::HeadphoneCue, actual);
             return;
         }
 
@@ -567,6 +596,15 @@ struct MidiEngine::Impl {
                     sendLed(deck, ControlId::FxOn, actualFx);
             }
 
+            const bool actualHeadphoneCue =
+                engine->headphoneCue[deck].load(std::memory_order_relaxed);
+            if (headphoneCue[index] != actualHeadphoneCue) {
+                headphoneCue[index] = actualHeadphoneCue;
+                if (connected)
+                    sendLed(deck, ControlId::HeadphoneCue,
+                            actualHeadphoneCue);
+            }
+
             const TrackDataPtr currentTrack = engine->deck(deck).track();
             for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
                 const bool actualHotCue = currentTrack
@@ -599,6 +637,8 @@ struct MidiEngine::Impl {
                     std::memory_order_relaxed);
                 fxOn[index] = engine->deck(deck).fxOn.load(
                     std::memory_order_relaxed);
+                headphoneCue[index] = engine->headphoneCue[deck].load(
+                    std::memory_order_relaxed);
 
                 const TrackDataPtr currentTrack = engine->deck(deck).track();
                 for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
@@ -614,6 +654,8 @@ struct MidiEngine::Impl {
             sendLed(deck, ControlId::Cue, cue[index]);
             sendLoopLeds(deck, loopActive[index]);
             sendLed(deck, ControlId::FxOn, fxOn[index]);
+            sendLed(deck, ControlId::HeadphoneCue,
+                    headphoneCue[index]);
 
             for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
                 const auto id = static_cast<ControlId>(
@@ -637,6 +679,7 @@ struct MidiEngine::Impl {
     std::array<bool, 2> cue {};
     std::array<bool, 2> loopActive {};
     std::array<bool, 2> fxOn {};
+    std::array<bool, 2> headphoneCue {};
     std::array<std::array<bool, 8>, 2> hotCue {};
 };
 

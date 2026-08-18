@@ -73,6 +73,14 @@ void WaveformView::setTransitionEntry(double sec)
     update();
 }
 
+void WaveformView::setTransitionCues(const QList<double>& seconds,
+                                     const QStringList& labels)
+{
+    transitionCueSecs_ = seconds;
+    transitionCueLabels_ = labels;
+    update();
+}
+
 void WaveformView::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
@@ -222,6 +230,23 @@ void WaveformView::paintEvent(QPaintEvent*)
         p.drawText(tag, Qt::AlignCenter, QStringLiteral("T"));
     }
 
+
+    // Selected transition's labeled cue points.  The overview stays compact;
+    // full labels are rendered in the center detail waveform.
+    const QColor cueColor(0xf1, 0xc7, 0x5b);
+    p.setFont(QFont(font().family(), 7, QFont::Bold));
+    for (qsizetype i = 0; i < transitionCueSecs_.size(); ++i) {
+        const double sec = transitionCueSecs_.at(i);
+        if (sec < 0.0 || sec > t->durationSec) continue;
+        const int x = (int)(sec / t->durationSec * w);
+        p.setPen(QPen(cueColor, 1));
+        p.drawLine(x, 0, x, h);
+        QRect tag(x + 1, h - 9, 8, 8);
+        p.fillRect(tag, cueColor);
+        p.setPen(Qt::black);
+        p.drawText(tag, Qt::AlignCenter, QStringLiteral("C"));
+    }
+
     // Playhead.
     p.setPen(QPen(Qt::white, 2));
     p.drawLine(playedX, 0, playedX, h);
@@ -291,6 +316,8 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     playBtn_->setCheckable(true);
     cueBtn_ = new QPushButton(tr("CUE")); // hold-to-preview: NOT checkable
     syncBtn_ = new QPushButton(tr("SYNC"));
+    cueBtn_->setToolTip(
+        tr("Hold to preview from cue; press PLAY while held to continue playing"));
     for (QPushButton* b : {playBtn_, cueBtn_, syncBtn_})
         b->setMinimumHeight(26);
     playBtn_->setStyleSheet(
@@ -302,15 +329,15 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     transport->addWidget(syncBtn_);
     mainCol->addLayout(transport);
 
-    // 8 hot-cue pads, 2 rows of 4 small squares. Fire on PRESS (1.0) and
-    // send a release (0.0) — future preview semantics live in the engine.
+    // 8 hot-cue pads, 2 rows of 4 small squares. Assigned pads preview from
+    // the marker while held, then stop/return on release unless PLAY latches it.
     auto* cues = new QGridLayout;
     cues->setSpacing(3);
     for (int i = 0; i < 8; ++i) {
         auto* b = new QPushButton(QString::number(i + 1));
         b->setFixedSize(26, 26);
-        b->setToolTip(tr("Hot cue %1 — press: set/jump, right- or "
-                         "shift-click: clear")
+        b->setToolTip(tr("Hot cue %1 — hold: preview, PLAY: continue, release: return; "
+                         "right- or shift-click: clear")
                           .arg(i + 1));
         b->setContextMenuPolicy(Qt::CustomContextMenu);
         hotcueBtns_[i] = b;
@@ -453,6 +480,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     fxWetDial_ = new QDial(this);
     fxWetDial_->setRange(0, 100);
     fxWetDial_->setValue(50);
+    fxWetDial_->setWrapping(false);
     fxWetDial_->setNotchesVisible(false);
     fxWetDial_->setFixedSize(20, 20);
     fxWetDial_->setFocusPolicy(Qt::NoFocus);
@@ -593,6 +621,17 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     // toggled (not clicked): fires for mouse, keyboard, and accessibility
     // toggles alike; refresh() blocks signals when mirroring engine state.
     connect(playBtn_, &QPushButton::toggled, this, [this](bool checked) {
+        Deck& deck = engine_->deck(deckIndex_);
+        if (deck.previewActive()) {
+            // The preview already made the transport look checked. A user's
+            // PLAY click is a takeover gesture, not a request to stop.
+            if (!checked) {
+                QSignalBlocker block(playBtn_);
+                playBtn_->setChecked(true);
+            }
+            dispatch(ControlId::Play);
+            return;
+        }
         dispatch(checked ? ControlId::Play : ControlId::Stop);
     });
     // CUE: press 1.0 / release 0.0 — hold-to-preview lives in the engine.
@@ -624,6 +663,12 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
 void DeckWidget::setTransitionEntry(double sec)
 {
     waveform_->setTransitionEntry(sec);
+}
+
+void DeckWidget::setTransitionCues(const QList<double>& seconds,
+                                   const QStringList& labels)
+{
+    waveform_->setTransitionCues(seconds, labels);
 }
 
 void DeckWidget::dispatch(ControlId id, double value)

@@ -36,6 +36,10 @@ src/app/          main.cpp wiring, --selftest harness
 third_party/      miniaudio.h (vendored)
 ```
 
+GUI startup takes a per-user `QLockFile` before constructing `AudioEngine`.
+Only one Gravitino GUI process may own a CoreAudio stream at a time; headless
+`--selftest` runs before that guard and remains independently runnable.
+
 Qt is used in: library, ui, app, and for signals in ControlBus (QObject).
 audio/analysis/transitions core logic must stay Qt-light (QString/QObject OK,
 no widgets) so they stay testable headless.
@@ -46,6 +50,10 @@ no widgets) so they stay testable headless.
   from `std::atomic<float>` members. Never allocates, never takes the GUI mutex.
 - **GUI thread**: everything else, including ControlBus dispatch (Qt signals,
   direct connections). Parameter changes = GUI thread writes atomics.
+- **Track replacement**: `Deck::loadTrack()` closes the render gate, drains
+  any active callback, clears the old PCM/stems/FX state, publishes the new
+  source, and returns stopped at frame zero. It must never crossfade or layer
+  the old source with the replacement.
 - **MIDI thread** (RtMidi callback): converts raw MIDI → ControlEvent, posts to
   GUI thread via queued signal. LEDs written directly from GUI thread.
 - **Analysis**: QtConcurrent / std::thread per track, results delivered via
@@ -56,9 +64,10 @@ no widgets) so they stay testable headless.
 ## Audio pipeline (per render callback, 48 kHz stereo f32)
 
 ```
-Deck A PCM ──resample(tempo)──▶ trim ─▶ 3-band EQ ─▶ channel fader ─┐
-                                                                    ├─▶ xfader ─▶ limiter ─▶ out
-Deck B PCM ──resample(tempo)──▶ trim ─▶ 3-band EQ ─▶ channel fader ─┘
+Deck A PCM ─▶ tempo/trim/EQ/filter/FX ─┬─▶ channel fader ─┐
+                                      │                    ├─▶ xfader/limiter ─▶ MASTER 1/2
+Deck B PCM ─▶ tempo/trim/EQ/filter/FX ─┤─▶ channel fader ─┘
+                                      └─▶ selected PFL + master mix ─▶ PHONES 3/4
 ```
 
 - Tracks are fully decoded to memory (`TrackData`, mono-summed peaks for UI +
@@ -68,6 +77,16 @@ Deck B PCM ──resample(tempo)──▶ trim ─▶ 3-band EQ ─▶ channel f
 - EQ: RBJ biquad low-shelf 250 Hz / peak 1 kHz / high-shelf 4 kHz, ±26 dB with
   full-kill at slider bottom.
 - Limiter: soft-clip tanh on master to avoid inter-deck clipping.
+- Settings > Audio Output selects the persisted CoreAudio master device; the
+  initial default follows macOS, so MacBook and Bluetooth speakers work.
+  Selecting DDJ-FLX4 uses one four-channel stream (master 1/2, phones 3/4).
+  Selecting another master device opens a second four-channel FLX4 stream and
+  feeds only its phones 3/4 from a bounded lock-free cue ring. This prevents a
+  second audio callback from advancing/rendering either deck again.
+  Channel CUE monitors the post-EQ/filter/FX, pre-fader deck signal, unaffected
+  by channel faders or the crossfader. HEADPHONES MIX balances that PFL bus
+  against master CUE. Without a connected FLX4, master output stays stereo and
+  the UI reports that physical headphone cue is unavailable.
 
 ## Beatgrid & sync
 
@@ -83,15 +102,19 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
 
 1. User loads track A (playing) and track B, arms **Record Transition**.
 2. Recorder notes the *anchor*: beat position in A when recording starts, and
-   the first beat position at which B is playing.
+   the first beat position at which B is playing. It also captures a complete
+   role-based pre-transition snapshot: both decks' transport/cue, tempo,
+   channel/EQ/filter, loop, FX and stem state, plus the mixer crossfader.
 3. Every ControlEvent is logged with a timestamp in **beats relative to anchor**
    (master-deck beats). Beats, not seconds — so a transition recorded at 120 BPM
    replays correctly at 128.
 4. Stop recording → normalize (dedupe, quantize option) → save `.gvt`.
 5. Replay: user loads the same pair (matched by audio fingerprint/title), picks
-   a transition, hits **Go**. Player waits until deck A crosses the anchor beat
-   (or starts immediately, offsetting), then fires events on schedule with
-   linear/s-curve interpolation between sparse values.
+   a transition, then uses **Perform** to reconstruct the recorded pre-state
+   and roll from the anchor, or **Prime** to prepare it while retaining A's live
+   position and wait for A to cross the anchor. The player reasserts incoming
+   transport at that boundary, then fires events on schedule with linear/
+   s-curve interpolation between sparse values.
 
 ## Testing
 

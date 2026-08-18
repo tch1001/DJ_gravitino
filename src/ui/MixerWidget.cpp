@@ -87,6 +87,9 @@ void MixerWidget::wireDial(QDial* d, int deck, ControlId id, double initial)
 {
     d->setRange(0, kSteps);
     d->setValue(toSteps(initial));
+    // Audio controls must stop at their limits.  Wrapping across the dial's
+    // angular seam would turn a small drag into an audible min/max jump.
+    d->setWrapping(false);
     d->setNotchesVisible(true);
     d->setFixedSize(32, 32);
     connect(d, &QDial::valueChanged, this, [this, d, deck, id](int v) {

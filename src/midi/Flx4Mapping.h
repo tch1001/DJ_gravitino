@@ -48,6 +48,7 @@ private:
     std::array<FourteenBitState, 2> eqLow_ {};
     std::array<FourteenBitState, 2> filter_ {};
     FourteenBitState crossfader_ {};
+    FourteenBitState headphoneMix_ {};
     FourteenBitState fxWet_ {};
     std::array<bool, 2> fxAssigned_ {true, true};
     bool fxAssignmentKnown_ = false;

@@ -39,6 +39,12 @@ public:
     // Transitions matching an ordered (from, to) pair, best match first.
     std::vector<const GvtFile*> matching(const TrackData& from, const TrackData& to) const;
     QString save(GvtFile& f, QString* error);  // names file from f.name; returns path
+    // Update metadata/cues without changing the managed file name.
+    bool update(const GvtFile& f, QString* error);
+    // Rename updates both [meta].name and the sanitized .gvt filename.
+    QString renameTransition(const GvtFile& f, const QString& newName,
+                             QString* error);
+    bool deleteTransition(const GvtFile& f, QString* error);
 signals:
     void changed();
 private:

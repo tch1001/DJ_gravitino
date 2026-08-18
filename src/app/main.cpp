@@ -1,5 +1,9 @@
 #include <QApplication>
+#include <QDir>
+#include <QLockFile>
 #include <QMessageBox>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QTimer>
 
 #include "../audio/AudioEngine.h"
@@ -26,6 +30,23 @@ int main(int argc, char** argv)
     if (args.contains(QStringLiteral("--selftest")))
         return gvt::runSelfTest(args); // headless: no window, no live device
 
+    // Two GUI processes would each open their own CoreAudio stream. A hidden
+    // older process can then sound exactly like one deck is playing two tracks
+    // at once, even though each process has only one source per deck. Hold a
+    // per-user lock for the full GUI lifetime so only one audio engine exists.
+    const QString lockPath = QDir(
+        QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+        .filePath(QStringLiteral("gravitino-dj-gui.lock"));
+    QLockFile instanceLock(lockPath);
+    if (!instanceLock.tryLock(0)) {
+        QMessageBox::information(
+            nullptr, QObject::tr("Gravitino is already running"),
+            QObject::tr("Another Gravitino window already owns the audio "
+                        "output. Close or use that window before opening a "
+                        "new one."));
+        return 0;
+    }
+
     app.setStyleSheet(gvt::appStyleSheet());
 
     // Engine-side objects are heap-allocated with process lifetime (never
@@ -47,11 +68,28 @@ int main(int argc, char** argv)
     auto* stems = new gvt::StemSeparator;
 
     QString audioError;
-    const bool audioOk = engine->start(&audioError);
+    const QString preferredOutput =
+        QSettings().value(QStringLiteral("audio/outputDevice")).toString();
+    bool audioOk = engine->start(preferredOutput, &audioError);
+    QString savedOutputWarning;
+    if (!audioOk && !preferredOutput.isEmpty()) {
+        savedOutputWarning = QObject::tr(
+            "The saved audio output “%1” is unavailable:\n%2\n\n"
+            "Gravitino is using the macOS system default for this session.")
+                                 .arg(preferredOutput, audioError);
+        audioOk = engine->start(&audioError);
+    }
 
     gvt::MainWindow win(bus, engine, library, store, recorder, player, midi,
                         masterRec, stems);
     win.show();
+
+    if (!savedOutputWarning.isEmpty()) {
+        QTimer::singleShot(0, &win, [&win, savedOutputWarning] {
+            QMessageBox::warning(&win, QObject::tr("Audio output changed"),
+                                 savedOutputWarning);
+        });
+    }
 
     // Dev flag: --autoload "<substr for deck A>" "<substr for deck B>" loads
     // the first library tracks whose path matches each substring once analyzed

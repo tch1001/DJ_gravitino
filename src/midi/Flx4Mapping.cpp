@@ -20,6 +20,8 @@ constexpr std::uint8_t kDeck2HotCueChannel = 0x09;
 
 constexpr std::uint8_t kPlayNote = 0x0B;
 constexpr std::uint8_t kCueNote = 0x0C;
+constexpr std::uint8_t kHeadphoneCueNote = 0x54;
+constexpr std::uint8_t kMasterCueNote = 0x63;
 constexpr std::uint8_t kBeatSyncNote = 0x58;
 constexpr std::uint8_t kLoopInNote = 0x10;
 constexpr std::uint8_t kLoopOutNote = 0x11;
@@ -53,6 +55,8 @@ constexpr std::uint8_t kEqLowMsb = 0x0F;
 constexpr std::uint8_t kEqLowLsb = 0x2F;
 constexpr std::uint8_t kCrossfaderMsb = 0x1F;
 constexpr std::uint8_t kCrossfaderLsb = 0x3F;
+constexpr std::uint8_t kHeadphoneMixMsb = 0x0C;
+constexpr std::uint8_t kHeadphoneMixLsb = 0x2C;
 constexpr std::uint8_t kFilterDeck1Msb = 0x17;
 constexpr std::uint8_t kFilterDeck1Lsb = 0x37;
 constexpr std::uint8_t kFilterDeck2Msb = 0x18;
@@ -196,6 +200,10 @@ std::optional<ControlEvent> Flx4Mapping::parse(
         case kCueNote:
             return ControlEvent {
                 deck, ControlId::Cue, pressed ? 1.0 : 0.0};
+        case kHeadphoneCueNote:
+            if (pressed)
+                return ControlEvent {deck, ControlId::HeadphoneCue, 1.0};
+            return std::nullopt;
         case kBeatSyncNote:
             if (pressed)
                 return ControlEvent {deck, ControlId::TempoSync, 1.0};
@@ -232,6 +240,12 @@ std::optional<ControlEvent> Flx4Mapping::parse(
         default:
             return std::nullopt;
         }
+    }
+
+    if (channel == kMixerChannel && data1 == kMasterCueNote) {
+        if (pressed)
+            return ControlEvent {kNoDeck, ControlId::MasterCue, 1.0};
+        return std::nullopt;
     }
 
     if ((channel == kDeck1HotCueChannel || channel == kDeck2HotCueChannel)
@@ -325,6 +339,16 @@ std::optional<ControlEvent> Flx4Mapping::parseControlChange(
     }
 
     if (channel == kMixerChannel) {
+        if (controller == kHeadphoneMixMsb) {
+            return finishFourteenBit(
+                headphoneMix_, true, value, kNoDeck,
+                ControlId::HeadphoneMix);
+        }
+        if (controller == kHeadphoneMixLsb) {
+            return finishFourteenBit(
+                headphoneMix_, false, value, kNoDeck,
+                ControlId::HeadphoneMix);
+        }
         if (controller == kFilterDeck1Msb) {
             return finishFourteenBit(
                 filter_[0], true, value, 0, ControlId::Filter);
@@ -389,6 +413,8 @@ std::optional<std::array<unsigned char, 3>> Flx4Mapping::ledMessage(
         note = kPlayNote;
     } else if (id == ControlId::Cue) {
         note = kCueNote;
+    } else if (id == ControlId::HeadphoneCue) {
+        note = kHeadphoneCueNote;
     } else if (id == ControlId::LoopIn) {
         note = kLoopInNote;
     } else if (id == ControlId::LoopOut) {

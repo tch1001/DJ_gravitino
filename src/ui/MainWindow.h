@@ -1,5 +1,7 @@
 #pragma once
+#include <QList>
 #include <QMainWindow>
+#include <QStringList>
 #include "../audio/AudioEngine.h"
 #include "../control/ControlBus.h"
 #include "../library/TrackLibrary.h"
@@ -7,6 +9,8 @@
 #include "../transitions/TransitionEngine.h"
 
 class QLabel;
+class QActionGroup;
+class QMenu;
 class QPushButton;
 class QTimer;
 
@@ -41,6 +45,8 @@ public slots:
     // overview waveform and the center detail waveforms. Called by the
     // orchestrator's transition entry-point logic.
     void setTransitionEntryMarker(int deck, double sec);
+    void setTransitionCueMarkers(int deck, const QList<double>& seconds,
+                                 const QStringList& labels);
 
 private slots:
     void openMusicFolder();
@@ -50,6 +56,8 @@ private slots:
     void onRecClicked();
     void onRecordingChanged(bool active, const QString& path);
     void onStemsRequested(int deck);
+    void rebuildAudioOutputMenu();
+    void selectAudioOutput(const QString& preferredName);
 
 private:
     ControlBus* bus_;
@@ -67,6 +75,8 @@ private:
     TransitionPanel* transitionPanel_ = nullptr;
     QLabel* midiLabel_ = nullptr;
     QLabel* rateLabel_ = nullptr;
+    QMenu* audioOutputMenu_ = nullptr;
+    QActionGroup* audioOutputGroup_ = nullptr;
 
     // Master recording (null rec_ = feature hidden).
     MasterRecorder* rec_ = nullptr;
@@ -79,6 +89,7 @@ private:
     // dropped (the WAV cache keeps it for the next load).
     StemSeparator* stems_ = nullptr;
     DeckWidget* deckWidget(int i) { return i == 0 ? deckA_ : deckB_; }
+    void updateAudioOutputLabel();
 };
 
 } // namespace gvt

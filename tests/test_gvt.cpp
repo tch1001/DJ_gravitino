@@ -47,6 +47,19 @@ anchor_from = 224.0     ; beat in FROM track where the transition begins
 anchor_to   = 32.0      ; beat in TO track aligned to transition beat 0
 master_bpm  = 130.00    ; tempo the mix runs at during the transition
 
+[initial]
+tempo_ratio = 1.000
+fader       = 1.000
+trim        = 0.500
+eq_low      = 0.500
+eq_mid      = 0.500
+eq_high     = 0.500
+filter      = 0.500
+
+[cues]
+0.000       = Start beatmatch
+24.000      = Exit outgoing
+
 [events]
 ; beat | target | control | value | curve
 0.000    b        load
@@ -73,6 +86,24 @@ bool refsEqual(const gvt::GvtTrackRef& a, const gvt::GvtTrackRef& b) {
            near(a.durationSec, b.durationSec);
 }
 
+bool initialEqual(const gvt::GvtInitialState& a,
+                  const gvt::GvtInitialState& b) {
+    return a.captured == b.captured && a.playing == b.playing &&
+           near(a.positionBeat, b.positionBeat) && near(a.cueBeat, b.cueBeat) &&
+           near(a.tempoRatio, b.tempoRatio) &&
+           near(a.fader, b.fader) && near(a.trim, b.trim) &&
+           near(a.eqLow, b.eqLow) && near(a.eqMid, b.eqMid) &&
+           near(a.eqHigh, b.eqHigh) && near(a.filter, b.filter) &&
+           a.loopActive == b.loopActive &&
+           near(a.loopStartBeat, b.loopStartBeat) &&
+           near(a.loopEndBeat, b.loopEndBeat) && a.fxType == b.fxType &&
+           a.fxOn == b.fxOn && near(a.fxWet, b.fxWet) &&
+           near(a.fxBeats, b.fxBeats) &&
+           near(a.stemVocals, b.stemVocals) &&
+           near(a.stemMelody, b.stemMelody) &&
+           near(a.stemBass, b.stemBass) && near(a.stemDrums, b.stemDrums);
+}
+
 // Deep compare of every known field (filePath excluded — not serialized).
 bool filesEqual(const gvt::GvtFile& a, const gvt::GvtFile& b) {
     if (a.version != b.version) return false;
@@ -83,6 +114,19 @@ bool filesEqual(const gvt::GvtFile& a, const gvt::GvtFile& b) {
     if (!near(a.anchorFromBeat, b.anchorFromBeat) ||
         !near(a.anchorToBeat, b.anchorToBeat) ||
         !near(a.masterBpm, b.masterBpm)) return false;
+    if (a.initialComplete != b.initialComplete ||
+        !initialEqual(a.initialFrom, b.initialFrom) ||
+        !initialEqual(a.initialTo, b.initialTo) ||
+        a.initialMixerCaptured != b.initialMixerCaptured ||
+        !near(a.initialCrossfader, b.initialCrossfader)) return false;
+    for (size_t i = 0; i < a.fromHotCueBeats.size(); ++i) {
+        if (!near(a.fromHotCueBeats[i], b.fromHotCueBeats[i]) ||
+            !near(a.toHotCueBeats[i], b.toHotCueBeats[i])) return false;
+    }
+    if (a.cues.size() != b.cues.size()) return false;
+    for (size_t i = 0; i < a.cues.size(); ++i)
+        if (!near(a.cues[i].beat, b.cues[i].beat) ||
+            a.cues[i].label != b.cues[i].label) return false;
     if (a.events.size() != b.events.size()) return false;
     for (size_t i = 0; i < a.events.size(); ++i)
         if (!eventsEqual(a.events[i], b.events[i])) return false;
@@ -124,6 +168,16 @@ int main() {
     CHECK(near(f.anchorFromBeat, 224.0));
     CHECK(near(f.anchorToBeat, 32.0));
     CHECK(near(f.masterBpm, 130.0));
+    CHECK(f.initialFrom.captured);
+    CHECK(near(f.initialFrom.tempoRatio, 1.0));
+    CHECK(near(f.initialFrom.eqLow, 0.5));
+    CHECK(f.cues.size() == 2);
+    if (f.cues.size() == 2) {
+        CHECK(near(f.cues[0].beat, 0.0));
+        CHECK(f.cues[0].label == QStringLiteral("Start beatmatch"));
+        CHECK(near(f.cues[1].beat, 24.0));
+        CHECK(f.cues[1].label == QStringLiteral("Exit outgoing"));
+    }
 
     CHECK(f.events.size() == 11);
 
@@ -196,6 +250,52 @@ int main() {
         CHECK(gvtParse(text, g, &e2, &w2));
         CHECK(w2.isEmpty());
         CHECK(filesEqual(f, g));
+    }
+
+    // ---- complete two-deck + mixer pre-state round-trip -------------------
+    {
+        GvtFile complete = f;
+        complete.initialComplete = true;
+        complete.initialMixerCaptured = true;
+        complete.initialCrossfader = 0.23;
+        complete.initialFrom.playing = true;
+        complete.initialFrom.positionBeat = 224.0;
+        complete.initialFrom.cueBeat = 220.0;
+        complete.initialFrom.loopActive = true;
+        complete.initialFrom.loopStartBeat = 220.0;
+        complete.initialFrom.loopEndBeat = 228.0;
+        complete.initialFrom.fxType = 2;
+        complete.initialFrom.fxOn = true;
+        complete.initialFrom.fxWet = 0.37;
+        complete.initialFrom.fxBeats = 0.75;
+        complete.initialFrom.stemVocals = 0.0;
+
+        complete.initialTo.captured = true;
+        complete.initialTo.playing = false;
+        complete.initialTo.positionBeat = 32.0;
+        complete.initialTo.cueBeat = 32.0;
+        complete.initialTo.tempoRatio = 0.97;
+        complete.initialTo.fader = 0.0;
+        complete.initialTo.eqLow = 0.0;
+        complete.initialTo.filter = 0.61;
+        complete.initialTo.fxType = 1;
+        complete.initialTo.fxWet = 0.44;
+        complete.initialTo.stemDrums = 0.5;
+        complete.fromHotCueBeats[2] = 220.5;
+        complete.toHotCueBeats[0] = 32.0;
+
+        // Release-aware triggers must retain their 0 value in the text file.
+        complete.events.push_back(
+            {33.0, Role::ToDeck, ControlId::HotCue1, 0.0, Curve::Step});
+        const QString text = gvtSerialize(complete);
+        GvtFile parsed;
+        QStringList w2;
+        CHECK(gvtParse(text, parsed, nullptr, &w2));
+        CHECK(w2.isEmpty());
+        CHECK(filesEqual(complete, parsed));
+        CHECK(near(parsed.fromHotCueBeats[2], 220.5));
+        CHECK(near(parsed.toHotCueBeats[0], 32.0));
+        CHECK(!parsed.events.empty() && near(parsed.events.back().value, 0.0));
     }
 
     // ---- structural failure: bad magic ------------------------------------

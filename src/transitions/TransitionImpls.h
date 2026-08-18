@@ -21,6 +21,13 @@ struct TransitionRecorder::Impl {
     int    toDeck = 1;
     double anchorBeat = 0.0;
     double masterBpm = 0.0;
+    GvtInitialState initialFrom;
+    GvtInitialState initialTo;
+    std::array<double, 8> fromHotCueBeats {
+        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+    std::array<double, 8> toHotCueBeats {
+        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+    double initialCrossfader = 0.0; // role space
     bool   toAnchorSet = false;
     double toAnchorBeat = 0.0;
 
@@ -59,6 +66,7 @@ struct TransitionPlayer::Impl {
     int        fromDeck = 0, toDeck = 1;
     double     anchorFrom = 0.0;
     double     totalBeats = 0.0;
+    bool       preStateTransportApplied = false;
 
     std::vector<ScheduledEvent> sched;
     std::vector<uint8_t> done;      // fired (Perform) / resolved (Tutorial)
@@ -116,6 +124,7 @@ struct TransitionPlayer::Impl {
             case ControlId::EqLow:  return d.eqLow.load();
             case ControlId::EqMid:  return d.eqMid.load();
             case ControlId::EqHigh: return d.eqHigh.load();
+            case ControlId::Filter: return d.filter.load();
             default:                return 0.0;
         }
     }
@@ -138,6 +147,30 @@ struct TransitionPlayer::Impl {
                 engine->deck(toDeck).seekSec(t->secAtBeat(file.anchorToBeat));
         }
         dispatch(s.e.role, s.e.control, s.e.value);
+    }
+
+    void restorePreStateTransportAtAnchor() {
+        const auto restoreCueAndLoop = [](Deck& deck,
+                                          const GvtInitialState& state) {
+            const TrackDataPtr track = deck.track();
+            if (!track) return;
+            deck.cuePointSec.store(track->secAtBeat(state.cueBeat));
+            deck.loopStartSec.store(track->secAtBeat(state.loopStartBeat));
+            deck.loopEndSec.store(track->secAtBeat(state.loopEndBeat));
+            deck.loopActive.store(state.loopActive &&
+                                  state.loopEndBeat > state.loopStartBeat);
+        };
+
+        Deck& incoming = engine->deck(toDeck);
+        bus->dispatch({toDeck, ControlId::Stop, 1.0}, Origin::Replay);
+        if (file.initialComplete && file.initialTo.captured) {
+            if (TrackDataPtr track = incoming.track())
+                incoming.seekSec(track->secAtBeat(file.initialTo.positionBeat));
+            restoreCueAndLoop(incoming, file.initialTo);
+            restoreCueAndLoop(engine->deck(fromDeck), file.initialFrom);
+        } else if (TrackDataPtr track = incoming.track()) {
+            incoming.seekSec(track->secAtBeat(file.anchorToBeat));
+        }
     }
 };
 

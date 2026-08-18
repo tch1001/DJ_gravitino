@@ -1,4 +1,6 @@
 #pragma once
+#include <QList>
+#include <QStringList>
 #include <QWidget>
 #include "../control/ControlBus.h"
 #include "../audio/AudioEngine.h"
@@ -20,6 +22,8 @@ class WaveformView : public QWidget {
 public:
     WaveformView(int deckIndex, Deck* deck, QWidget* parent = nullptr);
     void setTransitionEntry(double sec); // sec < 0 = none
+    void setTransitionCues(const QList<double>& seconds,
+                           const QStringList& labels);
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
@@ -27,6 +31,8 @@ private:
     int deckIndex_;
     Deck* deck_;
     double transitionEntrySec_ = -1.0;
+    QList<double> transitionCueSecs_;
+    QStringList transitionCueLabels_;
 };
 
 // One deck panel (Serato-style): overview waveform, track info lines,
@@ -42,6 +48,8 @@ public:
 
     // Relay from MainWindow::setTransitionEntryMarker; sec < 0 = none.
     void setTransitionEntry(double sec);
+    void setTransitionCues(const QList<double>& seconds,
+                           const QStringList& labels);
 
     // Stems row state machine (driven by MainWindow from StemSeparator
     // signals). Idle: [STEMS] request button armed, pads disabled.

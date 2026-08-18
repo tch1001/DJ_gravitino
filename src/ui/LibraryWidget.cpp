@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -12,6 +13,7 @@
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTableView>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -145,6 +147,122 @@ private:
     History* history_;
 };
 
+// ------------------------------------------------------ TransitionEdgeModel
+
+// Read-only graph edge list over every saved transition. Each row is one
+// directed From -> To edge, which makes possible set routes easy to scan and
+// sort without first loading a pair onto the decks.
+class TransitionEdgeModel : public QAbstractTableModel {
+public:
+    enum Col { ColFrom, ColArrow, ColTo, ColName, ColBpm, ColLength,
+               ColCues, ColCount };
+
+    TransitionEdgeModel(TransitionStore* store, QObject* parent)
+        : QAbstractTableModel(parent), store_(store)
+    {
+        if (store_) {
+            connect(store_, &TransitionStore::changed, this, [this] {
+                beginResetModel();
+                endResetModel();
+            });
+        }
+    }
+
+    int rowCount(const QModelIndex& parent = {}) const override
+    {
+        return parent.isValid() || !store_ ? 0 : (int)store_->all().size();
+    }
+
+    int columnCount(const QModelIndex& parent = {}) const override
+    {
+        return parent.isValid() ? 0 : ColCount;
+    }
+
+    QVariant data(const QModelIndex& idx, int role) const override
+    {
+        if (!store_ || !idx.isValid() ||
+            idx.row() >= (int)store_->all().size())
+            return {};
+        const GvtFile& file = store_->all()[(size_t)idx.row()];
+        double endBeat = 0.0;
+        for (const GvtEvent& event : file.events)
+            endBeat = std::max(endBeat, event.beat);
+        if (role == Qt::TextAlignmentRole) {
+            if (idx.column() == ColArrow || idx.column() == ColBpm ||
+                idx.column() == ColLength || idx.column() == ColCues)
+                return (int)(Qt::AlignCenter | Qt::AlignVCenter);
+            return {};
+        }
+        if (role == Qt::ToolTipRole) {
+            const QString from = file.from.artist.isEmpty()
+                                     ? file.from.title
+                                     : QStringLiteral("%1 — %2")
+                                           .arg(file.from.artist, file.from.title);
+            const QString to = file.to.artist.isEmpty()
+                                   ? file.to.title
+                                   : QStringLiteral("%1 — %2")
+                                         .arg(file.to.artist, file.to.title);
+            return QObject::tr("%1 → %2\nTransition: %3")
+                .arg(from, to, file.name);
+        }
+        // Keep table sorting natural: BPM, length and cue counts sort as
+        // numbers, while the descriptive columns remain case-insensitive
+        // strings through the proxy's sort role.
+        if (role == Qt::UserRole) {
+            switch (idx.column()) {
+            case ColFrom:   return file.from.title;
+            case ColArrow:  return QStringLiteral("→");
+            case ColTo:     return file.to.title;
+            case ColName:   return file.name;
+            case ColBpm:    return file.masterBpm;
+            case ColLength: return endBeat;
+            case ColCues:   return (int)file.cues.size();
+            }
+        }
+        if (role != Qt::DisplayRole) return {};
+        switch (idx.column()) {
+        case ColFrom:
+            return file.from.title.isEmpty() ? QObject::tr("Unknown track")
+                                             : file.from.title;
+        case ColArrow: return QStringLiteral("→");
+        case ColTo:
+            return file.to.title.isEmpty() ? QObject::tr("Unknown track")
+                                           : file.to.title;
+        case ColName:
+            return file.name.isEmpty() ? QObject::tr("Untitled transition")
+                                       : file.name;
+        case ColBpm:
+            return file.masterBpm > 0.0
+                       ? QString::number(file.masterBpm, 'f', 1)
+                       : QString();
+        case ColLength:
+            return QObject::tr("%1 beats").arg(endBeat, 0, 'f', 1);
+        case ColCues: return (int)file.cues.size();
+        }
+        return {};
+    }
+
+    QVariant headerData(int section, Qt::Orientation orientation,
+                        int role) const override
+    {
+        if (orientation != Qt::Horizontal || role != Qt::DisplayRole)
+            return {};
+        switch (section) {
+        case ColFrom:   return QObject::tr("From track");
+        case ColArrow:  return QStringLiteral("→");
+        case ColTo:     return QObject::tr("To track");
+        case ColName:   return QObject::tr("Transition");
+        case ColBpm:    return QObject::tr("BPM");
+        case ColLength: return QObject::tr("Length");
+        case ColCues:   return QObject::tr("Cues");
+        }
+        return {};
+    }
+
+private:
+    TransitionStore* store_;
+};
+
 // ------------------------------------------------------------ LibraryWidget
 
 // The crate root is derived from the tracks themselves (the deepest common
@@ -174,8 +292,10 @@ static const char* kTabStyleIdle =
     "border-radius:0px; padding: 2px 12px; }";
 
 LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
-                             History* history, QWidget* parent)
-    : QWidget(parent), library_(library), engine_(engine), history_(history)
+                             TransitionStore* transitions, History* history,
+                             QWidget* parent)
+    : QWidget(parent), library_(library), engine_(engine),
+      transitions_(transitions), history_(history)
 {
     setObjectName(QStringLiteral("libraryWidget"));
     setProperty("panel", true);
@@ -184,7 +304,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     root->setContentsMargins(6, 4, 6, 4);
     root->setSpacing(4);
 
-    // Top chrome row: header, search, right-aligned [Library][History]
+    // Top chrome row: header, search, right-aligned segmented tabs
     // segmented tabs, load buttons.
     auto* topRow = new QHBoxLayout;
     auto* header = new QLabel(tr("LIBRARY"));
@@ -204,7 +324,8 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     tabs->setSpacing(0);
     libraryTabBtn_ = new QPushButton(tr("Library"));
     historyTabBtn_ = new QPushButton(tr("History"));
-    for (QPushButton* b : {libraryTabBtn_, historyTabBtn_}) {
+    transitionTabBtn_ = new QPushButton(tr("Transitions"));
+    for (QPushButton* b : {libraryTabBtn_, historyTabBtn_, transitionTabBtn_}) {
         b->setCheckable(true);
         b->setAutoExclusive(true);
         b->setFocusPolicy(Qt::NoFocus);
@@ -215,14 +336,19 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     topRow->addLayout(tabs);
     topRow->addSpacing(6);
 
-    auto* loadA = new QPushButton(tr("Load ▶ A"));
-    auto* loadB = new QPushButton(tr("Load ▶ B"));
-    loadA->setStyleSheet(QStringLiteral("color:%1; font-weight:bold;")
-                             .arg(deckAccent(0).name()));
-    loadB->setStyleSheet(QStringLiteral("color:%1; font-weight:bold;")
-                             .arg(deckAccent(1).name()));
-    topRow->addWidget(loadA);
-    topRow->addWidget(loadB);
+    loadABtn_ = new QPushButton(tr("Load ▶ A"));
+    loadBBtn_ = new QPushButton(tr("Load ▶ B"));
+    const auto loadStyle = [](const QColor& accent) {
+        return QStringLiteral(
+            "QPushButton { color:%1; font-weight:bold; }"
+            "QPushButton:disabled { color:#555b66; background:#252830; "
+            "border-color:#30343c; }")
+            .arg(accent.name());
+    };
+    loadABtn_->setStyleSheet(loadStyle(deckAccent(0)));
+    loadBBtn_->setStyleSheet(loadStyle(deckAccent(1)));
+    topRow->addWidget(loadABtn_);
+    topRow->addWidget(loadBBtn_);
     root->addLayout(topRow);
 
     proxy_ = new CrateFilterProxy(library_, this);
@@ -269,10 +395,43 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
         historyTable_->horizontalHeader()->setSectionResizeMode(
             HistoryModel::ColTitle, QHeaderView::Stretch);
         historyTable_->setAlternatingRowColors(true);
-        stack_->addWidget(historyTable_);
+        historyPageIndex_ = stack_->addWidget(historyTable_);
     } else {
         historyTabBtn_->hide();
     }
+
+    transitionModel_ = new TransitionEdgeModel(transitions_, this);
+    transitionProxy_ = new QSortFilterProxyModel(this);
+    transitionProxy_->setSourceModel(transitionModel_);
+    transitionProxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    transitionProxy_->setFilterKeyColumn(-1);
+    transitionProxy_->setSortCaseSensitivity(Qt::CaseInsensitive);
+    transitionProxy_->setSortRole(Qt::UserRole);
+    transitionTable_ = new QTableView;
+    transitionTable_->setModel(transitionProxy_);
+    transitionTable_->setSortingEnabled(true);
+    transitionTable_->sortByColumn(TransitionEdgeModel::ColFrom,
+                                   Qt::AscendingOrder);
+    transitionTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    transitionTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    transitionTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    transitionTable_->verticalHeader()->setVisible(false);
+    transitionTable_->horizontalHeader()->setStretchLastSection(false);
+    transitionTable_->horizontalHeader()->setSectionResizeMode(
+        TransitionEdgeModel::ColFrom, QHeaderView::Stretch);
+    transitionTable_->horizontalHeader()->setSectionResizeMode(
+        TransitionEdgeModel::ColArrow, QHeaderView::ResizeToContents);
+    transitionTable_->horizontalHeader()->setSectionResizeMode(
+        TransitionEdgeModel::ColTo, QHeaderView::Stretch);
+    transitionTable_->horizontalHeader()->setSectionResizeMode(
+        TransitionEdgeModel::ColName, QHeaderView::Stretch);
+    for (int col : {TransitionEdgeModel::ColBpm,
+                    TransitionEdgeModel::ColLength,
+                    TransitionEdgeModel::ColCues})
+        transitionTable_->horizontalHeader()->setSectionResizeMode(
+            col, QHeaderView::ResizeToContents);
+    transitionTable_->setAlternatingRowColors(true);
+    transitionPageIndex_ = stack_->addWidget(transitionTable_);
 
     splitter_ = new QSplitter(Qt::Horizontal);
     splitter_->addWidget(crateTree_);
@@ -289,10 +448,11 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     // -- wiring --
     connect(search_, &QLineEdit::textChanged, this, [this](const QString& t) {
         proxy_->setFilterFixedString(t);
+        transitionProxy_->setFilterFixedString(t);
     });
-    connect(loadA, &QPushButton::clicked, this,
+    connect(loadABtn_, &QPushButton::clicked, this,
             [this] { loadSelectedTo(0); });
-    connect(loadB, &QPushButton::clicked, this,
+    connect(loadBBtn_, &QPushButton::clicked, this,
             [this] { loadSelectedTo(1); });
     connect(table_, &QTableView::doubleClicked, this,
             &LibraryWidget::onDoubleClicked);
@@ -300,6 +460,10 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             [this] { showTab(0); });
     connect(historyTabBtn_, &QPushButton::clicked, this,
             [this] { showTab(1); });
+    connect(transitionTabBtn_, &QPushButton::clicked, this,
+            [this] { showTab(2); });
+    connect(table_->selectionModel(), &QItemSelectionModel::currentChanged,
+            this, [this] { updateLoadButtons(); });
     showTab(0); // initial tab styles
     connect(crateTree_, &QTreeWidget::itemSelectionChanged, this,
             &LibraryWidget::onCrateSelected);
@@ -316,21 +480,42 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
                     tr("Analyzing library… %1 / %2").arg(analyzed).arg(total),
                     2000);
             });
+
+    loadStateTimer_ = new QTimer(this);
+    loadStateTimer_->setInterval(100);
+    connect(loadStateTimer_, &QTimer::timeout,
+            this, &LibraryWidget::updateLoadButtons);
+    loadStateTimer_->start();
+    updateLoadButtons();
 }
 
 void LibraryWidget::showTab(int index)
 {
-    stack_->setCurrentIndex(historyTable_ ? index : 0);
-    const bool lib = index == 0 || !historyTable_;
+    const bool lib = index == 0;
+    const bool history = index == 1 && historyPageIndex_ >= 0;
+    const bool transitions = index == 2 && transitionPageIndex_ >= 0;
+    if (history)
+        stack_->setCurrentIndex(historyPageIndex_);
+    else if (transitions)
+        stack_->setCurrentIndex(transitionPageIndex_);
+    else
+        stack_->setCurrentIndex(0);
+
     libraryTabBtn_->setChecked(lib);
-    historyTabBtn_->setChecked(!lib);
+    historyTabBtn_->setChecked(history);
+    transitionTabBtn_->setChecked(transitions);
     libraryTabBtn_->setStyleSheet(
         QLatin1String(lib ? kTabStyleActive : kTabStyleIdle));
     historyTabBtn_->setStyleSheet(
-        QLatin1String(lib ? kTabStyleIdle : kTabStyleActive));
-    // Search + crates only apply to the library page.
-    search_->setEnabled(lib);
-    crateTree_->setEnabled(lib);
+        QLatin1String(history ? kTabStyleActive : kTabStyleIdle));
+    transitionTabBtn_->setStyleSheet(
+        QLatin1String(transitions ? kTabStyleActive : kTabStyleIdle));
+    search_->setEnabled(lib || transitions);
+    search_->setPlaceholderText(
+        transitions ? tr("Search transition edges…")
+                    : tr("Search title / artist…"));
+    crateTree_->setVisible(lib);
+    updateLoadButtons();
 }
 
 void LibraryWidget::rebuildCrates()
@@ -426,6 +611,16 @@ void LibraryWidget::onDoubleClicked(const QModelIndex& proxyIndex)
 
 void LibraryWidget::loadRowTo(int sourceRow, int deck)
 {
+    if (deck < 0 || deck >= kNumDecks)
+        return;
+    if (engine_->deck(deck).playing.load()) {
+        emit statusMessage(
+            tr("Stop deck %1 before loading another track")
+                .arg(deck == 0 ? QStringLiteral("A") : QStringLiteral("B")),
+            4000);
+        updateLoadButtons();
+        return;
+    }
     TrackDataPtr t = library_->trackAt(sourceRow);
     if (!t) {
         emit statusMessage(tr("Track is still analyzing — try again shortly"),
@@ -439,6 +634,37 @@ void LibraryWidget::loadRowTo(int sourceRow, int deck)
                                           : QStringLiteral("B")),
                        4000);
     emit trackLoaded(deck);
+    updateLoadButtons();
+}
+
+void LibraryWidget::updateLoadButtons()
+{
+    if (!loadABtn_ || !loadBBtn_) return;
+    const bool libraryPage = stack_ && stack_->currentIndex() == 0;
+    const int sourceRow = sourceRowFor(table_->currentIndex());
+    const bool selected = sourceRow >= 0;
+    const bool ready = selected && library_->trackAt(sourceRow);
+
+    const auto update = [&](QPushButton* button, int deck) {
+        const bool playing = engine_->deck(deck).playing.load();
+        button->setEnabled(libraryPage && ready && !playing);
+        const QString deckName = deck == 0 ? QStringLiteral("A")
+                                           : QStringLiteral("B");
+        if (!libraryPage)
+            button->setToolTip(tr("Open the Library tab to load a track"));
+        else if (playing)
+            button->setToolTip(
+                tr("Stop deck %1 before loading another track").arg(deckName));
+        else if (!selected)
+            button->setToolTip(tr("Select a track first"));
+        else if (!ready)
+            button->setToolTip(tr("This track is still being analyzed"));
+        else
+            button->setToolTip(tr("Load the selected track onto deck %1")
+                                   .arg(deckName));
+    };
+    update(loadABtn_, 0);
+    update(loadBBtn_, 1);
 }
 
 } // namespace gvt

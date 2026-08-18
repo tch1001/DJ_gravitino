@@ -32,6 +32,12 @@ bool parseDouble(const QString& s, double& out) {
     return ok;
 }
 
+bool parseBool(const QString& s) {
+    const QString value = s.trimmed().toLower();
+    return value == QLatin1String("true") || value == QLatin1String("yes") ||
+           value == QLatin1String("on") || value.toDouble() != 0.0;
+}
+
 // Smallest fixed precision in [minDec..maxDec] that reproduces v exactly
 // (within 1e-9); falls back to full precision so round-trips stay lossless.
 QString fmtNum(double v, int minDec, int maxDec) {
@@ -72,6 +78,11 @@ bool roleFromLetter(const QString& s, Role& out) {
     }
 }
 
+bool triggerNeedsValue(ControlId id) {
+    return id == ControlId::Cue ||
+           (id >= ControlId::HotCue1 && id <= ControlId::HotCue8);
+}
+
 const char* curveName(Curve c) {
     switch (c) {
         case Curve::Step:   return "step";
@@ -95,7 +106,9 @@ void warn(QStringList* warnings, const QString& msg) {
 
 // Section names we understand; anything else is preserved via extraMeta with
 // a "<section>." key prefix (meta keys are stored unprefixed).
-enum class Section { None, Meta, From, To, Sync, Events, Unknown };
+enum class Section {
+    None, Meta, From, To, Sync, Initial, HotCues, Cues, Events, Unknown
+};
 
 void storeKnownKv(GvtFile& out, Section sec, const QString& secName,
                   const QString& key, const QString& value) {
@@ -123,6 +136,65 @@ void storeKnownKv(GvtFile& out, Section sec, const QString& secName,
         else if (key == QLatin1String("anchor_to"))   out.anchorToBeat = asDouble();
         else if (key == QLatin1String("master_bpm"))  out.masterBpm = asDouble();
         else out.extraMeta[secName + QLatin1Char('.') + key] = value;
+        return;
+    }
+    if (sec == Section::Initial) {
+        if (key == QLatin1String("complete")) {
+            out.initialComplete = parseBool(value);
+            return;
+        }
+        if (key == QLatin1String("crossfader")) {
+            out.initialMixerCaptured = true;
+            out.initialCrossfader = asDouble();
+            return;
+        }
+
+        const bool toDeck = key.startsWith(QLatin1String("to_"));
+        const QString deckKey = toDeck ? key.mid(3) : key;
+        GvtInitialState& state = toDeck ? out.initialTo : out.initialFrom;
+        bool known = true;
+        if      (deckKey == QLatin1String("playing"))         state.playing = parseBool(value);
+        else if (deckKey == QLatin1String("position_beat"))   state.positionBeat = asDouble();
+        else if (deckKey == QLatin1String("cue_beat"))        state.cueBeat = asDouble();
+        else if (deckKey == QLatin1String("tempo_ratio"))     state.tempoRatio = asDouble();
+        else if (deckKey == QLatin1String("fader"))           state.fader = asDouble();
+        else if (deckKey == QLatin1String("trim"))            state.trim = asDouble();
+        else if (deckKey == QLatin1String("eq_low"))          state.eqLow = asDouble();
+        else if (deckKey == QLatin1String("eq_mid"))          state.eqMid = asDouble();
+        else if (deckKey == QLatin1String("eq_high"))         state.eqHigh = asDouble();
+        else if (deckKey == QLatin1String("filter"))          state.filter = asDouble();
+        else if (deckKey == QLatin1String("loop_active"))     state.loopActive = parseBool(value);
+        else if (deckKey == QLatin1String("loop_start_beat")) state.loopStartBeat = asDouble();
+        else if (deckKey == QLatin1String("loop_end_beat"))   state.loopEndBeat = asDouble();
+        else if (deckKey == QLatin1String("fx_type"))         state.fxType = (int)std::lround(asDouble());
+        else if (deckKey == QLatin1String("fx_on"))           state.fxOn = parseBool(value);
+        else if (deckKey == QLatin1String("fx_wet"))          state.fxWet = asDouble();
+        else if (deckKey == QLatin1String("fx_beats"))        state.fxBeats = asDouble();
+        else if (deckKey == QLatin1String("stem_vocals"))     state.stemVocals = asDouble();
+        else if (deckKey == QLatin1String("stem_melody"))     state.stemMelody = asDouble();
+        else if (deckKey == QLatin1String("stem_bass"))       state.stemBass = asDouble();
+        else if (deckKey == QLatin1String("stem_drums"))      state.stemDrums = asDouble();
+        else known = false;
+
+        if (known) state.captured = true;
+        else out.extraMeta[secName + QLatin1Char('.') + key] = value;
+        return;
+    }
+    if (sec == Section::HotCues) {
+        static const QRegularExpression keyPattern(
+            QStringLiteral("^([ab])([1-8])$"));
+        const auto match = keyPattern.match(key.toLower());
+        double beat = -1.0;
+        if (match.hasMatch() && parseDouble(value, beat) &&
+            std::isfinite(beat)) {
+            const int pad = match.captured(2).toInt() - 1;
+            auto& mappings = match.captured(1) == QLatin1String("a")
+                                 ? out.fromHotCueBeats
+                                 : out.toHotCueBeats;
+            mappings[static_cast<std::size_t>(pad)] = beat;
+        } else {
+            out.extraMeta[secName + QLatin1Char('.') + key] = value;
+        }
         return;
     }
     // Unknown section: preserve everything.
@@ -168,6 +240,28 @@ bool parseEventLine(const QString& line, int lineNo, GvtFile& out,
     return true;
 }
 
+bool parseCueLine(const QString& line, int lineNo, GvtFile& out,
+                  QStringList* warnings) {
+    const int eq = line.indexOf(QLatin1Char('='));
+    if (eq < 0) {
+        warn(warnings, QStringLiteral("line %1: malformed cue (want beat = label), skipped").arg(lineNo));
+        return false;
+    }
+    GvtCue cue;
+    if (!parseDouble(line.left(eq).trimmed(), cue.beat) ||
+        !std::isfinite(cue.beat)) {
+        warn(warnings, QStringLiteral("line %1: bad cue beat, skipped").arg(lineNo));
+        return false;
+    }
+    cue.label = line.mid(eq + 1).trimmed();
+    if (cue.label.isEmpty()) {
+        warn(warnings, QStringLiteral("line %1: empty cue label, skipped").arg(lineNo));
+        return false;
+    }
+    out.cues.push_back(std::move(cue));
+    return true;
+}
+
 } // namespace
 
 // ------------------------------------------------------------------ parse ---
@@ -206,6 +300,9 @@ bool gvtParse(const QString& text, GvtFile& out, QString* error,
             else if (secName == QLatin1String("from"))   sec = Section::From;
             else if (secName == QLatin1String("to"))     sec = Section::To;
             else if (secName == QLatin1String("sync"))   sec = Section::Sync;
+            else if (secName == QLatin1String("initial")) sec = Section::Initial;
+            else if (secName == QLatin1String("hotcues")) sec = Section::HotCues;
+            else if (secName == QLatin1String("cues"))   sec = Section::Cues;
             else if (secName == QLatin1String("events")) sec = Section::Events;
             else {
                 sec = Section::Unknown;
@@ -216,6 +313,10 @@ bool gvtParse(const QString& text, GvtFile& out, QString* error,
 
         if (sec == Section::Events) {
             parseEventLine(line, lineNo, out, warnings);
+            continue;
+        }
+        if (sec == Section::Cues) {
+            parseCueLine(line, lineNo, out, warnings);
             continue;
         }
 
@@ -244,6 +345,8 @@ bool gvtParse(const QString& text, GvtFile& out, QString* error,
 
     std::stable_sort(out.events.begin(), out.events.end(),
                      [](const GvtEvent& a, const GvtEvent& b) { return a.beat < b.beat; });
+    std::stable_sort(out.cues.begin(), out.cues.end(),
+                     [](const GvtCue& a, const GvtCue& b) { return a.beat < b.beat; });
     return true;
 }
 
@@ -254,7 +357,7 @@ QString gvtSerialize(const GvtFile& f) {
     s += QStringLiteral("gravitino-transition %1\n\n").arg(f.version);
 
     // Split extraMeta by "<section>." prefix; unprefixed keys belong to [meta].
-    std::map<QString, QString> metaX, fromX, toX, syncX;
+    std::map<QString, QString> metaX, fromX, toX, syncX, initialX, hotCuesX;
     std::map<QString, std::map<QString, QString>> otherX; // unknown sections
     for (const auto& [k, v] : f.extraMeta) {
         const int dot = k.indexOf(QLatin1Char('.'));
@@ -263,6 +366,8 @@ QString gvtSerialize(const GvtFile& f) {
         if      (pre == QLatin1String("from")) fromX[rest] = v;
         else if (pre == QLatin1String("to"))   toX[rest] = v;
         else if (pre == QLatin1String("sync")) syncX[rest] = v;
+        else if (pre == QLatin1String("initial")) initialX[rest] = v;
+        else if (pre == QLatin1String("hotcues")) hotCuesX[rest] = v;
         else otherX[pre][rest] = v;
     }
 
@@ -299,9 +404,99 @@ QString gvtSerialize(const GvtFile& f) {
     for (const auto& [k, v] : syncX) s += kvLine(k, v);
     s += QLatin1Char('\n');
 
+    if (f.initialFrom.captured || f.initialTo.captured ||
+        f.initialMixerCaptured || !initialX.empty()) {
+        s += QStringLiteral("[initial]\n");
+        if (f.initialComplete)
+            s += kvLine(QStringLiteral("complete"), QStringLiteral("1"));
+        if (f.initialMixerCaptured)
+            s += kvLine(QStringLiteral("crossfader"),
+                        fmtNum(f.initialCrossfader, 3, 6));
+        const auto writeDeck = [&s](const GvtInitialState& state,
+                                    const QString& prefix, bool complete) {
+            const auto key = [&prefix](const char* name) {
+                return prefix + QLatin1String(name);
+            };
+            s += kvLine(key("tempo_ratio"), fmtNum(state.tempoRatio, 3, 6));
+            s += kvLine(key("fader"), fmtNum(state.fader, 3, 6));
+            s += kvLine(key("trim"), fmtNum(state.trim, 3, 6));
+            s += kvLine(key("eq_low"), fmtNum(state.eqLow, 3, 6));
+            s += kvLine(key("eq_mid"), fmtNum(state.eqMid, 3, 6));
+            s += kvLine(key("eq_high"), fmtNum(state.eqHigh, 3, 6));
+            s += kvLine(key("filter"), fmtNum(state.filter, 3, 6));
+            if (!complete) return;
+            s += kvLine(key("playing"), state.playing ? QStringLiteral("1")
+                                                       : QStringLiteral("0"));
+            s += kvLine(key("position_beat"), fmtNum(state.positionBeat, 3, 6));
+            s += kvLine(key("cue_beat"), fmtNum(state.cueBeat, 3, 6));
+            s += kvLine(key("loop_active"), state.loopActive ? QStringLiteral("1")
+                                                              : QStringLiteral("0"));
+            s += kvLine(key("loop_start_beat"), fmtNum(state.loopStartBeat, 3, 6));
+            s += kvLine(key("loop_end_beat"), fmtNum(state.loopEndBeat, 3, 6));
+            s += kvLine(key("fx_type"), QString::number(state.fxType));
+            s += kvLine(key("fx_on"), state.fxOn ? QStringLiteral("1")
+                                                  : QStringLiteral("0"));
+            s += kvLine(key("fx_wet"), fmtNum(state.fxWet, 3, 6));
+            s += kvLine(key("fx_beats"), fmtNum(state.fxBeats, 3, 6));
+            s += kvLine(key("stem_vocals"), fmtNum(state.stemVocals, 3, 6));
+            s += kvLine(key("stem_melody"), fmtNum(state.stemMelody, 3, 6));
+            s += kvLine(key("stem_bass"), fmtNum(state.stemBass, 3, 6));
+            s += kvLine(key("stem_drums"), fmtNum(state.stemDrums, 3, 6));
+        };
+        if (f.initialFrom.captured) {
+            writeDeck(f.initialFrom, QString(), f.initialComplete);
+        }
+        if (f.initialTo.captured)
+            writeDeck(f.initialTo, QStringLiteral("to_"), f.initialComplete);
+        for (const auto& [k, v] : initialX) s += kvLine(k, v);
+        s += QLatin1Char('\n');
+    }
+
+    const auto hasHotCueMappings = [](const std::array<double, 8>& mappings) {
+        return std::any_of(mappings.begin(), mappings.end(),
+                           [](double beat) { return beat >= 0.0; });
+    };
+    if (hasHotCueMappings(f.fromHotCueBeats) ||
+        hasHotCueMappings(f.toHotCueBeats) || !hotCuesX.empty()) {
+        s += QStringLiteral("[hotcues]\n");
+        s += QStringLiteral("; role+pad = track-relative beat\n");
+        const auto writeMappings = [&s](char role,
+                                        const std::array<double, 8>& mappings) {
+            for (int pad = 0; pad < static_cast<int>(mappings.size()); ++pad) {
+                if (!std::isfinite(mappings[static_cast<std::size_t>(pad)]) ||
+                    mappings[static_cast<std::size_t>(pad)] < 0.0)
+                    continue;
+                s += kvLine(
+                    QStringLiteral("%1%2").arg(QLatin1Char(role)).arg(pad + 1),
+                    fmtNum(mappings[static_cast<std::size_t>(pad)], 3, 9));
+            }
+        };
+        writeMappings('a', f.fromHotCueBeats);
+        writeMappings('b', f.toHotCueBeats);
+        for (const auto& [k, v] : hotCuesX) s += kvLine(k, v);
+        s += QLatin1Char('\n');
+    }
+
     for (const auto& [name, kvs] : otherX) {
         s += QStringLiteral("[%1]\n").arg(name);
         for (const auto& [k, v] : kvs) s += kvLine(k, v);
+        s += QLatin1Char('\n');
+    }
+
+    if (!f.cues.empty()) {
+        s += QStringLiteral("[cues]\n");
+        s += QStringLiteral("; beat = label\n");
+        std::vector<GvtCue> cues = f.cues;
+        std::stable_sort(cues.begin(), cues.end(),
+                         [](const GvtCue& a, const GvtCue& b) { return a.beat < b.beat; });
+        for (const GvtCue& cue : cues) {
+            QString label = cue.label;
+            label.replace(QLatin1Char('\n'), QLatin1Char(' '));
+            label.replace(QLatin1Char('\r'), QLatin1Char(' '));
+            s += QStringLiteral("%1 = %2\n")
+                     .arg(fmtNum(cue.beat, 3, 9), -11)
+                     .arg(label.trimmed());
+        }
         s += QLatin1Char('\n');
     }
 
@@ -316,9 +511,9 @@ QString gvtSerialize(const GvtFile& f) {
             .arg(fmtNum(e.beat, 3, 9), -8)
             .arg(QChar::fromLatin1(roleLetter(e.role)), -8)
             .arg(QLatin1String(controlName(e.control)), -11);
-        if (!controlIsTrigger(e.control)) {
+        if (!controlIsTrigger(e.control) || triggerNeedsValue(e.control)) {
             line += QStringLiteral(" %1").arg(fmtNum(e.value, 2, 6), -6);
-            if (e.curve != Curve::Step)
+            if (!controlIsTrigger(e.control) && e.curve != Curve::Step)
                 line += QStringLiteral(" %1").arg(QLatin1String(curveName(e.curve)));
         }
         // Trim right padding.

@@ -1,5 +1,6 @@
 // PINNED INTERFACE — see docs/ARCHITECTURE.md before changing.
 #pragma once
+#include <QList>
 #include <QObject>
 #include <atomic>
 #include <memory>
@@ -9,6 +10,11 @@
 namespace gvt {
 
 constexpr int kNumDecks = 2;
+
+struct AudioOutputDevice {
+    QString name;
+    bool isDefault = false;
+};
 
 // Per-deck realtime state. Parameters are atomics written from the GUI thread,
 // read by the audio thread. Implementation details live in Deck.cpp.
@@ -21,7 +27,9 @@ public:
     void loadTrack(TrackDataPtr t);          // stops, rewinds, swaps track
     TrackDataPtr track() const;              // may be null
     void play(); void stop();
+    bool previewActive() const;              // CUE/hot-cue held without PLAY latch
     void handleCue(bool pressed);           // press/hold-preview/release semantics
+    void handleHotCue(int i, bool pressed); // hold: play; release: stop + return
     void cueJump();                         // jump to the stored deck cue point
     void setHotCue(int i);                   // store current pos
     void jumpHotCue(int i);                  // jump if set
@@ -67,7 +75,7 @@ public:
 
     // Audio thread: render `frames` of post-fader stereo into out (add nothing,
     // overwrite). Advances position.
-    void render(float* out, int frames);
+    void render(float* out, int frames, float* preFaderOut = nullptr);
 
     // Position introspection (any thread).
     double positionSec() const;
@@ -76,6 +84,7 @@ public:
     double effectiveBpm() const;             // track bpm * tempoRatio; 0 if no track
 
 private:
+    void startPlayback(bool latchPreview);
     struct Impl; std::unique_ptr<Impl> impl_;
 };
 
@@ -86,16 +95,32 @@ public:
     explicit AudioEngine(ControlBus* bus, QObject* parent = nullptr);
     ~AudioEngine();
 
-    // Start realtime output. Returns false + error message on failure.
+    // Start realtime output. An empty preference means the macOS system
+    // default. Selecting the FLX4 by name enables its four-channel routing.
     bool start(QString* error);
+    bool start(const QString& preferredOutputName, QString* error);
+    // Live device switch. Deck transport is preserved while CoreAudio is
+    // briefly stopped and reopened. On failure the previous output is restored
+    // when possible.
+    bool switchOutputDevice(const QString& preferredOutputName, QString* error);
     void stopDevice();
 
     Deck& deck(int i);
     std::atomic<float> crossfader { 0.0f };  // 0 = A, 1 = B
+    std::atomic<bool> headphoneCue[kNumDecks] {}; // channel PFL selection
+    std::atomic<bool> masterCue { false };        // master in headphone bus
+    std::atomic<float> headphoneMix { 0.0f };     // 0 = CUE, 1 = MASTER
+
+    bool headphoneOutputAvailable() const;
+    QString outputDeviceName() const;
+    QString outputDevicePreference() const;
+    QList<AudioOutputDevice> availableOutputDevices(QString* error = nullptr);
 
     // Offline mode for --selftest: instead of a live device, render `frames`
     // through the exact same mix path into an interleaved stereo buffer.
     void renderOffline(float* out, int frames);
+    // Test/diagnostic path: interleaved MASTER L/R, PHONES L/R.
+    void renderOfflineFourChannel(float* out, int frames);
 
     // Master-output tap (set/cleared from the GUI thread; the audio thread
     // calls tap->feed(interleavedStereo, frames) after the limiter when set).
@@ -105,6 +130,9 @@ public:
     // Called by ControlBus subscription (wired in constructor): applies any
     // ControlEvent to engine state. Replay/MIDI/UI all land here.
     void applyEvent(const ControlEvent& e, Origin origin);
+
+signals:
+    void outputDeviceChanged(const QString& name, bool headphoneOutputAvailable);
 
 private:
     struct Impl; std::unique_ptr<Impl> impl_;

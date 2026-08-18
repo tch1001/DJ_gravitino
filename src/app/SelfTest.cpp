@@ -160,6 +160,7 @@ int runSelfTest(const QStringList& args) {
     // ---- Recorder round-trip: capture live-style events, save, reload ------
     engine.deck(0).seekSec(ta->firstBeatSec);
     engine.deck(1).seekSec(tb->firstBeatSec);
+    bus.dispatch({1, ControlId::Stop, 1.0}, Origin::System);
     bus.dispatch({0, ControlId::Play, 1.0}, Origin::System); // from-deck rolling
     TransitionRecorder rec(&bus, &engine);
     rec.start(0);
@@ -185,6 +186,13 @@ int runSelfTest(const QStringList& args) {
     std::printf("recorder: %zu events, anchor_from=%.2f master_bpm=%.2f\n",
                 recd.events.size(), recd.anchorFromBeat, recd.masterBpm);
     if (recd.events.size() < 5) { std::printf("FAIL: recorder lost events\n"); return 1; }
+    if (!recd.initialComplete || !recd.initialFrom.captured ||
+        !recd.initialTo.captured || !recd.initialMixerCaptured) {
+        std::printf("FAIL: recorder lost complete pre-transition snapshot\n"); return 1;
+    }
+    if (!recd.initialFrom.playing || recd.initialTo.playing) {
+        std::printf("FAIL: recorder lost initial transport state\n"); return 1;
+    }
     if (recd.masterBpm < 60 || recd.masterBpm > 200) { std::printf("FAIL: recorder bpm\n"); return 1; }
     recd.name = "selftest recorded";
     if (!gvtSaveFile(recd, "selftest_recorded.gvt", &err)) {
@@ -192,7 +200,9 @@ int runSelfTest(const QStringList& args) {
     }
     GvtFile recd2;
     if (!gvtLoadFile("selftest_recorded.gvt", recd2, &err, nullptr) ||
-        recd2.events.size() != recd.events.size()) {
+        recd2.events.size() != recd.events.size() ||
+        !recd2.initialComplete || !recd2.initialTo.captured ||
+        !recd2.initialMixerCaptured) {
         std::printf("FAIL: recorded round-trip\n"); return 1;
     }
     std::printf("OK: recorder round-trip (selftest_recorded.gvt)\n");

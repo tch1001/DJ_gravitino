@@ -1,4 +1,6 @@
 #pragma once
+#include <QList>
+#include <QStringList>
 #include <QWidget>
 #include "../audio/AudioEngine.h"
 
@@ -23,6 +25,8 @@ public:
 
     // sec < 0 clears the marker for that deck.
     void setTransitionEntry(int deck, double sec);
+    void setTransitionCues(int deck, const QList<double>& seconds,
+                           const QStringList& labels);
 
 public slots:
     void zoomIn();
@@ -42,6 +46,8 @@ private:
     AudioEngine* engine_;
     double windowSec_ = 8.0;              // seconds visible across the width
     double transitionEntrySec_[2] = {-1.0, -1.0};
+    QList<double> transitionCueSecs_[2];
+    QStringList transitionCueLabels_[2];
     double lastPaintPos_[2] = {-1.0, -1.0};
     const void* lastTrack_[2] = {nullptr, nullptr};
     // Last-painted loop state, so loop edits repaint even while paused.

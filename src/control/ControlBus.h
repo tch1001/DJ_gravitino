@@ -24,6 +24,9 @@ enum class ControlId : uint8_t {
     Trim,         // gain knob
     EqLow, EqMid, EqHigh,   // 0.5 = flat, 0.0 = kill
     Crossfader,   // 0 = full deck A ... 1 = full deck B (deck = kNoDeck)
+    HeadphoneCue, // per-deck PFL state, 0 = off / 1 = on
+    MasterCue,    // master-to-headphones state (deck = kNoDeck)
+    HeadphoneMix, // 0 = CUE ... 1 = MASTER (deck = kNoDeck)
     Jog,          // signed nudge ticks (deck-scoped, transient)
     LoopAuto,     // value = loop length in beats (e.g. 4.0); starts beat-snapped loop
     BeatJump,     // value = signed beats to jump (e.g. -8, 4), beat-aligned

@@ -25,6 +25,46 @@ std::map<const TransitionPlayer*, PlayerMode>& modeTable() {
     return t;
 }
 
+void prependInitialState(std::vector<GvtEvent>& events,
+                         const GvtInitialState& state, Role role,
+                         bool complete) {
+    if (!state.captured) return;
+    std::vector<GvtEvent> setup;
+    const auto add = [&setup, role](ControlId id, double value) {
+        setup.push_back(GvtEvent {0.0, role, id, value, Curve::Step});
+    };
+    add(ControlId::Tempo, state.tempoRatio);
+    add(ControlId::Fader, state.fader);
+    add(ControlId::Trim, state.trim);
+    add(ControlId::EqLow, state.eqLow);
+    add(ControlId::EqMid, state.eqMid);
+    add(ControlId::EqHigh, state.eqHigh);
+    add(ControlId::Filter, state.filter);
+    if (complete) {
+        add(ControlId::FxType, state.fxType);
+        add(ControlId::FxOn, state.fxOn ? 1.0 : 0.0);
+        add(ControlId::FxWet, state.fxWet);
+        add(ControlId::FxBeats, state.fxBeats);
+        add(ControlId::StemVocals, state.stemVocals);
+        add(ControlId::StemMelody, state.stemMelody);
+        add(ControlId::StemBass, state.stemBass);
+        add(ControlId::StemDrums, state.stemDrums);
+    }
+    events.insert(events.begin(), setup.begin(), setup.end());
+}
+
+double replayTempoRatio(const GvtInitialState& state,
+                        const GvtTrackRef& recorded,
+                        const TrackDataPtr& loaded,
+                        double fallbackBpm = 0.0) {
+    if (!loaded || loaded->bpm <= 0.0) return state.tempoRatio;
+    const double effectiveBpm = fallbackBpm > 0.0
+                                    ? fallbackBpm
+                                    : recorded.bpm * state.tempoRatio;
+    return effectiveBpm > 0.0 ? effectiveBpm / loaded->bpm
+                              : state.tempoRatio;
+}
+
 } // namespace
 
 TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
@@ -40,6 +80,15 @@ TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
         Impl& im2 = *impl_;
         if (!im2.active) return;
         const double rel = im2.currentRel();
+
+        // PRIME may sit armed for many bars. Reassert transport-dependent
+        // pre-state at the actual entry boundary so an incoming deck touched
+        // after arming cannot make replay skip its recorded cue position.
+        if (im2.mode == PlayerMode::Perform &&
+            !im2.preStateTransportApplied && rel >= 0.0) {
+            im2.restorePreStateTransportAtAnchor();
+            im2.preStateTransportApplied = true;
+        }
 
         for (size_t i = 0; i < im2.sched.size(); ++i) {
             if (im2.done[i]) continue;
@@ -132,6 +181,28 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     im.mode = (it != modeTable().end()) ? it->second : PlayerMode::Perform;
 
     std::vector<GvtEvent> events = f.events;
+    // Setup snapshots are replay actions, not tutorial gestures.  In Perform
+    // mode they fire at the anchor (including when PRIME has waited there), so
+    // the outgoing deck starts at the BPM/EQ used by the recording.
+    if (im.mode == PlayerMode::Perform) {
+        GvtInitialState fromSetup = f.initialFrom;
+        fromSetup.tempoRatio = replayTempoRatio(
+            fromSetup, f.from, im.engine->deck(fromDeck).track(), f.masterBpm);
+        prependInitialState(events, fromSetup, Role::FromDeck,
+                            f.initialComplete);
+        if (f.initialComplete) {
+            GvtInitialState toSetup = f.initialTo;
+            toSetup.tempoRatio = replayTempoRatio(
+                toSetup, f.to, im.engine->deck(toDeck).track());
+            prependInitialState(events, toSetup, Role::ToDeck, true);
+            if (f.initialMixerCaptured) {
+                events.insert(events.begin(),
+                              GvtEvent {0.0, Role::Mixer,
+                                        ControlId::Crossfader,
+                                        f.initialCrossfader, Curve::Step});
+            }
+        }
+    }
     std::stable_sort(events.begin(), events.end(),
                      [](const GvtEvent& a, const GvtEvent& b) { return a.beat < b.beat; });
 
@@ -141,6 +212,9 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     im.done.assign(im.sched.size(), 0);
     im.prompted.assign(im.sched.size(), 0);
     im.totalBeats = events.empty() ? 0.0 : events.back().beat;
+    im.haveLastBeat = false;
+    im.lastBeat = 0.0;
+    im.preStateTransportApplied = false;
 
     im.active = true;
     im.timer.start();

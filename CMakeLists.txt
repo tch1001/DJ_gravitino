@@ -37,6 +37,7 @@ add_library(gvtcore STATIC
     src/transitions/TransitionPlayer.cpp
     src/midi/MidiEngine.cpp
     src/midi/Flx4Mapping.cpp
+    src/midi/Flx4TutorialMap.cpp
 )
 target_include_directories(gvtcore PUBLIC src ${RTMIDI_INCLUDE} ${TAGLIB_INCLUDE})
 target_link_libraries(gvtcore PUBLIC
@@ -52,6 +53,7 @@ add_executable(gravitino MACOSX_BUNDLE
     src/ui/MixerWidget.cpp
     src/ui/LibraryWidget.cpp
     src/ui/TransitionPanel.cpp
+    src/ui/Flx4TutorialWidget.cpp
 )
 set_target_properties(gravitino PROPERTIES MACOSX_BUNDLE FALSE) # plain binary for dev
 target_link_libraries(gravitino PRIVATE gvtcore Qt6::Widgets)

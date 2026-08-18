@@ -82,6 +82,8 @@ struct Deck::Impl {
     std::atomic<unsigned int> activeRenders { 0 };
     std::atomic<double> pendingJogRatio { 0.0 };
     std::atomic<bool> cuePreviewing { false };
+    std::atomic<int> hotCuePreviewIndex { -1 };
+    std::atomic<double> hotCuePreviewSec { -1.0 };
     double jogRatio = 0.0; // Audio-thread-owned after a safe track swap.
     double pendingLoopInSec = -1.0; // GUI-thread-owned.
     bool hasPendingLoopIn = false;
@@ -125,6 +127,8 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->positionFrames.store(0.0, std::memory_order_release);
     impl_->pendingJogRatio.store(0.0, std::memory_order_release);
     impl_->cuePreviewing.store(false, std::memory_order_release);
+    impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
+    impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
     impl_->jogRatio = 0.0;
     impl_->pendingLoopInSec = -1.0;
     impl_->hasPendingLoopIn = false;
@@ -193,8 +197,21 @@ TrackDataPtr Deck::track() const
 
 void Deck::play()
 {
+    startPlayback(true);
+}
+
+void Deck::startPlayback(bool latchPreview)
+{
     if (impl_->audioTrack.load(std::memory_order_acquire) == nullptr)
         return;
+    if (latchPreview) {
+        // PLAY takes ownership of an active momentary preview. Clearing these
+        // markers makes the later CUE/pad release a no-op, so transport keeps
+        // rolling from the preview position.
+        impl_->cuePreviewing.store(false, std::memory_order_release);
+        impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
+        impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
+    }
     // At end-of-track the render callback would immediately clear `playing`
     // again — rewind so play-after-EOF restarts instead of doing nothing.
     const auto frames = impl_->trackFrameCount.load(std::memory_order_acquire);
@@ -202,6 +219,12 @@ void Deck::play()
         (double)frames - 1.0)
         impl_->positionFrames.store(0.0, std::memory_order_release);
     playing.store(true, std::memory_order_release);
+}
+
+bool Deck::previewActive() const
+{
+    return impl_->cuePreviewing.load(std::memory_order_acquire) ||
+           impl_->hotCuePreviewIndex.load(std::memory_order_acquire) >= 0;
 }
 
 void Deck::stop()
@@ -240,7 +263,7 @@ void Deck::handleCue(bool pressed)
     if (std::isfinite(targetSec) && targetSec >= 0.0 &&
         std::abs(currentSec - targetSec) <= kCuePreviewToleranceSec) {
         impl_->cuePreviewing.store(true, std::memory_order_release);
-        play();
+        startPlayback(false);
         return;
     }
 
@@ -257,6 +280,42 @@ void Deck::cueJump()
     if (!std::isfinite(cueSec) || cueSec < 0.0)
         return;
     seekSec(cueSec);
+}
+
+void Deck::handleHotCue(int index, bool pressed)
+{
+    if (index < 0 || index >= 8)
+        return;
+
+    const TrackDataPtr currentTrack = track();
+    if (!currentTrack)
+        return;
+
+    if (!pressed) {
+        if (impl_->hotCuePreviewIndex.exchange(
+                -1, std::memory_order_acq_rel) != index)
+            return;
+
+        const double returnSec = impl_->hotCuePreviewSec.exchange(
+            -1.0, std::memory_order_acq_rel);
+        stop();
+        if (std::isfinite(returnSec) && returnSec >= 0.0)
+            seekSec(returnSec);
+        return;
+    }
+
+    const double cueSec = currentTrack->hotCues[index];
+    if (!std::isfinite(cueSec) || cueSec < 0.0) {
+        impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
+        impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
+        setHotCue(index);
+        return;
+    }
+
+    impl_->hotCuePreviewSec.store(cueSec, std::memory_order_release);
+    impl_->hotCuePreviewIndex.store(index, std::memory_order_release);
+    seekSec(cueSec);
+    startPlayback(false);
 }
 
 void Deck::setHotCue(int index)
@@ -438,12 +497,14 @@ void Deck::beatJump(double beats)
     seekSec(targetSec);
 }
 
-void Deck::render(float* out, int frames)
+void Deck::render(float* out, int frames, float* preFaderOut)
 {
     if (out == nullptr || frames <= 0)
         return;
 
     std::fill_n(out, static_cast<std::size_t>(frames) * 2U, 0.0f);
+    if (preFaderOut != nullptr)
+        std::fill_n(preFaderOut, static_cast<std::size_t>(frames) * 2U, 0.0f);
 
     // A stopped deck normally costs nothing, except while an effect has stored
     // energy to release. Tail-only renders use zero input and never advance the
@@ -616,6 +677,11 @@ void Deck::render(float* out, int frames)
         fxOn.load(std::memory_order_relaxed),
         fxWet.load(std::memory_order_relaxed),
         fxBeats.load(std::memory_order_relaxed), bpm);
+
+    // Headphone PFL is post-EQ/filter/FX but pre-channel-fader. Copy the one
+    // render result so monitoring never advances the deck a second time.
+    if (preFaderOut != nullptr)
+        std::copy_n(out, static_cast<std::size_t>(frames) * 2U, preFaderOut);
 
     const float channelGain =
         clampUnit(fader.load(std::memory_order_relaxed), 1.0f);

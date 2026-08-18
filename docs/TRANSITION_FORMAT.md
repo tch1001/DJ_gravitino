@@ -44,6 +44,60 @@ anchor_from = 224.0     ; beat in FROM track where the transition begins
 anchor_to   = 32.0      ; beat in TO track aligned to transition beat 0
 master_bpm  = 130.00    ; tempo the mix runs at during the transition
 
+[initial]
+complete    = 1         ; full two-deck + mixer snapshot
+crossfader  = 0.000     ; role space: outgoing -> incoming
+playing     = 1         ; unprefixed keys describe the outgoing deck
+position_beat = 224.000
+cue_beat    = 224.000
+tempo_ratio = 1.000
+fader       = 1.000
+trim        = 0.500
+eq_low      = 0.500
+eq_mid      = 0.500
+eq_high     = 0.500
+filter      = 0.500
+loop_active = 0
+loop_start_beat = 224.000
+loop_end_beat = 224.000
+fx_type     = 0
+fx_on       = 0
+fx_wet      = 0.500
+fx_beats    = 0.500
+stem_vocals = 1.000
+stem_melody = 1.000
+stem_bass   = 1.000
+stem_drums  = 1.000
+to_playing  = 0         ; to_* keys describe the incoming deck
+to_position_beat = 32.000
+to_cue_beat = 32.000
+to_tempo_ratio = 1.000
+to_fader    = 0.000
+to_trim     = 0.500
+to_eq_low   = 0.500
+to_eq_mid   = 0.500
+to_eq_high  = 0.500
+to_filter   = 0.500
+to_loop_active = 0
+to_loop_start_beat = 32.000
+to_loop_end_beat = 32.000
+to_fx_type  = 0
+to_fx_on    = 0
+to_fx_wet   = 0.500
+to_fx_beats = 0.500
+to_stem_vocals = 1.000
+to_stem_melody = 1.000
+to_stem_bass = 1.000
+to_stem_drums = 1.000
+
+[hotcues]
+; role+pad = track-relative beat used by the recorded transition
+b1          = 32.000
+
+[cues]
+0.000       = Start beatmatch
+24.000      = Exit outgoing
+
 [events]
 ; beat | target | control | value | curve
 0.000    b        load
@@ -63,8 +117,24 @@ master_bpm  = 130.00    ; tempo the mix runs at during the transition
 
 - **Line 1**: `gravitino-transition <version>` — required magic.
 - `;` or `#` starts a comment (whole line or trailing). Blank lines ignored.
-- **Sections** `[meta] [from] [to] [sync]` hold `key = value` pairs.
+- **Sections** `[meta] [from] [to] [sync] [initial]` hold `key = value` pairs.
   Unknown keys are preserved on load and rewritten on save (forward compat).
+- **`[initial]`** is optional for compatibility with older v1 files. New
+  recordings set `complete = 1` and snapshot both role-based decks plus the
+  mixer crossfader. Unprefixed keys are the outgoing deck; `to_*` keys are the
+  incoming deck. The snapshot covers transport/cue position, tempo, channel
+  level, trim, EQ, filter, loops, FX, and stem levels. Perform reconstructs it
+  before rolling; Prime prepares it immediately and reasserts transport state
+  at the entry boundary. Older partial sections containing only the outgoing
+  tempo/gain/EQ/filter keys remain supported.
+- **`[cues]`** is optional and holds user labels as `beat = label`. Labels are
+  annotations only: they populate the event preview and waveform markers.
+  `#`, `;`, and line breaks are reserved because they delimit comments/lines.
+- **`[hotcues]`** is optional and records the track-relative beat assigned to
+  every hot-cue pad referenced by the transition. Keys use role + pad (`a1` is
+  outgoing pad 1, `b8` incoming pad 8). Tutorial mode compares these positions
+  with the loaded tracks and warns about missing, unverifiable, or mismatched
+  assignments. Legacy files without this section still load normally.
 - **`[events]`** holds one event per line, whitespace-separated columns:
 
   `beat  target  control  [value]  [curve]`
@@ -75,7 +145,8 @@ master_bpm  = 130.00    ; tempo the mix runs at during the transition
     outgoing track sits.
   - `control` — see table below.
   - `value` — normalized number (most controls 0..1; tempo in ratio; jog in
-    signed ticks). Omitted for trigger controls (`play`, `cue`, ...).
+    signed ticks). Omitted for ordinary trigger controls. `cue` and
+    `hotcue_1..8` retain `1` press / `0` release values for hold-preview.
   - `curve` — optional: `step` (default), `linear`, `scurve`. Non-step means
     "glide from this control's previous value, arriving at `value` on `beat`,
     starting where the previous event for the same (target, control) ended."
@@ -84,7 +155,8 @@ master_bpm  = 130.00    ; tempo the mix runs at during the transition
 
 | control      | targets | value                          |
 |--------------|---------|--------------------------------|
-| `play`,`stop`,`cue` | a,b | (trigger)                 |
+| `play`,`stop` | a,b | (trigger)                         |
+| `cue`        | a,b     | 1 press / 0 release (hold-preview) |
 | `load`       | b       | (trigger; load the TO track)   |
 | `tempo_sync` | a,b     | (trigger; match master bpm)    |
 | `tempo`      | a,b     | playback ratio, 1.0 = native   |
@@ -92,7 +164,7 @@ master_bpm  = 130.00    ; tempo the mix runs at during the transition
 | `trim`       | a,b     | 0..1 gain knob                 |
 | `eq_low`,`eq_mid`,`eq_high` | a,b | 0..1 (0.5 = flat, 0 = kill) |
 | `xfader`     | x       | 0 = outgoing ... 1 = incoming (role space) |
-| `hotcue_1..8`| a,b     | (trigger; jump to stored cue)  |
+| `hotcue_1..8`| a,b     | 1 press: play from cue; 0 release: stop and return |
 | `jog`        | a,b     | signed nudge ticks (not recorded) |
 | `loop_auto`  | a,b     | loop length in beats (starts beat-snapped loop) |
 | `loop_in`,`loop_out`,`loop_exit`,`loop_halve`,`loop_double` | a,b | (trigger) |

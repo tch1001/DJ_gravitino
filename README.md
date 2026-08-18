@@ -17,12 +17,19 @@ for the Pioneer DDJ-FLX4 controller.
 
 ## Features (MVP)
 
-- Two decks with waveform display, play/cue/hot cues, tempo slider with beat sync
+- Two decks with waveform display, play/cue/hot cues, tempo slider with beat
+  sync; PLAY while holding CUE or a hot cue latches the preview into continuous
+  playback
+- Selectable CoreAudio output for MacBook, Bluetooth, or DDJ-FLX4 speakers.
+  With Mac/Bluetooth master output, a second FLX4 stream still carries
+  pre-fader headphone cue; selecting FLX4 routes master 1/2 + phones 3/4
 - Mixer: channel faders, 3-band EQ, trim, crossfader
 - Automatic BPM detection and beatgrid
 - Library browser scanning your local MP3 folder (ID3 tags via TagLib)
 - **Transition recording & replay** — the headline feature (see
   [docs/TRANSITION_FORMAT.md](docs/TRANSITION_FORMAT.md))
+- Full virtual DDJ-FLX4 Tutorial overlay: highlights each recorded gesture,
+  accepts clicks or physical input, and checks referenced hot-cue assignments
 - DDJ-FLX4 plug-and-play MIDI mapping with LED feedback (hot-plug supported —
   plug it in any time)
 
@@ -48,14 +55,19 @@ cmake --build build
 4. **Replay it**: next time that pair is loaded (matched by audio fingerprint,
    falling back to title/duration), it appears in the Transitions list —
    ▶ PERFORM executes it beat-perfectly at whatever tempo you're running.
-5. **Learn it**: 🎓 TUTORIAL plays the song and prompts each move 4 beats ahead
-   ("in 4 beats: mixer xfader → 100%"), scoring your timing as you follow along.
+5. **Learn it**: 🎓 TUTORIAL opens a full virtual FLX4, lights each move four
+   beats ahead, and scores physical-controller or virtual-control input. It
+   warns before starting when an action lacks an FLX4 mapping or a referenced
+   hot cue is missing, unverifiable, or mapped to the wrong beat.
 
 A sample transition for the Pioneer demo tracks ships in
 `~/Music/Gravitino/Transitions/demo-blend.gvt` after the selftest.
 
 Plug in a DDJ-FLX4 at any time — the status bar shows the connection and all
 controls + LEDs map automatically (see docs/STATUS.md for the exact mapping).
+Choose the master speakers under Settings ▸ Audio Output. The system default is
+used initially; Bluetooth works with its expected latency, while a connected
+FLX4 continues to provide the separate headphone-cue output.
 
 Dev flags: `--selftest` (headless render check), `--autoload [A B]` (auto-load
 matching library tracks onto the decks).

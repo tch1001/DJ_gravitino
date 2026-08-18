@@ -19,6 +19,45 @@ Role roleForDeck(DeckId deck, int fromDeck) {
     return (deck == fromDeck) ? Role::FromDeck : Role::ToDeck;
 }
 
+GvtInitialState captureDeckState(const Deck& deck) {
+    GvtInitialState state;
+    const TrackDataPtr track = deck.track();
+    if (!track) return state;
+
+    state.captured = true;
+    state.playing = deck.playing.load();
+    state.positionBeat = deck.beatPosition();
+    const double cueSec = deck.cuePointSec.load();
+    state.cueBeat = std::isfinite(cueSec) && cueSec >= 0.0
+                        ? track->beatAtSec(cueSec)
+                        : state.positionBeat;
+    state.tempoRatio = deck.tempoRatio.load();
+    state.fader = deck.fader.load();
+    state.trim = deck.trim.load();
+    state.eqLow = deck.eqLow.load();
+    state.eqMid = deck.eqMid.load();
+    state.eqHigh = deck.eqHigh.load();
+    state.filter = deck.filter.load();
+    state.loopActive = deck.loopActive.load();
+    const double loopStart = deck.loopStartSec.load();
+    const double loopEnd = deck.loopEndSec.load();
+    state.loopStartBeat = std::isfinite(loopStart) && loopStart >= 0.0
+                              ? track->beatAtSec(loopStart)
+                              : state.positionBeat;
+    state.loopEndBeat = std::isfinite(loopEnd) && loopEnd >= 0.0
+                            ? track->beatAtSec(loopEnd)
+                            : state.positionBeat;
+    state.fxType = deck.fxType.load();
+    state.fxOn = deck.fxOn.load();
+    state.fxWet = deck.fxWet.load();
+    state.fxBeats = deck.fxBeats.load();
+    state.stemVocals = deck.stemVocals.load();
+    state.stemMelody = deck.stemMelody.load();
+    state.stemBass = deck.stemBass.load();
+    state.stemDrums = deck.stemDrums.load();
+    return state;
+}
+
 } // namespace
 
 TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
@@ -47,9 +86,31 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
         // Only human origins are recorded — never Replay or System.
         if (origin != Origin::Ui && origin != Origin::Midi) return;
 
-        // Jog nudges are transient rate bends; recording them as absolute
-        // values would replay as a sustained pitch bend. Skip them.
-        if (e.id == ControlId::Jog) return;
+        // Jog nudges are transient rate bends; headphone monitoring is local
+        // to the DJ and never part of the audible transition. Skip both.
+        if (e.id == ControlId::Jog ||
+            e.id == ControlId::HeadphoneCue ||
+            e.id == ControlId::MasterCue ||
+            e.id == ControlId::HeadphoneMix)
+            return;
+
+        if (e.deck >= 0 && e.deck < kNumDecks &&
+            e.id >= ControlId::HotCue1 && e.id <= ControlId::HotCue8) {
+            const int pad = static_cast<int>(e.id) -
+                            static_cast<int>(ControlId::HotCue1);
+            const TrackDataPtr track = im.engine->deck(e.deck).track();
+            if (track && std::isfinite(track->hotCues[pad]) &&
+                track->hotCues[pad] >= 0.0) {
+                auto& mappings = e.deck == im.fromDeck
+                                     ? im.fromHotCueBeats : im.toHotCueBeats;
+                // Preserve the assignment at the first recorded use. A pad
+                // edited later in the same take must not rewrite what the
+                // earlier gesture actually meant.
+                if (mappings[static_cast<std::size_t>(pad)] < 0.0)
+                    mappings[static_cast<std::size_t>(pad)] =
+                        track->beatAtSec(track->hotCues[pad]);
+            }
+        }
 
         GvtEvent g;
         g.beat = std::max(0.0, beat);
@@ -91,6 +152,11 @@ void TransitionRecorder::start(int fromDeck) {
     im.toDeck = (fromDeck == 0) ? 1 : 0;
     im.anchorBeat = im.engine->deck(fromDeck).beatPosition();
     im.masterBpm = im.engine->deck(fromDeck).effectiveBpm();
+    im.initialFrom = captureDeckState(im.engine->deck(fromDeck));
+    im.initialTo = captureDeckState(im.engine->deck(im.toDeck));
+    const double physicalCrossfader = im.engine->crossfader.load();
+    im.initialCrossfader = fromDeck == 0 ? physicalCrossfader
+                                         : 1.0 - physicalCrossfader;
     im.toAnchorSet = false;
     im.toAnchorBeat = 0.0;
     // If the incoming deck is already rolling, its anchor is NOW — waiting for
@@ -101,6 +167,8 @@ void TransitionRecorder::start(int fromDeck) {
     }
     im.haveLastBeat = false;
     im.lastBeat = 0.0;
+    im.fromHotCueBeats.fill(-1.0);
+    im.toHotCueBeats.fill(-1.0);
     im.events.clear();
     im.recording = true;
 }
@@ -137,6 +205,13 @@ GvtFile TransitionRecorder::finish() {
         im.toAnchorBeat = im.engine->deck(im.toDeck).beatPosition();
     f.anchorToBeat = im.toAnchorBeat;
     f.masterBpm = im.masterBpm;
+    f.initialComplete = true;
+    f.initialFrom = im.initialFrom;
+    f.initialTo = im.initialTo;
+    f.initialMixerCaptured = true;
+    f.initialCrossfader = im.initialCrossfader;
+    f.fromHotCueBeats = im.fromHotCueBeats;
+    f.toHotCueBeats = im.toHotCueBeats;
 
     // Sort, then thin per-key runs: drop intermediate continuous points that
     // sit on the line between their kept neighbors; survivors past the first
@@ -199,6 +274,28 @@ GvtFile TransitionRecorder::finish() {
     for (size_t i = 0; i < im.events.size(); ++i)
         if (keep[i]) f.events.push_back(im.events[i]);
 
+    // Hot-cue events only name a pad. Capture the pad's actual track beat so
+    // Tutorial can verify that a later library/controller setup points to the
+    // same musical moment. This is captured at finish so a cue first assigned
+    // during the recording is included too.
+    for (const GvtEvent& event : f.events) {
+        if (event.control < ControlId::HotCue1 ||
+            event.control > ControlId::HotCue8 || event.role == Role::Mixer)
+            continue;
+        const int pad = static_cast<int>(event.control) -
+                        static_cast<int>(ControlId::HotCue1);
+        const int physicalDeck = event.role == Role::FromDeck
+                                     ? im.fromDeck : im.toDeck;
+        const TrackDataPtr track = im.engine->deck(physicalDeck).track();
+        if (!track) continue;
+        const double sec = track->hotCues[pad];
+        if (!std::isfinite(sec) || sec < 0.0) continue;
+        auto& mappings = event.role == Role::FromDeck
+                             ? f.fromHotCueBeats : f.toHotCueBeats;
+        if (mappings[static_cast<std::size_t>(pad)] < 0.0)
+            mappings[static_cast<std::size_t>(pad)] = track->beatAtSec(sec);
+    }
+
     // Quantize for clean, human-editable files: 0.01 for BPM/durations,
     // 0.001 beats (~0.5 ms at 128 BPM) for anchors and event times/values.
     auto q = [](double v, double step) { return std::round(v / step) * step; };
@@ -208,6 +305,31 @@ GvtFile TransitionRecorder::finish() {
     f.anchorFromBeat = q(f.anchorFromBeat, 0.001);
     f.anchorToBeat = q(f.anchorToBeat, 0.001);
     f.masterBpm = q(f.masterBpm, 0.01);
+    const auto quantizeState = [&q](GvtInitialState& state) {
+        state.positionBeat = q(state.positionBeat, 0.001);
+        state.cueBeat = q(state.cueBeat, 0.001);
+        state.tempoRatio = q(state.tempoRatio, 0.001);
+        state.fader = q(state.fader, 0.001);
+        state.trim = q(state.trim, 0.001);
+        state.eqLow = q(state.eqLow, 0.001);
+        state.eqMid = q(state.eqMid, 0.001);
+        state.eqHigh = q(state.eqHigh, 0.001);
+        state.filter = q(state.filter, 0.001);
+        state.loopStartBeat = q(state.loopStartBeat, 0.001);
+        state.loopEndBeat = q(state.loopEndBeat, 0.001);
+        state.fxWet = q(state.fxWet, 0.001);
+        state.fxBeats = q(state.fxBeats, 0.001);
+        state.stemVocals = q(state.stemVocals, 0.001);
+        state.stemMelody = q(state.stemMelody, 0.001);
+        state.stemBass = q(state.stemBass, 0.001);
+        state.stemDrums = q(state.stemDrums, 0.001);
+    };
+    quantizeState(f.initialFrom);
+    quantizeState(f.initialTo);
+    f.initialCrossfader = q(f.initialCrossfader, 0.001);
+    for (auto* mappings : {&f.fromHotCueBeats, &f.toHotCueBeats})
+        for (double& beat : *mappings)
+            if (std::isfinite(beat) && beat >= 0.0) beat = q(beat, 0.001);
     for (GvtEvent& e : f.events) { e.beat = q(e.beat, 0.001); e.value = q(e.value, 0.001); }
 
     im.events.clear();

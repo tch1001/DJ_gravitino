@@ -6,6 +6,93 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-18 (codex): **Full FLX4 transition tutor + selectable dual-device
+  audio.** Tutorial mode now opens a full, pulsing virtual DDJ-FLX4 surface,
+  queues prompts in transition order, labels the physical deck/control/value,
+  and accepts either physical MIDI or a click on the highlighted virtual
+  control. Unsupported FLX4 gestures are shown in amber and warned before
+  launch. New `.gvt` recordings persist the track beat behind each referenced
+  hot-cue pad; Tutorial warns for missing, legacy-unverifiable, or position-
+  mismatched pads and will not make a bad virtual cue fire. Settings > Audio
+  Output lists CoreAudio devices and persists System Default, MacBook,
+  Bluetooth, or FLX4 selection. Non-FLX4 master outputs now run alongside a
+  second FLX4 stream: master goes to the selected speakers and a bounded SPSC
+  monitor ring feeds only FLX4 phones 3/4; selecting FLX4 uses its combined
+  four-channel path. PLAY now takes over an active CUE or hot-cue hold preview,
+  so releasing the held cue keeps playback rolling; UI and MIDI PLAY toggling
+  both distinguish that takeover from a stop request. Verified: build clean,
+  ctest 10/10 (including cue/hot-cue takeover and saved hot-cue mapping), and
+  full `--selftest` pass. Live visual inspection via the macOS accessibility
+  tool was unavailable (the tool timed out); physical speaker/headphone
+  confirmation is in progress.
+
+- 2026-08-18 (codex): **DDJ-FLX4 headphone PFL routing implemented.** Selecting
+  the FLX4 audio output opens its four-output CoreAudio device and writes master
+  to 1/2 and headphones to 3/4. The official
+  channel-CUE notes (`90/91 54`), master-CUE note (`96 63`), and 14-bit
+  HEADPHONES MIX CC (`B6 0C/2C`) now drive a post-EQ/filter/FX, pre-fader PFL
+  bus; channel CUE LEDs are host-mirrored. Master recording still receives only
+  the master stereo bus. The user confirmed the separate
+  "hot cue plays the other song" report was Serato playing in the background,
+  not Gravitino; no hot-cue behavior was changed. Verified: clean build and
+  no-op rebuild, ctest 9/9, full `--selftest`, and `git diff --check` all pass.
+  The new build was restarted with the connected FLX4; physical headphone
+  monitoring remains for the user to confirm by listening.
+
+- 2026-08-18 (codex): **No duplicate audio engines / deck source layering.**
+  GUI startup now holds a per-user process lock before opening CoreAudio, so a
+  hidden older Gravitino process cannot keep playing underneath the visible
+  window; a second launch explains that another window owns audio and exits.
+  Added a concurrent offline deck-swap regression that proves `loadTrack()`
+  drains an active render, stops/rewinds, and emits only the replacement PCM
+  after returning. Verified: build clean, ctest 8/8 including the new stressed
+  swap test (also repeated 20/20), full `--selftest`, and `git diff --check`
+  all pass.
+
+- 2026-08-17 (codex): **Safe deck loading + transition edge-list planner.**
+  Library load buttons now track the selected row's readiness and each deck's
+  live transport state: a playing deck's button is clearly disabled with an
+  explanatory tooltip, and the load handler independently refuses replacement
+  if invoked through another path. Disabled transition REC styling is more
+  pronounced. A new searchable, sortable Library > Transitions tab lists every
+  saved transition as a directed From track → To track edge with its name,
+  BPM, beat length, and cue count, independent of the tracks currently loaded.
+  Verified in the live UI at compact window size; build clean, ctest 7/7,
+  full `--selftest`, and `git diff --check` all pass.
+
+- 2026-08-17 (codex): **Hold-preview cues + deterministic transition pre-state.**
+  Assigned hot cues now play while held and stop/return to their marker on
+  release (unset pads still store). Crossfader checkpoint runs remain intact
+  internally but the event table/waveform auto-labels show only start/end.
+  Clicking the selected transition again deselects it and clears deck markers;
+  a vertical splitter lets the library shrink so the event table can grow.
+  New recordings persist a complete role-based snapshot for both decks and the
+  mixer: positions/cues, tempo, faders/trim/EQ/filter, loops, FX, stems, and
+  crossfader. Perform stops and reconstructs that state, arms, then rolls from
+  the entry marker; Prime prepares/verifies the full state, rejects an entry
+  already passed, and reasserts incoming transport at the actual boundary.
+  Legacy partial snapshots remain supported. Verified: build clean, ctest 7/7,
+  full `--selftest`, and a live compact-window UI inspection all pass.
+
+- 2026-08-17 (codex): **Rotary audio controls no longer wrap.** Mixer trim,
+  high/mid/low EQ, filter, and deck FX wet dials explicitly clamp at their
+  limits instead of crossing the angular seam from minimum to maximum (or
+  vice versa). Verified: build clean, ctest 7/7, and `--selftest` passes.
+
+- 2026-08-17 (codex): **Transition workflow + cue navigation pass complete.**
+  Assigned hot cues now stop and park at the marker instead of auto-playing,
+  so beat-jump can be used to prepare before it. The transition panel disables
+  actions that are invalid in the current state (including repeat REC and
+  STOP & SAVE before any event), adds guarded rename/delete, a selected-file
+  event-sequence table, persistent user cue labels, and labeled markers on both
+  overview/detail waveforms. New recordings persist an `[initial]` outgoing
+  setup snapshot (tempo, fader, trim, EQ, filter); the panel reports mismatches,
+  provides MATCH SETUP, and Perform/Prime restores it at the anchor. Legacy
+  files still get BPM matching and explicitly report that EQ was not stored.
+  Verified: build clean, ctest 7/7 including hot-cue and temp-dir store CRUD
+  regressions, GUI accessibility pass confirms compact panel/library layout,
+  and `--selftest` passes.
+
 - 2026-08-16 (orchestrator): **STEMS ROUND COMPLETE.** Engine half done by
   the orchestrator (codex-stems hung and was killed): Deck::attachStems with
   seamless publish / drained replace, stem-aware render sampling (untouched
@@ -309,8 +396,7 @@ Beat FX LED messages.
   cue point previews for as long as the button is held, returning on release;
   pressing CUE elsewhere stores the current position without starting playback.
 - Pressing an unset hot cue stores the current position. Pressing a set hot cue
-  jumps to it and starts playback if the deck was paused. Hot-cue release is a
-  dispatched no-op in this pass.
+  jumps there and plays while held. Releasing stops and returns to that marker.
 
 ## Known decisions & gotchas
 

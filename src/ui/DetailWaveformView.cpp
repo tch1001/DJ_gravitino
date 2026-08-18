@@ -79,6 +79,16 @@ void DetailWaveformView::setTransitionEntry(int deck, double sec)
     update();
 }
 
+void DetailWaveformView::setTransitionCues(int deck,
+                                           const QList<double>& seconds,
+                                           const QStringList& labels)
+{
+    if (deck < 0 || deck >= kNumDecks) return;
+    transitionCueSecs_[deck] = seconds;
+    transitionCueLabels_[deck] = labels;
+    update();
+}
+
 void DetailWaveformView::setWindowSec(double sec)
 {
     double clamped = std::clamp(sec, kMinWindowSec, kMaxWindowSec);
@@ -318,6 +328,34 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
             p.fillRect(tag, c);
             p.setPen(Qt::black);
             p.drawText(tag, Qt::AlignCenter, QStringLiteral("T"));
+        }
+    }
+
+
+    // Labeled cues belonging to the selected transition.  Alternate tag rows
+    // to keep nearby moments readable without covering the waveform entirely.
+    {
+        const QColor c(0xf1, 0xc7, 0x5b);
+        p.setFont(QFont(font().family(), 8, QFont::DemiBold));
+        for (qsizetype i = 0; i < transitionCueSecs_[deck].size(); ++i) {
+            const double sec = transitionCueSecs_[deck].at(i);
+            if (sec < leftSec || sec > leftSec + windowSec_) continue;
+            const int x = xForSec(sec);
+            p.setPen(QPen(c, 1));
+            p.drawLine(x, r.top(), x, r.bottom());
+            QString label = i < transitionCueLabels_[deck].size()
+                                ? transitionCueLabels_[deck].at(i)
+                                : tr("Cue");
+            QFontMetrics fm(p.font());
+            const int labelW = std::min(150, fm.horizontalAdvance(label) + 10);
+            const int y = r.top() + 15 + (int)(i % 2) * 16;
+            QRect tag(std::clamp(x + 2, r.left(), r.right() - labelW), y,
+                      labelW, 14);
+            p.fillRect(tag, c);
+            p.setPen(Qt::black);
+            p.drawText(tag.adjusted(4, 0, -3, 0),
+                       Qt::AlignLeft | Qt::AlignVCenter,
+                       fm.elidedText(label, Qt::ElideRight, labelW - 7));
         }
     }
 }

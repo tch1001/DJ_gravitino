@@ -7,6 +7,8 @@
 #include "../analysis/TrackData.h"
 
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QStringList>
 
 #include <algorithm>
@@ -45,7 +47,11 @@ struct TransitionStore::Impl {
 TransitionStore::TransitionStore(QObject* parent)
     : QObject(parent), impl_(std::make_unique<Impl>())
 {
-    impl_->dir = QDir::homePath() + QStringLiteral("/Music/Gravitino/Transitions");
+    impl_->dir = qEnvironmentVariable("GRAVITINO_TRANSITIONS_DIR");
+    if (impl_->dir.isEmpty())
+        impl_->dir = QDir::homePath() +
+                     QStringLiteral("/Music/Gravitino/Transitions");
+    impl_->dir = QFileInfo(impl_->dir).absoluteFilePath();
     QDir().mkpath(impl_->dir);
     reload();
 }
@@ -142,18 +148,92 @@ QString hash4(const GvtFile& f)
     return QStringLiteral("%1").arg(folded, 4, 16, QLatin1Char('0'));
 }
 
+QString pathFor(const QString& dir, const GvtFile& f)
+{
+    return dir + QLatin1Char('/') + sanitizeName(f.name) + QLatin1Char('-') +
+           hash4(f) + QStringLiteral(".gvt");
+}
+
+bool isManagedPath(const QString& dir, const QString& path)
+{
+    if (path.isEmpty()) return false;
+    const QFileInfo fi(path);
+    return !fi.isSymLink() &&
+           fi.suffix().compare(QStringLiteral("gvt"), Qt::CaseInsensitive) == 0 &&
+           QDir::cleanPath(fi.absolutePath()) ==
+               QDir::cleanPath(QFileInfo(dir).absoluteFilePath());
+}
+
 } // namespace
 
 QString TransitionStore::save(GvtFile& f, QString* error)
 {
     QDir().mkpath(impl_->dir);
-    const QString path = impl_->dir + QLatin1Char('/') + sanitizeName(f.name) +
-                         QLatin1Char('-') + hash4(f) + QStringLiteral(".gvt");
+    const QString path = pathFor(impl_->dir, f);
     if (!gvtSaveFile(f, path, error))
         return {};
     f.filePath = path;
     reload();
     return path;
+}
+
+bool TransitionStore::update(const GvtFile& f, QString* error)
+{
+    if (!isManagedPath(impl_->dir, f.filePath) || !QFileInfo::exists(f.filePath)) {
+        if (error) *error = QStringLiteral("transition is not a managed file");
+        return false;
+    }
+    if (!gvtSaveFile(f, f.filePath, error))
+        return false;
+    reload();
+    return true;
+}
+
+QString TransitionStore::renameTransition(const GvtFile& f,
+                                          const QString& newName,
+                                          QString* error)
+{
+    if (!isManagedPath(impl_->dir, f.filePath) || !QFileInfo::exists(f.filePath)) {
+        if (error) *error = QStringLiteral("transition is not a managed file");
+        return {};
+    }
+    const QString trimmed = newName.trimmed();
+    if (trimmed.isEmpty()) {
+        if (error) *error = QStringLiteral("transition name cannot be empty");
+        return {};
+    }
+
+    GvtFile renamed = f;
+    renamed.name = trimmed;
+    const QString oldPath = f.filePath;
+    const QString newPath = pathFor(impl_->dir, renamed);
+    if (newPath != oldPath && QFileInfo::exists(newPath)) {
+        if (error) *error = QStringLiteral("a transition with that name already exists");
+        return {};
+    }
+    if (!gvtSaveFile(renamed, newPath, error))
+        return {};
+    if (newPath != oldPath && !QFile::remove(oldPath)) {
+        QFile::remove(newPath); // roll back the newly written copy
+        if (error) *error = QStringLiteral("could not remove the old transition file");
+        return {};
+    }
+    reload();
+    return newPath;
+}
+
+bool TransitionStore::deleteTransition(const GvtFile& f, QString* error)
+{
+    if (!isManagedPath(impl_->dir, f.filePath) || !QFileInfo::exists(f.filePath)) {
+        if (error) *error = QStringLiteral("transition is not a managed file");
+        return false;
+    }
+    if (!QFile::remove(f.filePath)) {
+        if (error) *error = QStringLiteral("could not delete %1").arg(f.filePath);
+        return false;
+    }
+    reload();
+    return true;
 }
 
 } // namespace gvt
