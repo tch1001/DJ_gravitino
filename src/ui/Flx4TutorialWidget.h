@@ -25,6 +25,7 @@ public:
     void updateCountdown(double beatsAhead);
     void setFeedback(const QString& text, const QColor& color);
     void clearExpected();
+    void setHardwareValue(const ControlEvent& event);
 
 signals:
     void controlActivated(const gvt::ControlEvent& event);
@@ -52,6 +53,8 @@ private:
     double beatsAhead_ = 0.0;
     bool activationEnabled_ = false;
     bool pulse_ = false;
+    int animationPhase_ = 0;
+    std::optional<double> hardwareValue_;
 };
 
 } // namespace gvt

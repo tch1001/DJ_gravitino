@@ -1,10 +1,11 @@
 #include "DetailWaveformView.h"
+#include "FitButton.h"
 #include "Theme.h"
 
+#include <QApplication>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTimer>
-#include <QToolButton>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -17,16 +18,24 @@ static constexpr int kLaneGap = 2;
 static constexpr double kMinWindowSec = 4.0;
 static constexpr double kMaxWindowSec = 30.0;
 
+static double displayTempoRatio(const Deck& deck)
+{
+    const double ratio = deck.tempoRatio.load(std::memory_order_acquire);
+    return std::isfinite(ratio) && ratio > 0.0
+        ? std::clamp(ratio, 0.01, 4.0)
+        : 1.0;
+}
+
 DetailWaveformView::DetailWaveformView(AudioEngine* engine, QWidget* parent)
     : QWidget(parent), engine_(engine)
 {
     setObjectName(QStringLiteral("detailWaveformView"));
     setFixedHeight(2 * kLaneHeight + kLaneGap);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    setCursor(Qt::PointingHandCursor);
+    setCursor(Qt::OpenHandCursor);
 
     auto makeZoomBtn = [this](const QString& text, const QString& tip) {
-        auto* b = new QToolButton(this);
+        auto* b = new FitToolButton(this);
         b->setText(text);
         b->setToolTip(tip);
         b->setFixedSize(18, 18);
@@ -57,6 +66,7 @@ DetailWaveformView::DetailWaveformView(AudioEngine* engine, QWidget* parent)
             double pos = deck.positionSec();
             if (deck.playing.load() || pos != lastPaintPos_[d] ||
                 t.get() != lastTrack_[d] ||
+                displayTempoRatio(deck) != lastTempoRatio_[d] ||
                 deck.loopStartSec.load() != lastLoopStart_[d] ||
                 deck.loopEndSec.load() != lastLoopEnd_[d] ||
                 deck.loopActive.load() != lastLoopActive_[d])
@@ -118,14 +128,128 @@ void DetailWaveformView::wheelEvent(QWheelEvent* ev)
 
 void DetailWaveformView::mousePressEvent(QMouseEvent* ev)
 {
+    if (ev->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(ev);
+        return;
+    }
+
     const int deck = ev->position().y() >= kLaneHeight + kLaneGap ? 1 : 0;
     Deck& d = engine_->deck(deck);
     TrackDataPtr t = d.track();
-    if (!t || t->durationSec <= 0.0 || width() <= 0) return;
-    const double secPerPx = windowSec_ / width();
+    if (!t || t->durationSec <= 0.0 || width() <= 0) {
+        QWidget::mousePressEvent(ev);
+        return;
+    }
+
+    // windowSec_ is playback/display time. A faster deck consumes more source
+    // audio in that interval, so scale its lane by the live tempo ratio.
+    const double secPerPx =
+        windowSec_ * displayTempoRatio(d) / width();
     double sec = d.positionSec() +
                  (ev->position().x() - width() / 2.0) * secPerPx;
-    d.seekSec(std::clamp(sec, 0.0, t->durationSec));
+
+    // Seeking while a loop is active should not silently kick the deck out of
+    // that loop just because the mouse strayed beyond an edge. Keep the upper
+    // limit exclusive to match Deck's audio-thread loop interval.
+    double lower = 0.0;
+    double upper = std::nextafter(t->durationSec, 0.0);
+    if (d.loopActive.load(std::memory_order_acquire)) {
+        const double loopStart = d.loopStartSec.load(std::memory_order_acquire);
+        const double loopEnd = d.loopEndSec.load(std::memory_order_acquire);
+        if (std::isfinite(loopStart) && std::isfinite(loopEnd) &&
+            loopEnd > loopStart) {
+            lower = std::clamp(loopStart, 0.0, upper);
+            upper = std::clamp(std::nextafter(loopEnd, loopStart), lower,
+                               upper);
+        }
+    }
+    sec = std::clamp(sec, lower, upper);
+
+    scratchDeck_ = deck;
+    scratchPressX_ = ev->position().x();
+    scratchAnchorSec_ = sec;
+    scratchLastSec_ = sec;
+    scratchMoved_ = false;
+    scratchTrack_ = t.get();
+
+    d.seekSec(sec);
+    d.beginScratch();
+    setCursor(Qt::ClosedHandCursor);
+    ev->accept();
+    update();
+}
+
+void DetailWaveformView::mouseMoveEvent(QMouseEvent* ev)
+{
+    if (scratchDeck_ < 0 || !(ev->buttons() & Qt::LeftButton)) {
+        QWidget::mouseMoveEvent(ev);
+        return;
+    }
+
+    Deck& d = engine_->deck(scratchDeck_);
+    TrackDataPtr t = d.track();
+    if (!t || t.get() != scratchTrack_ || t->durationSec <= 0.0 ||
+        width() <= 0) {
+        scratchDeck_ = -1;
+        scratchTrack_ = nullptr;
+        setCursor(Qt::OpenHandCursor);
+        return;
+    }
+
+    const double deltaPx = ev->position().x() - scratchPressX_;
+    if (!scratchMoved_ &&
+        std::abs(deltaPx) < QApplication::startDragDistance()) {
+        ev->accept();
+        return;
+    }
+
+    scratchMoved_ = true;
+    // The content moves with the hand: pulling right exposes an earlier part
+    // of the track beneath the fixed center playhead.
+    double sec = scratchAnchorSec_ - deltaPx * windowSec_ *
+        displayTempoRatio(d) / width();
+    double lower = 0.0;
+    double upper = std::nextafter(t->durationSec, 0.0);
+    if (d.loopActive.load(std::memory_order_acquire)) {
+        const double loopStart = d.loopStartSec.load(std::memory_order_acquire);
+        const double loopEnd = d.loopEndSec.load(std::memory_order_acquire);
+        if (std::isfinite(loopStart) && std::isfinite(loopEnd) &&
+            loopEnd > loopStart) {
+            lower = std::clamp(loopStart, 0.0, upper);
+            upper = std::clamp(std::nextafter(loopEnd, loopStart), lower,
+                               upper);
+        }
+    }
+    // Feed signed source movement into the same touch-gated scratch engine as
+    // the FLX4 platter. A stationary held waveform is silent; reversing the
+    // drag reads PCM backward instead of briefly starting normal transport.
+    sec = std::clamp(sec, lower, upper);
+    constexpr double kSecondsPerScratchTick = 0.01;
+    d.scratch((sec - scratchLastSec_) / kSecondsPerScratchTick);
+    scratchLastSec_ = sec;
+    ev->accept();
+    update();
+}
+
+void DetailWaveformView::mouseReleaseEvent(QMouseEvent* ev)
+{
+    if (scratchDeck_ < 0 || ev->button() != Qt::LeftButton) {
+        QWidget::mouseReleaseEvent(ev);
+        return;
+    }
+
+    Deck& d = engine_->deck(scratchDeck_);
+
+    // endScratch restores exactly the transport state captured on press.
+    // A simple click still behaves as a seek because press already positioned
+    // the deck and no wheel movement was queued.
+    d.endScratch();
+
+    scratchDeck_ = -1;
+    scratchTrack_ = nullptr;
+    scratchMoved_ = false;
+    setCursor(Qt::OpenHandCursor);
+    ev->accept();
     update();
 }
 
@@ -151,6 +275,8 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
     TrackDataPtr t = d.track();
     const QColor accent = deckAccent(deck);
     lastTrack_[deck] = t.get();
+    const double tempoRatio = displayTempoRatio(d);
+    lastTempoRatio_[deck] = tempoRatio;
 
     p.fillRect(r, deck == 0 ? QColor(0x14, 0x16, 0x1a)
                             : QColor(0x18, 0x14, 0x17));
@@ -175,7 +301,11 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
     const int w = r.width();
     const double pos = d.positionSec();
     lastPaintPos_[deck] = pos;
-    const double secPerPx = windowSec_ / w;
+    // Each lane spans the same amount of audible playback time. Source-track
+    // seconds expand/contract by tempoRatio, which makes equal effective BPM
+    // yield equal on-screen beat spacing across decks.
+    const double sourceWindowSec = windowSec_ * tempoRatio;
+    const double secPerPx = sourceWindowSec / w;
     const double leftSec = pos - (w / 2.0) * secPerPx;
     const int mid = r.center().y();
     const int halfMax = r.height() / 2 - 3;
@@ -240,9 +370,9 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
         return r.left() + (int)std::lround((sec - leftSec) / secPerPx);
     };
 
-    // Loop region: deck-accent shading between loopStartSec/loopEndSec —
-    // ~25% alpha while active, dimmer when bounds are stored but inactive —
-    // with brighter edge lines.
+    // Loop display.  A completed loop shades its full range.  Between LOOP IN
+    // and LOOP OUT, shade from the armed IN point up to the moving playhead so
+    // the region visibly grows while the track plays (Serato-style).
     {
         const double ls = d.loopStartSec.load();
         const double le = d.loopEndSec.load();
@@ -250,26 +380,51 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
         lastLoopStart_[deck] = ls;
         lastLoopEnd_[deck] = le;
         lastLoopActive_[deck] = active;
-        const double rightSec = leftSec + windowSec_;
-        if (ls >= 0.0 && le > ls && ls < rightSec && le > leftSec) {
+        const double rightSec = leftSec + sourceWindowSec;
+        const bool complete = ls >= 0.0 && le > ls;
+        const double visibleEnd = complete ? le : std::max(ls, pos);
+        if (ls >= 0.0 && visibleEnd > ls && ls < rightSec &&
+            visibleEnd > leftSec) {
             const int x0 = std::max(r.left(), xForSec(ls));
-            const int x1 = std::min(r.right(), xForSec(le));
+            const int x1 = std::min(r.right(), xForSec(visibleEnd));
             QColor fill = accent;
-            fill.setAlpha(active ? 64 : 28);
+            fill.setAlpha(active ? 64 : (complete ? 28 : 46));
             p.fillRect(QRect(x0, r.top(), std::max(1, x1 - x0), r.height()),
                        fill);
+        }
+
+        // LOOP IN remains visible as soon as it is armed, even when paused
+        // (and therefore before there is any region width to shade).
+        if (ls >= leftSec && ls <= rightSec) {
+            const int x = xForSec(ls);
+            QColor edge = accent.lighter(140);
+            edge.setAlpha(active || !complete ? 240 : 130);
+            QPen inPen(edge, complete ? 1 : 2);
+            if (!complete) inPen.setStyle(Qt::DashLine);
+            p.setPen(inPen);
+            p.drawLine(x, r.top(), x, r.bottom());
+
+            p.setFont(QFont(font().family(), 7, QFont::Bold));
+            const QRect tag(std::clamp(x + 2, r.left(), r.right() - 18),
+                            r.top() + 1, 18, 11);
+            p.fillRect(tag, edge);
+            p.setPen(Qt::black);
+            p.drawText(tag, Qt::AlignCenter, QStringLiteral("IN"));
+        }
+
+        if (complete && le >= leftSec && le <= rightSec) {
+            const int x = xForSec(le);
             QColor edge = accent.lighter(140);
             edge.setAlpha(active ? 230 : 110);
             p.setPen(QPen(edge, 1));
-            if (ls >= leftSec) p.drawLine(x0, r.top(), x0, r.bottom());
-            if (le <= rightSec) p.drawLine(x1, r.top(), x1, r.bottom());
+            p.drawLine(x, r.top(), x, r.bottom());
         }
     }
 
     // Beatgrid: one tick per beat, stronger every 4 (downbeat).
     if (t->bpm > 0.0) {
         const double rightSec =
-            std::min(leftSec + windowSec_, t->durationSec);
+            std::min(leftSec + sourceWindowSec, t->durationSec);
         const double firstVisibleBeat =
             std::ceil(t->beatAtSec(std::max(leftSec, 0.0)));
         for (double b = std::max(0.0, firstVisibleBeat);; b += 1.0) {
@@ -286,7 +441,7 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
     {
         const double cue = d.cuePointSec.load();
         if (cue >= 0.0 && cue <= t->durationSec && cue >= leftSec &&
-            cue <= leftSec + windowSec_) {
+            cue <= leftSec + sourceWindowSec) {
             const int x = xForSec(cue);
             p.setPen(QPen(accent.lighter(130), 1));
             p.drawLine(x, r.top(), x, r.bottom());
@@ -304,7 +459,7 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
     p.setFont(QFont(font().family(), 8, QFont::Bold));
     for (int i = 0; i < 8; ++i) {
         const double sec = t->hotCues[i];
-        if (sec < 0.0 || sec < leftSec || sec > leftSec + windowSec_)
+        if (sec < 0.0 || sec < leftSec || sec > leftSec + sourceWindowSec)
             continue;
         const int x = xForSec(sec);
         const QColor c = hotCueColor(i);
@@ -319,7 +474,7 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
     // Transition entry marker: orange line + "T" tag.
     {
         const double sec = transitionEntrySec_[deck];
-        if (sec >= 0.0 && sec >= leftSec && sec <= leftSec + windowSec_) {
+        if (sec >= 0.0 && sec >= leftSec && sec <= leftSec + sourceWindowSec) {
             const int x = xForSec(sec);
             const QColor c = transitionEntryColor();
             p.setPen(QPen(c, 2));
@@ -339,7 +494,7 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
         p.setFont(QFont(font().family(), 8, QFont::DemiBold));
         for (qsizetype i = 0; i < transitionCueSecs_[deck].size(); ++i) {
             const double sec = transitionCueSecs_[deck].at(i);
-            if (sec < leftSec || sec > leftSec + windowSec_) continue;
+            if (sec < leftSec || sec > leftSec + sourceWindowSec) continue;
             const int x = xForSec(sec);
             p.setPen(QPen(c, 1));
             p.drawLine(x, r.top(), x, r.bottom());

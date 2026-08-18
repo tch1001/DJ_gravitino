@@ -1,15 +1,21 @@
 #include "DeckWidget.h"
+#include "FitButton.h"
 #include "Theme.h"
 
 #include <QComboBox>
 #include <QDial>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPushButton>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QTimer>
@@ -166,25 +172,46 @@ void WaveformView::paintEvent(QPaintEvent*)
         }
     }
 
-    // Loop region: accent shading between loopStartSec/loopEndSec —
-    // ~25% alpha while active, dimmer when bounds are set but inactive —
-    // with brighter edge lines.
+    // Loop display.  Before OUT is set, the highlighted range grows from the
+    // armed IN marker to the live playhead.  Once complete, the fixed loop
+    // range remains shaded and the playhead visibly wraps through it.
     {
         const double ls = deck_->loopStartSec.load();
         const double le = deck_->loopEndSec.load();
         const bool active = deck_->loopActive.load();
-        if (ls >= 0.0 && le > ls && ls < t->durationSec) {
+        const bool complete = ls >= 0.0 && le > ls;
+        const double visibleEnd = complete ? le : std::max(ls, deck_->positionSec());
+        if (ls >= 0.0 && visibleEnd > ls && ls < t->durationSec) {
             const int x0 = (int)(ls / t->durationSec * w);
-            const int x1 = (int)(std::min(le, t->durationSec) /
+            const int x1 = (int)(std::min(visibleEnd, t->durationSec) /
                                  t->durationSec * w);
             QColor fill = accent;
-            fill.setAlpha(active ? 64 : 28);
+            fill.setAlpha(active ? 64 : (complete ? 28 : 46));
             p.fillRect(QRect(x0, 0, std::max(1, x1 - x0), h), fill);
+        }
+
+        if (ls >= 0.0 && ls <= t->durationSec) {
+            const int x = (int)(ls / t->durationSec * w);
+            QColor edge = accent.lighter(140);
+            edge.setAlpha(active || !complete ? 240 : 130);
+            QPen inPen(edge, complete ? 1 : 2);
+            if (!complete) inPen.setStyle(Qt::DashLine);
+            p.setPen(inPen);
+            p.drawLine(x, 0, x, h);
+
+            p.setFont(QFont(font().family(), 7, QFont::Bold));
+            QRect tag(std::clamp(x + 1, 0, std::max(0, w - 17)), 1, 17, 10);
+            p.fillRect(tag, edge);
+            p.setPen(Qt::black);
+            p.drawText(tag, Qt::AlignCenter, QStringLiteral("IN"));
+        }
+
+        if (complete && le <= t->durationSec) {
+            const int x = (int)(le / t->durationSec * w);
             QColor edge = accent.lighter(140);
             edge.setAlpha(active ? 230 : 110);
             p.setPen(QPen(edge, 1));
-            p.drawLine(x0, 0, x0, h);
-            p.drawLine(x1, 0, x1, h);
+            p.drawLine(x, 0, x, h);
         }
     }
 
@@ -273,6 +300,12 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     const QColor accent = deckAccent(deckIndex_);
     setObjectName(QStringLiteral("deckWidget%1").arg(deckIndex_));
     setProperty("panel", true);
+    loadPerformancePadSettings();
+    engine_->deck(deckIndex_).quantizeHotCues.store(
+        QSettings().value(
+            QStringLiteral("decks/%1/quantizeHotCues").arg(deckIndex_), true)
+            .toBool(),
+        std::memory_order_release);
 
     // The main column (waveform/info/transport/pads) sits next to a narrow
     // vertical tempo slider on the OUTER edge: left for deck A, right for
@@ -310,66 +343,168 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     info->addWidget(timeLabel_, 1, 1, Qt::AlignRight);
     mainCol->addLayout(info);
 
-    // Transport row: PLAY, CUE, SYNC.
+    // Transport row: PLAY, CUE, one-shot phase SYNC, per-deck QUANTIZE.
     auto* transport = new QHBoxLayout;
-    playBtn_ = new QPushButton(tr("PLAY"));
+    playBtn_ = new FitPushButton(tr("PLAY"));
     playBtn_->setCheckable(true);
-    cueBtn_ = new QPushButton(tr("CUE")); // hold-to-preview: NOT checkable
-    syncBtn_ = new QPushButton(tr("SYNC"));
+    cueBtn_ = new FitPushButton(tr("CUE")); // hold-to-preview: NOT checkable
+    syncBtn_ = new FitPushButton(tr("SYNC"));
+    syncBtn_->setToolTip(
+        tr("Align this deck to the other deck's beat phase once (does not change BPM)"));
+    quantizeBtn_ = new FitPushButton(tr("QUANT"));
+    gridBtn_ = new FitToolButton(this);
+    gridBtn_->setText(tr("GRID ▾"));
+    gridBtn_->setPopupMode(QToolButton::InstantPopup);
+    gridBtn_->setToolTip(tr("Correct this track's beat grid"));
+    auto* gridMenu = new QMenu(gridBtn_);
+    QAction* setDownbeat = gridMenu->addAction(tr("Set downbeat here"));
+    connect(setDownbeat, &QAction::triggered, this, [this] {
+        emit beatGridEditRequested(
+            deckIndex_, BeatGridCommand::SetDownbeat,
+            engine_->deck(deckIndex_).positionSec());
+    });
+    gridMenu->addSeparator();
+    QAction* gridEarlier = gridMenu->addAction(tr("Shift grid earlier 10 ms"));
+    connect(gridEarlier, &QAction::triggered, this, [this] {
+        emit beatGridEditRequested(
+            deckIndex_, BeatGridCommand::Nudge, -0.010);
+    });
+    QAction* gridLater = gridMenu->addAction(tr("Shift grid later 10 ms"));
+    connect(gridLater, &QAction::triggered, this, [this] {
+        emit beatGridEditRequested(
+            deckIndex_, BeatGridCommand::Nudge, 0.010);
+    });
+    gridMenu->addSeparator();
+    QAction* halfBpm = gridMenu->addAction(tr("BPM ÷ 2"));
+    connect(halfBpm, &QAction::triggered, this, [this] {
+        emit beatGridEditRequested(
+            deckIndex_, BeatGridCommand::HalveBpm, 0.0);
+    });
+    QAction* doubleBpm = gridMenu->addAction(tr("BPM × 2"));
+    connect(doubleBpm, &QAction::triggered, this, [this] {
+        emit beatGridEditRequested(
+            deckIndex_, BeatGridCommand::DoubleBpm, 0.0);
+    });
+    QAction* editBpm = gridMenu->addAction(tr("Edit BPM…"));
+    connect(editBpm, &QAction::triggered, this, [this] {
+        TrackDataPtr track = engine_->deck(deckIndex_).track();
+        if (!track) {
+            showPadFeedback(tr("Load a track before editing its beat grid"));
+            return;
+        }
+        bool ok = false;
+        const double bpm = QInputDialog::getDouble(
+            this, tr("Edit beat-grid BPM"), tr("BPM:"), track->bpm,
+            20.0, 400.0, 3, &ok, Qt::WindowFlags(), 0.001);
+        if (ok) {
+            emit beatGridEditRequested(
+                deckIndex_, BeatGridCommand::SetBpm, bpm);
+        }
+    });
+    gridBtn_->setMenu(gridMenu);
+    quantizeBtn_->setCheckable(true);
+    quantizeBtn_->setChecked(
+        engine_->deck(deckIndex_).quantizeHotCues.load());
+    quantizeBtn_->setToolTip(
+        tr("Quantize hot cues and manual loop IN/OUT to whole beats"));
     cueBtn_->setToolTip(
         tr("Hold to preview from cue; press PLAY while held to continue playing"));
-    for (QPushButton* b : {playBtn_, cueBtn_, syncBtn_})
+    for (QPushButton* b : {playBtn_, cueBtn_, syncBtn_, quantizeBtn_})
         b->setMinimumHeight(26);
+    gridBtn_->setMinimumHeight(26);
     playBtn_->setStyleSheet(
+        QStringLiteral("QPushButton:checked { background:%1; color:black; "
+                       "font-weight:bold; }")
+            .arg(accent.name()));
+    quantizeBtn_->setStyleSheet(
         QStringLiteral("QPushButton:checked { background:%1; color:black; "
                        "font-weight:bold; }")
             .arg(accent.name()));
     transport->addWidget(playBtn_);
     transport->addWidget(cueBtn_);
     transport->addWidget(syncBtn_);
+    transport->addWidget(quantizeBtn_);
+    transport->addWidget(gridBtn_);
     mainCol->addLayout(transport);
 
-    // 8 hot-cue pads, 2 rows of 4 small squares. Assigned pads preview from
-    // the marker while held, then stop/return on release unless PLAY latches it.
+    // Eight FLX4-style performance pads. The normal mode keys remain visible
+    // next to the pads; shifted modes are in the SHIFT MODES popup. HOT CUE
+    // preserves hold-preview and PLAY-latch semantics from the deck engine.
+    auto* padsSection = new QVBoxLayout;
+    padsSection->setSpacing(2);
+    auto* padsAndModes = new QHBoxLayout;
+    padsAndModes->setSpacing(6);
     auto* cues = new QGridLayout;
     cues->setSpacing(3);
     for (int i = 0; i < 8; ++i) {
-        auto* b = new QPushButton(QString::number(i + 1));
-        b->setFixedSize(26, 26);
-        b->setToolTip(tr("Hot cue %1 — hold: preview, PLAY: continue, release: return; "
-                         "right- or shift-click: clear")
-                          .arg(i + 1));
+        auto* b = new FitPushButton(QString::number(i + 1));
+        b->setFixedSize(48, 28);
+        b->setFocusPolicy(Qt::NoFocus);
         b->setContextMenuPolicy(Qt::CustomContextMenu);
         hotcueBtns_[i] = b;
         cues->addWidget(b, i / 4, i % 4, Qt::AlignLeft);
-        const auto hotCueId =
-            (ControlId)((int)ControlId::HotCue1 + i);
-        connect(b, &QPushButton::pressed, this, [this, i, hotCueId] {
-            if (QGuiApplication::keyboardModifiers().testFlag(
-                    Qt::ShiftModifier)) {
-                if (TrackDataPtr t = engine_->deck(deckIndex_).track()) {
-                    t->hotCues[i] = -1; // clear via TrackData hotCues array
-                    syncHotCueButtons();
-                    waveform_->update();
-                }
-                return;
-            }
-            dispatch(hotCueId, 1.0);
-            syncHotCueButtons();
-            waveform_->update();
-        });
+        connect(b, &QPushButton::pressed, this,
+                [this, i] { handlePerformancePad(i, true); });
         connect(b, &QPushButton::released, this,
-                [this, hotCueId] { dispatch(hotCueId, 0.0); });
-        connect(b, &QPushButton::customContextMenuRequested, this, [this, i] {
-            if (TrackDataPtr t = engine_->deck(deckIndex_).track()) {
-                t->hotCues[i] = -1; // clear via TrackData hotCues array
-                syncHotCueButtons();
-                waveform_->update();
-            }
+                [this, i] { handlePerformancePad(i, false); });
+        connect(b, &QPushButton::customContextMenuRequested, this,
+                [this, b, i](const QPoint& pos) {
+            configurePerformancePad(i, b->mapToGlobal(pos));
         });
     }
-    cues->setColumnStretch(4, 1);
-    mainCol->addLayout(cues);
+    padsAndModes->addLayout(cues);
+
+    auto* modes = new QGridLayout;
+    modes->setSpacing(2);
+    static constexpr PerformancePadMode kNormalModes[4] = {
+        PerformancePadMode::HotCue, PerformancePadMode::PadFx1,
+        PerformancePadMode::BeatJump, PerformancePadMode::Sampler};
+    for (int i = 0; i < 4; ++i) {
+        auto* b = new FitPushButton(
+            QLatin1String(performancePadModeLabel(kNormalModes[i])), this);
+        b->setFixedHeight(24);
+        b->setMinimumWidth(68);
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setToolTip(tr("Select %1 performance pads")
+                          .arg(QLatin1String(
+                              performancePadModeLabel(kNormalModes[i]))));
+        const PerformancePadMode mode = kNormalModes[i];
+        connect(b, &QPushButton::clicked, this,
+                [this, mode] { setPerformancePadMode(mode); });
+        normalModeBtns_[i] = b;
+        modes->addWidget(b, i / 3, i % 3);
+    }
+
+    shiftedModesBtn_ = new FitToolButton(this);
+    shiftedModesBtn_->setText(tr("SHIFT MODES ▾"));
+    shiftedModesBtn_->setPopupMode(QToolButton::InstantPopup);
+    shiftedModesBtn_->setToolTip(
+        tr("Show KEYBOARD, PAD FX2, BEAT LOOP, and KEY SHIFT"));
+    shiftedModesBtn_->setFocusPolicy(Qt::NoFocus);
+    shiftedModesBtn_->setFixedHeight(22);
+    auto* shiftedMenu = new QMenu(shiftedModesBtn_);
+    static constexpr PerformancePadMode kShiftModes[4] = {
+        PerformancePadMode::Keyboard, PerformancePadMode::PadFx2,
+        PerformancePadMode::BeatLoop, PerformancePadMode::KeyShift};
+    for (const PerformancePadMode mode : kShiftModes) {
+        QAction* action = shiftedMenu->addAction(
+            QLatin1String(performancePadModeLabel(mode)));
+        connect(action, &QAction::triggered, this,
+                [this, mode] { setPerformancePadMode(mode); });
+    }
+    shiftedModesBtn_->setMenu(shiftedMenu);
+    modes->addWidget(shiftedModesBtn_, 2, 0, 1, 3);
+    padsAndModes->addLayout(modes);
+    padsAndModes->addStretch(1);
+    padsSection->addLayout(padsAndModes);
+
+    padStatusLabel_ = new QLabel(this);
+    padStatusLabel_->setMinimumHeight(13);
+    padStatusLabel_->setStyleSheet(
+        QStringLiteral("color:%1; font-size:9px;").arg(themeDimText().name()));
+    padsSection->addWidget(padStatusLabel_);
+    mainCol->addLayout(padsSection);
+    syncPerformancePadUi();
 
     // Loop / beat-jump section: one compact row below the hot cues.
     // [1/2][1][2][4][8] auto-loop · [IN][OUT][EXIT] manual · [<½][2×>]
@@ -378,7 +513,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     auto* loopRow = new QHBoxLayout;
     loopRow->setSpacing(2);
     auto mkLoopBtn = [&](const QString& text, const QString& tip) {
-        auto* b = new QPushButton(text, this);
+        auto* b = new FitPushButton(text, this);
         b->setFixedHeight(18);
         b->setMinimumWidth(24);
         b->setStyleSheet(QString::fromLatin1(kLoopBtnBase));
@@ -462,7 +597,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     connect(fxTypeCombo_, &QComboBox::activated, this,
             [this](int index) { dispatch(ControlId::FxType, index); });
 
-    fxOnBtn_ = new QPushButton(tr("ON"), this);
+    fxOnBtn_ = new FitPushButton(tr("ON"), this);
     fxOnBtn_->setCheckable(true);
     fxOnBtn_->setFixedHeight(18);
     fxOnBtn_->setMinimumWidth(26);
@@ -494,7 +629,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     fxRow->addSpacing(4);
     mkFxLabel(tr("BEATS"));
     auto mkBeatsBtn = [&](const QString& text, const QString& tip) {
-        auto* b = new QPushButton(text, this);
+        auto* b = new FitPushButton(text, this);
         b->setFixedHeight(18);
         b->setFixedWidth(18);
         b->setStyleSheet(QString::fromLatin1(kLoopBtnBase));
@@ -537,7 +672,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
                              .arg(themeDimText().name()));
         stemsRow->addWidget(l);
     }
-    stemsBtn_ = new QPushButton(tr("STEMS"), this);
+    stemsBtn_ = new FitPushButton(tr("STEMS"), this);
     stemsBtn_->setFixedHeight(18);
     stemsBtn_->setStyleSheet(QString::fromLatin1(kLoopBtnBase));
     stemsBtn_->setFocusPolicy(Qt::NoFocus);
@@ -560,7 +695,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
         {"DRUMS", "#e05a8a", ControlId::StemDrums},
     };
     for (int i = 0; i < 4; ++i) {
-        auto* b = new QPushButton(QLatin1String(kStemPads[i].text), this);
+        auto* b = new FitPushButton(QLatin1String(kStemPads[i].text), this);
         b->setCheckable(true);
         b->setChecked(true);   // all stems audible by default
         b->setEnabled(false);  // until separation finishes
@@ -641,6 +776,9 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
             [this] { dispatch(ControlId::Cue, 0.0); });
     connect(syncBtn_, &QPushButton::clicked, this,
             [this] { dispatch(ControlId::TempoSync); });
+    connect(quantizeBtn_, &QPushButton::toggled, this, [this](bool enabled) {
+        dispatch(ControlId::Quantize, enabled ? 1.0 : 0.0);
+    });
     connect(tempoSlider_, &QSlider::valueChanged, this,
             &DeckWidget::onTempoSlider);
     connect(tempoSlider_, &QSlider::sliderReleased, this, [this] {
@@ -671,6 +809,819 @@ void DeckWidget::setTransitionCues(const QList<double>& seconds,
     waveform_->setTransitionCues(seconds, labels);
 }
 
+QWidget* DeckWidget::controlWidget(ControlId control) const
+{
+    return control == ControlId::Tempo ? tempoSlider_ : nullptr;
+}
+
+void DeckWidget::loadPerformancePadSettings()
+{
+    QSettings settings;
+    for (int modeIndex = 0; modeIndex < kPerformanceModeCount; ++modeIndex) {
+        const auto mode = static_cast<PerformancePadMode>(modeIndex);
+        for (int pad = 0; pad < kPerformancePadCount; ++pad) {
+            PerformancePadAssignment assignment =
+                defaultPerformancePadAssignment(mode, pad);
+            const QString base = QStringLiteral("performancePads/deck%1/%2/pad%3/")
+                .arg(deckIndex_)
+                .arg(QLatin1String(performancePadModeKey(mode)))
+                .arg(pad + 1);
+            assignment.value = settings.value(base + QStringLiteral("value"),
+                                                assignment.value).toDouble();
+            assignment.fxType = settings.value(base + QStringLiteral("fxType"),
+                                                 assignment.fxType).toInt();
+            assignment.fxWet = settings.value(base + QStringLiteral("fxWet"),
+                                                assignment.fxWet).toDouble();
+            assignment.fxBeats = settings.value(base + QStringLiteral("fxBeats"),
+                                                  assignment.fxBeats).toDouble();
+            assignment.label = settings.value(
+                base + QStringLiteral("label"),
+                QString::fromStdString(assignment.label)).toString().toStdString();
+            assignment.resource = settings.value(
+                base + QStringLiteral("resource"),
+                QString::fromStdString(assignment.resource)).toString().toStdString();
+            padAssignments_[modeIndex][pad] =
+                sanitizePerformancePadAssignment(mode, pad, assignment);
+        }
+    }
+
+    const int storedMode = settings.value(
+        QStringLiteral("performancePads/deck%1/selectedMode").arg(deckIndex_),
+        static_cast<int>(PerformancePadMode::HotCue)).toInt();
+    if (storedMode >= 0 && storedMode < kPerformanceModeCount) {
+        padMode_ = static_cast<PerformancePadMode>(storedMode);
+        // The former host-only SAVED LOOP bank now shares the FLX4's real
+        // SAMPLER bank. Preserve the user's selected function across upgrade.
+        if (padMode_ == PerformancePadMode::SavedLoop)
+            padMode_ = PerformancePadMode::Sampler;
+    }
+}
+
+void DeckWidget::savePerformancePadAssignment(PerformancePadMode mode, int pad)
+{
+    if (pad < 0 || pad >= kPerformancePadCount) return;
+    const int modeIndex = static_cast<int>(mode);
+    if (modeIndex < 0 || modeIndex >= kPerformanceModeCount) return;
+
+    const auto& assignment = padAssignments_[modeIndex][pad];
+    const QString base = QStringLiteral("performancePads/deck%1/%2/pad%3/")
+        .arg(deckIndex_)
+        .arg(QLatin1String(performancePadModeKey(mode)))
+        .arg(pad + 1);
+    QSettings settings;
+    settings.setValue(base + QStringLiteral("value"), assignment.value);
+    settings.setValue(base + QStringLiteral("fxType"), assignment.fxType);
+    settings.setValue(base + QStringLiteral("fxWet"), assignment.fxWet);
+    settings.setValue(base + QStringLiteral("fxBeats"), assignment.fxBeats);
+    settings.setValue(base + QStringLiteral("label"),
+                      QString::fromStdString(assignment.label));
+    settings.setValue(base + QStringLiteral("resource"),
+                      QString::fromStdString(assignment.resource));
+}
+
+void DeckWidget::savePerformancePadMode()
+{
+    QSettings().setValue(
+        QStringLiteral("performancePads/deck%1/selectedMode").arg(deckIndex_),
+        static_cast<int>(padMode_));
+}
+
+void DeckWidget::setPerformancePadMode(PerformancePadMode mode)
+{
+    if (mode == PerformancePadMode::SavedLoop)
+        mode = PerformancePadMode::Sampler;
+    const int modeIndex = static_cast<int>(mode);
+    if (modeIndex < 0 || modeIndex >= kPerformanceModeCount)
+        return;
+
+    if (mode == padMode_) {
+        syncPerformancePadUi();
+        return;
+    }
+
+    // A mode change must never strand a held hot-cue preview or a temporary
+    // FX insert. Release each pressed pad using the mode it started in.
+    for (int pad = 0; pad < kPerformancePadCount; ++pad) {
+        if (padIsPressed_[pad]) handlePerformancePad(pad, false);
+    }
+
+    padMode_ = mode;
+    savePerformancePadMode();
+    syncPerformancePadUi();
+
+    const QString modeLabel =
+        QLatin1String(performancePadModeLabel(padMode_));
+    if (padMode_ == PerformancePadMode::Sampler) {
+        showPadFeedback(
+            tr("SAMPLER / SAVED LOOPS · empty pad saves the active loop; "
+               "filled loop starts it; sampler files remain programmable"));
+    } else if (padMode_ == PerformancePadMode::Keyboard ||
+               padMode_ == PerformancePadMode::KeyShift) {
+        showPadFeedback(tr("%1 is programmable; pitch-shift audio is not available yet")
+                            .arg(modeLabel));
+    } else {
+        showPadFeedback(tr("%1 · right-click a pad to program it").arg(modeLabel));
+    }
+}
+
+void DeckWidget::triggerPerformancePad(
+    PerformancePadMode mode, int pad, bool pressed)
+{
+    if (pad < 0 || pad >= kPerformancePadCount)
+        return;
+    // A late release belongs to the layer in which the pad was pressed; it
+    // must not switch the UI back after the user selected another layer.
+    if (pressed && mode != padMode_)
+        setPerformancePadMode(mode);
+    handlePerformancePad(pad, pressed);
+}
+
+void DeckWidget::clearHotCue(int pad)
+{
+    if (pad < 0 || pad >= kPerformancePadCount)
+        return;
+    if (TrackDataPtr track = engine_->deck(deckIndex_).track()) {
+        track->hotCues[pad] = -1.0;
+        emit trackPerformanceMetadataChanged(deckIndex_);
+        syncPerformancePadUi();
+        waveform_->update();
+        showPadFeedback(tr("Removed hot cue %1").arg(pad + 1));
+    }
+}
+
+unsigned int DeckWidget::performancePadLedMask(
+    PerformancePadMode mode) const
+{
+    const int modeIndex = static_cast<int>(mode);
+    if (modeIndex < 0 || modeIndex >= kPerformanceModeCount)
+        return 0;
+
+    const TrackDataPtr track = engine_->deck(deckIndex_).track();
+    unsigned int mask = 0;
+    for (int pad = 0; pad < kPerformancePadCount; ++pad) {
+        const auto& assignment = padAssignments_[modeIndex][pad];
+        bool enabled = false;
+        switch (assignment.action) {
+        case PerformancePadAction::HotCue:
+            enabled = track && track->hotCues[pad] >= 0.0;
+            break;
+        case PerformancePadAction::SamplerSlot:
+            enabled = !assignment.resource.empty() ||
+                      (track && track->savedLoops[pad].isSet());
+            break;
+        case PerformancePadAction::SavedLoop:
+            enabled = track && track->savedLoops[pad].isSet();
+            break;
+        case PerformancePadAction::FxHold:
+        case PerformancePadAction::BeatJump:
+        case PerformancePadAction::BeatLoop:
+        case PerformancePadAction::KeyboardNote:
+        case PerformancePadAction::KeyShift:
+            enabled = track != nullptr;
+            break;
+        }
+        if (enabled)
+            mask |= 1U << static_cast<unsigned int>(pad);
+    }
+    return mask;
+}
+
+unsigned int DeckWidget::performancePadPressedMask() const
+{
+    unsigned int mask = 0;
+    for (int pad = 0; pad < kPerformancePadCount; ++pad) {
+        if (padIsPressed_[pad])
+            mask |= 1U << static_cast<unsigned int>(pad);
+    }
+    return mask;
+}
+
+void DeckWidget::beatGridChanged()
+{
+    syncLoopButtons();
+    waveform_->update();
+    refresh();
+}
+
+void DeckWidget::performanceMetadataChanged()
+{
+    syncPerformancePadUi();
+    waveform_->update();
+}
+
+void DeckWidget::syncPerformancePadUi()
+{
+    const QColor accent = deckAccent(deckIndex_);
+    const QString modeBase = QStringLiteral(
+        "QPushButton { padding:1px 4px; font-size:8px; }");
+    const QString modeLit = modeBase + QStringLiteral(
+        "QPushButton { background:%1; color:black; font-weight:bold; }")
+        .arg(accent.name());
+    static constexpr PerformancePadMode kNormalModes[4] = {
+        PerformancePadMode::HotCue, PerformancePadMode::PadFx1,
+        PerformancePadMode::BeatJump, PerformancePadMode::Sampler};
+    for (int i = 0; i < 4; ++i) {
+        if (normalModeBtns_[i])
+            normalModeBtns_[i]->setStyleSheet(
+                padMode_ == kNormalModes[i] ? modeLit : modeBase);
+    }
+
+    if (shiftedModesBtn_) {
+        const bool shifted = performancePadModeIsShifted(padMode_);
+        shiftedModesBtn_->setText(
+            shifted
+                ? tr("SHIFT: %1 ▾").arg(
+                      QLatin1String(performancePadModeLabel(padMode_)))
+                : tr("SHIFT MODES ▾"));
+        shiftedModesBtn_->setStyleSheet(
+            shifted
+                ? QStringLiteral("QToolButton { background:%1; color:black; "
+                                 "font-size:8px; font-weight:bold; }")
+                      .arg(accent.name())
+                : QStringLiteral("QToolButton { font-size:8px; }"));
+    }
+
+    const int modeIndex = static_cast<int>(padMode_);
+    TrackDataPtr track = engine_->deck(deckIndex_).track();
+    const bool hasTrack = track != nullptr;
+    for (int pad = 0; pad < kPerformancePadCount; ++pad) {
+        QPushButton* button = hotcueBtns_[pad];
+        if (!button) continue;
+        const auto& assignment = padAssignments_[modeIndex][pad];
+        button->setText(QString::fromStdString(assignment.label).left(8));
+        // Keep right-click programming available without a loaded track.
+        // Left-click execution performs its own track guard with feedback.
+        button->setEnabled(true);
+
+        QString color;
+        QString tooltip;
+        switch (assignment.action) {
+        case PerformancePadAction::HotCue: {
+            const bool set = track && track->hotCues[pad] >= 0.0;
+            if (set) color = hotCueColor(pad).name();
+            tooltip = tr("Hot cue %1 — hold: preview, PLAY: continue; "
+                         "SHIFT-click or right-click: remove")
+                          .arg(pad + 1);
+            break;
+        }
+        case PerformancePadAction::FxHold: {
+            static constexpr const char* names[3] = {"ECHO", "REVERB", "FLANGER"};
+            static constexpr const char* colors[3] = {"#38c9b8", "#a873e8", "#e8a13a"};
+            color = QLatin1String(colors[std::clamp(assignment.fxType, 0, 2)]);
+            tooltip = tr("Hold %1 at %2% wet, %3 beat(s); release restores the prior FX. "
+                         "Right-click to program")
+                .arg(QLatin1String(names[std::clamp(assignment.fxType, 0, 2)]))
+                .arg(qRound(assignment.fxWet * 100.0))
+                .arg(assignment.fxBeats);
+            break;
+        }
+        case PerformancePadAction::BeatJump:
+            color = QStringLiteral("#3977e8");
+            tooltip = tr("Jump %1 beat(s), beat-aligned. Right-click to program")
+                          .arg(assignment.value);
+            break;
+        case PerformancePadAction::BeatLoop:
+            color = QStringLiteral("#e8a13a");
+            tooltip = tr("Start a %1-beat loop. Right-click to program")
+                          .arg(assignment.value);
+            break;
+        case PerformancePadAction::SavedLoop: {
+            const SavedLoopSlot* slot = track ? &track->savedLoops[pad] : nullptr;
+            const bool set = slot && slot->isSet();
+            if (set) {
+                color = QStringLiteral("#e8a13a");
+                button->setText(slot->label.isEmpty()
+                    ? tr("L%1").arg(pad + 1) : slot->label.left(8));
+                tooltip = tr("Start saved loop %1 (%2–%3 s); every press "
+                             "restarts from its beginning. Use LOOP EXIT to leave it. "
+                             "Right-click to rename, replace, or clear")
+                              .arg(pad + 1)
+                              .arg(slot->startSec, 0, 'f', 2)
+                              .arg(slot->endSec, 0, 'f', 2);
+            } else {
+                tooltip = tr("Empty saved-loop slot %1; activate a loop, then press to save it")
+                              .arg(pad + 1);
+            }
+            break;
+        }
+        case PerformancePadAction::SamplerSlot: {
+            const SavedLoopSlot* slot = track ? &track->savedLoops[pad] : nullptr;
+            if (slot && slot->isSet()) {
+                color = QStringLiteral("#e8a13a");
+                button->setText(slot->label.isEmpty()
+                    ? tr("L%1").arg(pad + 1) : slot->label.left(8));
+                tooltip = tr("Start saved loop %1 (%2–%3 s); every press restarts "
+                             "from its beginning. Use LOOP EXIT to leave it. "
+                             "Right-click to edit the loop or sampler assignment")
+                              .arg(pad + 1)
+                              .arg(slot->startSec, 0, 'f', 2)
+                              .arg(slot->endSec, 0, 'f', 2);
+            } else {
+                color = QStringLiteral("#d15a96");
+                tooltip = assignment.resource.empty()
+                    ? tr("Empty sampler / saved-loop slot; activate a loop and press "
+                         "to save it, or right-click to assign audio")
+                    : tr("Sampler assigned: %1 (sample playback is not available yet); "
+                         "an active loop can still be saved here")
+                          .arg(QString::fromStdString(assignment.resource));
+            }
+            break;
+        }
+        case PerformancePadAction::KeyboardNote:
+            color = QStringLiteral("#7a5ae8");
+            tooltip = tr("Programmed note %1 (pitch-play engine unavailable); right-click to change")
+                          .arg(assignment.value);
+            break;
+        case PerformancePadAction::KeyShift:
+            color = QStringLiteral("#65b4df");
+            tooltip = tr("Programmed key shift %1 semitone(s) (pitch engine unavailable); "
+                         "right-click to change")
+                          .arg(assignment.value);
+            break;
+        }
+        button->setToolTip(tooltip);
+
+        if (color.isEmpty()) {
+            button->setStyleSheet(QStringLiteral(
+                "QPushButton { font-size:9px; font-weight:bold; }"));
+        } else {
+            button->setStyleSheet(QStringLiteral(
+                "QPushButton { border:1px solid %1; color:%1; font-size:9px; "
+                "font-weight:bold; background:%2; } "
+                "QPushButton:pressed { background:%1; color:black; }")
+                .arg(color, QColor(color).darker(330).name()));
+        }
+    }
+
+    emit performancePadStateChanged(
+        deckIndex_, static_cast<int>(padMode_),
+        performancePadLedMask(padMode_), performancePadPressedMask());
+}
+
+void DeckWidget::handlePerformancePad(int pad, bool pressed)
+{
+    if (pad < 0 || pad >= kPerformancePadCount) return;
+
+    if (!pressed) {
+        if (!padIsPressed_[pad]) return;
+        const PerformancePadMode pressedMode = pressedPadModes_[pad];
+        const auto& assignment =
+            padAssignments_[static_cast<int>(pressedMode)][pad];
+        if (assignment.action == PerformancePadAction::HotCue) {
+            const auto id = static_cast<ControlId>(
+                static_cast<int>(ControlId::HotCue1) + pad);
+            dispatch(id, 0.0);
+        } else if (assignment.action == PerformancePadAction::FxHold) {
+            endPadFx(pad);
+        }
+        padIsPressed_[pad] = false;
+        syncPerformancePadUi();
+        return;
+    }
+
+    if (padIsPressed_[pad]) return;
+    const auto& assignment =
+        padAssignments_[static_cast<int>(padMode_)][pad];
+    TrackDataPtr track = engine_->deck(deckIndex_).track();
+    if (!track && performancePadActionIsSupported(assignment.action)) {
+        showPadFeedback(tr("Load a track before using performance pads"));
+        return;
+    }
+    if (assignment.action == PerformancePadAction::HotCue &&
+        QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
+        track->hotCues[pad] = -1.0;
+        emit trackPerformanceMetadataChanged(deckIndex_);
+        syncPerformancePadUi();
+        waveform_->update();
+        showPadFeedback(tr("Removed hot cue %1").arg(pad + 1));
+        return;
+    }
+
+    padIsPressed_[pad] = true;
+    pressedPadModes_[pad] = padMode_;
+    switch (assignment.action) {
+    case PerformancePadAction::HotCue: {
+        const bool wasSet = track->hotCues[pad] >= 0.0;
+        const auto id = static_cast<ControlId>(
+            static_cast<int>(ControlId::HotCue1) + pad);
+        dispatch(id, 1.0);
+        if (!wasSet && track->hotCues[pad] >= 0.0)
+            emit trackPerformanceMetadataChanged(deckIndex_);
+        waveform_->update();
+        break;
+    }
+    case PerformancePadAction::FxHold:
+        beginPadFx(pad, assignment);
+        break;
+    case PerformancePadAction::BeatJump:
+        dispatch(ControlId::BeatJump, assignment.value);
+        break;
+    case PerformancePadAction::BeatLoop:
+        dispatch(ControlId::LoopAuto, assignment.value);
+        waveform_->update();
+        break;
+    case PerformancePadAction::SavedLoop:
+    case PerformancePadAction::SamplerSlot: {
+        Deck& deck = engine_->deck(deckIndex_);
+        SavedLoopSlot& slot = track->savedLoops[pad];
+        if (!slot.isSet()) {
+            const double start = deck.loopStartSec.load();
+            const double end = deck.loopEndSec.load();
+            if (!deck.loopActive.load() || !std::isfinite(start) ||
+                !std::isfinite(end) || !(end > start)) {
+                showPadFeedback(
+                    assignment.resource.empty()
+                        ? tr("Activate a loop to save it here, or right-click to "
+                             "assign a sampler file")
+                        : tr("Sampler assignment saved, but sample playback is not "
+                             "available yet"));
+                break;
+            }
+            slot.startSec = start;
+            slot.endSec = end;
+            slot.label = tr("L%1").arg(pad + 1);
+            emit trackPerformanceMetadataChanged(deckIndex_);
+            showPadFeedback(tr("Saved active loop to %1").arg(slot.label));
+        } else {
+            if (deck.retriggerSavedLoop(slot.startSec, slot.endSec)) {
+                // retriggerSavedLoop() updates audio immediately; publish an
+                // idempotent PLAY as the musical gesture so transition
+                // recording captures both its outgoing-relative time and the
+                // incoming deck's exact loop-start anchor. Replay seeks to
+                // that anchor before applying PLAY.
+                dispatch(ControlId::Play);
+                showPadFeedback(tr("Started %1").arg(
+                    slot.label.isEmpty() ? tr("saved loop %1").arg(pad + 1)
+                                         : slot.label));
+            } else {
+                showPadFeedback(tr("Could not start saved loop %1")
+                                    .arg(pad + 1));
+            }
+        }
+        waveform_->update();
+        break;
+    }
+    case PerformancePadAction::KeyboardNote:
+        showPadFeedback(tr("Note %1 is programmed; pitch-play audio is not available yet")
+                            .arg(QString::fromStdString(assignment.label)));
+        break;
+    case PerformancePadAction::KeyShift:
+        showPadFeedback(tr("Key shift %1 is programmed; pitch-shift audio is not available yet")
+                            .arg(QString::fromStdString(assignment.label)));
+        break;
+    }
+
+    // Trigger-only pads do not need a later release. HOT CUE and FX do.
+    if (assignment.action != PerformancePadAction::HotCue &&
+        assignment.action != PerformancePadAction::FxHold)
+        padIsPressed_[pad] = false;
+    syncPerformancePadUi();
+}
+
+void DeckWidget::beginPadFx(
+    int pad, const PerformancePadAssignment& assignment)
+{
+    if (padFxSnapshot_.valid) {
+        const int previousPad = padFxSnapshot_.pad;
+        endPadFx(previousPad);
+        if (previousPad >= 0 && previousPad < kPerformancePadCount)
+            padIsPressed_[previousPad] = false;
+    }
+
+    Deck& deck = engine_->deck(deckIndex_);
+    padFxSnapshot_.valid = true;
+    padFxSnapshot_.pad = pad;
+    padFxSnapshot_.type = deck.fxType.load();
+    padFxSnapshot_.on = deck.fxOn.load();
+    padFxSnapshot_.wet = deck.fxWet.load();
+    padFxSnapshot_.beats = deck.fxBeats.load();
+
+    dispatch(ControlId::FxType, assignment.fxType);
+    dispatch(ControlId::FxWet, assignment.fxWet);
+    dispatch(ControlId::FxBeats, assignment.fxBeats);
+    dispatch(ControlId::FxOn, 1.0);
+}
+
+void DeckWidget::endPadFx(int pad)
+{
+    if (!padFxSnapshot_.valid || padFxSnapshot_.pad != pad) return;
+    const PadFxSnapshot snapshot = padFxSnapshot_;
+    padFxSnapshot_.valid = false;
+    padFxSnapshot_.pad = -1;
+
+    // Fully disengage the momentary effect before restoring the previous slot.
+    // All changes still travel through ControlBus and remain recordable.
+    dispatch(ControlId::FxOn, 0.0);
+    dispatch(ControlId::FxType, snapshot.type);
+    dispatch(ControlId::FxWet, snapshot.wet);
+    dispatch(ControlId::FxBeats, snapshot.beats);
+    if (snapshot.on) dispatch(ControlId::FxOn, 1.0);
+}
+
+void DeckWidget::showPadFeedback(const QString& text)
+{
+    if (!padStatusLabel_) return;
+    const int serial = ++padFeedbackSerial_;
+    padStatusLabel_->setText(text);
+    QTimer::singleShot(3500, this, [this, serial] {
+        if (serial == padFeedbackSerial_) padStatusLabel_->clear();
+    });
+}
+
+void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
+{
+    if (pad < 0 || pad >= kPerformancePadCount) return;
+    TrackDataPtr track = engine_->deck(deckIndex_).track();
+    if (padMode_ == PerformancePadMode::HotCue) {
+        if (track) {
+            track->hotCues[pad] = -1.0;
+            emit trackPerformanceMetadataChanged(deckIndex_);
+            syncPerformancePadUi();
+            waveform_->update();
+            showPadFeedback(tr("Removed hot cue %1").arg(pad + 1));
+        }
+        return;
+    }
+
+    if (padMode_ == PerformancePadMode::Sampler ||
+        padMode_ == PerformancePadMode::SavedLoop) {
+        if (!track) {
+            showPadFeedback(tr("Load a track before editing sampler / saved-loop pads"));
+            return;
+        }
+        SavedLoopSlot& slot = track->savedLoops[pad];
+        auto& sampler = padAssignments_[
+            static_cast<int>(PerformancePadMode::Sampler)][pad];
+        Deck& deck = engine_->deck(deckIndex_);
+        const double activeStart = deck.loopStartSec.load();
+        const double activeEnd = deck.loopEndSec.load();
+        const bool canCapture = deck.loopActive.load() &&
+            std::isfinite(activeStart) && std::isfinite(activeEnd) &&
+            activeEnd > activeStart;
+
+        QMenu menu(this);
+        QAction* heading = menu.addAction(
+            tr("SAMPLER / SAVED LOOPS · PAD %1").arg(pad + 1));
+        heading->setEnabled(false);
+        menu.addSeparator();
+        QAction* capture = menu.addAction(
+            slot.isSet() ? tr("Replace with active loop") : tr("Save active loop"));
+        capture->setEnabled(canCapture);
+        connect(capture, &QAction::triggered, this, [this, track, pad,
+                                                     activeStart, activeEnd] {
+            SavedLoopSlot& changed = track->savedLoops[pad];
+            changed.startSec = activeStart;
+            changed.endSec = activeEnd;
+            if (changed.label.isEmpty()) changed.label = tr("L%1").arg(pad + 1);
+            emit trackPerformanceMetadataChanged(deckIndex_);
+            syncPerformancePadUi();
+            showPadFeedback(tr("Saved active loop to %1").arg(changed.label));
+        });
+        QAction* rename = menu.addAction(tr("Rename saved loop…"));
+        rename->setEnabled(slot.isSet());
+        connect(rename, &QAction::triggered, this, [this, track, pad] {
+            SavedLoopSlot& changed = track->savedLoops[pad];
+            bool ok = false;
+            const QString label = QInputDialog::getText(
+                this, tr("Rename saved loop"), tr("Short label:"),
+                QLineEdit::Normal,
+                changed.label.isEmpty() ? tr("L%1").arg(pad + 1)
+                                        : changed.label,
+                &ok).trimmed();
+            if (!ok || label.isEmpty()) return;
+            changed.label = label.left(8);
+            emit trackPerformanceMetadataChanged(deckIndex_);
+            syncPerformancePadUi();
+            showPadFeedback(tr("Renamed saved loop to %1").arg(changed.label));
+        });
+        QAction* clear = menu.addAction(tr("Clear saved loop"));
+        clear->setEnabled(slot.isSet());
+        connect(clear, &QAction::triggered, this, [this, track, pad] {
+            track->savedLoops[pad] = SavedLoopSlot {};
+            emit trackPerformanceMetadataChanged(deckIndex_);
+            syncPerformancePadUi();
+            showPadFeedback(tr("Cleared saved loop %1").arg(pad + 1));
+        });
+
+        menu.addSeparator();
+        QAction* chooseSample = menu.addAction(tr("Assign sampler audio file…"));
+        connect(chooseSample, &QAction::triggered, this, [this, pad] {
+            auto& changed = padAssignments_[
+                static_cast<int>(PerformancePadMode::Sampler)][pad];
+            const QString existing = QString::fromStdString(changed.resource);
+            const QString path = QFileDialog::getOpenFileName(
+                this, tr("Assign sampler slot"), existing,
+                tr("Audio files (*.wav *.aif *.aiff *.flac *.mp3 *.m4a);;All files (*)"));
+            if (path.isEmpty()) return;
+            changed.resource = path.toStdString();
+            // A saved loop has its own per-track label and takes visual
+            // priority; this label is retained for the sampler fallback.
+            changed.label = QFileInfo(path).completeBaseName().left(8)
+                                .toStdString();
+            savePerformancePadAssignment(PerformancePadMode::Sampler, pad);
+            syncPerformancePadUi();
+            showPadFeedback(tr("Saved sampler assignment for pad %1")
+                                .arg(pad + 1));
+        });
+        QAction* clearSample = menu.addAction(tr("Clear sampler audio assignment"));
+        clearSample->setEnabled(!sampler.resource.empty());
+        connect(clearSample, &QAction::triggered, this, [this, pad] {
+            auto& changed = padAssignments_[
+                static_cast<int>(PerformancePadMode::Sampler)][pad];
+            changed = defaultPerformancePadAssignment(
+                PerformancePadMode::Sampler, pad);
+            savePerformancePadAssignment(PerformancePadMode::Sampler, pad);
+            syncPerformancePadUi();
+            showPadFeedback(tr("Cleared sampler assignment for pad %1")
+                                .arg(pad + 1));
+        });
+        menu.exec(position);
+        return;
+    }
+
+    const PerformancePadMode mode = padMode_;
+    const int modeIndex = static_cast<int>(mode);
+    auto& assignment = padAssignments_[modeIndex][pad];
+    auto persistAndRefresh = [this, mode, pad] {
+        auto& changed = padAssignments_[static_cast<int>(mode)][pad];
+        changed = sanitizePerformancePadAssignment(mode, pad, changed);
+        savePerformancePadAssignment(mode, pad);
+        syncPerformancePadUi();
+        showPadFeedback(tr("Saved %1 pad %2")
+                            .arg(QLatin1String(performancePadModeLabel(mode)))
+                            .arg(pad + 1));
+    };
+
+    QMenu menu(this);
+    QAction* heading = menu.addAction(
+        tr("%1 · PAD %2")
+            .arg(QLatin1String(performancePadModeLabel(mode)))
+            .arg(pad + 1));
+    heading->setEnabled(false);
+    menu.addSeparator();
+
+    if (assignment.action == PerformancePadAction::BeatJump) {
+        QMenu* beatsMenu = menu.addMenu(tr("Jump beats"));
+        static constexpr double choices[] = {
+            -64, -32, -16, -8, -4, -2, -1, 1, 2, 4, 8, 16, 32, 64};
+        for (const double beats : choices) {
+            const QString label = beats > 0
+                ? QStringLiteral("+%1").arg(beats)
+                : QString::number(beats);
+            QAction* action = beatsMenu->addAction(label);
+            action->setCheckable(true);
+            action->setChecked(std::abs(assignment.value - beats) < 1e-9);
+            connect(action, &QAction::triggered, this,
+                    [&, beats, label] {
+                assignment.value = beats;
+                assignment.label = label.toStdString();
+                persistAndRefresh();
+            });
+        }
+    } else if (assignment.action == PerformancePadAction::BeatLoop) {
+        QMenu* beatsMenu = menu.addMenu(tr("Loop length"));
+        static constexpr double choices[] = {
+            0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64};
+        for (const double beats : choices) {
+            const QString label = formatFxBeats(beats);
+            QAction* action = beatsMenu->addAction(
+                tr("%1 beat(s)").arg(label));
+            action->setCheckable(true);
+            action->setChecked(std::abs(assignment.value - beats) < 1e-9);
+            connect(action, &QAction::triggered, this,
+                    [&, beats, label] {
+                assignment.value = beats;
+                assignment.label = label.toStdString();
+                persistAndRefresh();
+            });
+        }
+    } else if (assignment.action == PerformancePadAction::FxHold) {
+        auto refreshFxLabel = [&assignment] {
+            static constexpr const char* prefixes[3] = {"E", "R", "F"};
+            assignment.label =
+                (QLatin1String(prefixes[std::clamp(assignment.fxType, 0, 2)]) +
+                 formatFxBeats(assignment.fxBeats)).toStdString();
+        };
+
+        QMenu* effectMenu = menu.addMenu(tr("Effect"));
+        static constexpr const char* names[3] = {"ECHO", "REVERB", "FLANGER"};
+        for (int type = 0; type < 3; ++type) {
+            QAction* action = effectMenu->addAction(QLatin1String(names[type]));
+            action->setCheckable(true);
+            action->setChecked(assignment.fxType == type);
+            connect(action, &QAction::triggered, this,
+                    [&, type] {
+                assignment.fxType = type;
+                refreshFxLabel();
+                persistAndRefresh();
+            });
+        }
+
+        QMenu* wetMenu = menu.addMenu(tr("Wet level"));
+        static constexpr double wetChoices[] = {0.25, 0.5, 0.75, 1.0};
+        for (const double wet : wetChoices) {
+            QAction* action = wetMenu->addAction(
+                tr("%1%").arg(qRound(wet * 100.0)));
+            action->setCheckable(true);
+            action->setChecked(std::abs(assignment.fxWet - wet) < 1e-9);
+            connect(action, &QAction::triggered, this,
+                    [&, wet] {
+                assignment.fxWet = wet;
+                persistAndRefresh();
+            });
+        }
+
+        QMenu* beatsMenu = menu.addMenu(tr("Effect beats"));
+        static constexpr double fxBeatChoices[] = {0.25, 0.5, 1, 2, 4};
+        for (const double beats : fxBeatChoices) {
+            QAction* action = beatsMenu->addAction(formatFxBeats(beats));
+            action->setCheckable(true);
+            action->setChecked(std::abs(assignment.fxBeats - beats) < 1e-9);
+            connect(action, &QAction::triggered, this,
+                    [&, beats] {
+                assignment.fxBeats = beats;
+                refreshFxLabel();
+                persistAndRefresh();
+            });
+        }
+    } else if (assignment.action == PerformancePadAction::SamplerSlot) {
+        QAction* choose = menu.addAction(tr("Assign audio file…"));
+        connect(choose, &QAction::triggered, this, [&] {
+            const QString existing =
+                QString::fromStdString(assignment.resource);
+            const QString path = QFileDialog::getOpenFileName(
+                this, tr("Assign sampler slot"), existing,
+                tr("Audio files (*.wav *.aif *.aiff *.flac *.mp3 *.m4a);;All files (*)"));
+            if (path.isEmpty()) return;
+            assignment.resource = path.toStdString();
+            assignment.label = QFileInfo(path).completeBaseName().left(8)
+                                   .toStdString();
+            persistAndRefresh();
+        });
+        QAction* clear = menu.addAction(tr("Clear audio assignment"));
+        clear->setEnabled(!assignment.resource.empty());
+        connect(clear, &QAction::triggered, this, [&] {
+            assignment = defaultPerformancePadAssignment(mode, pad);
+            persistAndRefresh();
+        });
+    } else if (assignment.action == PerformancePadAction::KeyboardNote) {
+        QMenu* noteMenu = menu.addMenu(tr("Keyboard note"));
+        static constexpr const char* names[13] = {
+            "C4", "C#4", "D4", "D#4", "E4", "F4", "F#4",
+            "G4", "G#4", "A4", "A#4", "B4", "C5"};
+        for (int note = 0; note < 13; ++note) {
+            const int midiNote = 60 + note;
+            QAction* action = noteMenu->addAction(QLatin1String(names[note]));
+            action->setCheckable(true);
+            action->setChecked(qRound(assignment.value) == midiNote);
+            connect(action, &QAction::triggered, this,
+                    [&, midiNote, note] {
+                assignment.value = midiNote;
+                assignment.label = names[note];
+                persistAndRefresh();
+            });
+        }
+    } else if (assignment.action == PerformancePadAction::KeyShift) {
+        QMenu* shiftMenu = menu.addMenu(tr("Semitones"));
+        static constexpr int choices[] = {
+            -12, -7, -4, -2, -1, 0, 1, 2, 4, 7, 12};
+        for (const int semitones : choices) {
+            const QString label = QStringLiteral("%1%2")
+                .arg(semitones >= 0 ? QStringLiteral("+") : QString())
+                .arg(semitones);
+            QAction* action = shiftMenu->addAction(label);
+            action->setCheckable(true);
+            action->setChecked(qRound(assignment.value) == semitones);
+            connect(action, &QAction::triggered, this,
+                    [&, semitones, label] {
+                assignment.value = semitones;
+                assignment.label = label.toStdString();
+                persistAndRefresh();
+            });
+        }
+    }
+
+    menu.addSeparator();
+    QAction* rename = menu.addAction(tr("Custom pad label…"));
+    connect(rename, &QAction::triggered, this, [&] {
+        bool ok = false;
+        const QString current = QString::fromStdString(assignment.label);
+        const QString label = QInputDialog::getText(
+            this, tr("Performance pad label"), tr("Short label:"),
+            QLineEdit::Normal, current, &ok).trimmed();
+        if (!ok || label.isEmpty()) return;
+        assignment.label = label.left(8).toStdString();
+        persistAndRefresh();
+    });
+    QAction* reset = menu.addAction(tr("Reset this pad"));
+    connect(reset, &QAction::triggered, this, [&] {
+        assignment = defaultPerformancePadAssignment(mode, pad);
+        persistAndRefresh();
+    });
+
+    menu.exec(position);
+}
+
 void DeckWidget::dispatch(ControlId id, double value)
 {
     bus_->dispatch(ControlEvent{deckIndex_, id, value}, Origin::Ui);
@@ -688,14 +1639,7 @@ void DeckWidget::onTempoSlider(int value)
 
 void DeckWidget::syncHotCueButtons()
 {
-    TrackDataPtr t = engine_->deck(deckIndex_).track();
-    for (int i = 0; i < 8; ++i) {
-        bool set = t && t->hotCues[i] >= 0;
-        hotcueBtns_[i]->setStyleSheet(
-            set ? QStringLiteral("background:%1; color:black; font-weight:bold;")
-                      .arg(hotCueColor(i).name())
-                : QString());
-    }
+    syncPerformancePadUi();
 }
 
 void DeckWidget::syncLoopButtons()
@@ -841,6 +1785,8 @@ void DeckWidget::syncStemPads()
 void DeckWidget::trackChanged()
 {
     TrackDataPtr t = engine_->deck(deckIndex_).track();
+    if (gridBtn_)
+        gridBtn_->setEnabled(t != nullptr);
     if (t) {
         titleLabel_->setText(t->title.isEmpty() ? t->filePath : t->title);
         artistLabel_->setText(t->artist);
@@ -881,6 +1827,27 @@ void DeckWidget::onBusEvent(const ControlEvent& e, Origin origin)
         syncHotCueButtons();
         waveform_->update();
         break;
+    case ControlId::LoopIn: case ControlId::LoopOut:
+    case ControlId::LoopExit: case ControlId::LoopHalve:
+    case ControlId::LoopDouble: case ControlId::LoopAuto:
+        // ControlBus dispatch is synchronous: by the time this mirror runs,
+        // the deck atomics contain the new loop state.  Repaint immediately
+        // so MIDI and on-screen loop controls feel equally responsive.
+        syncLoopButtons();
+        waveform_->update();
+        break;
+    case ControlId::Quantize: {
+        const bool enabled = engine_->deck(deckIndex_).quantizeHotCues.load(
+            std::memory_order_acquire);
+        QSettings().setValue(
+            QStringLiteral("decks/%1/quantizeHotCues").arg(deckIndex_),
+            enabled);
+        if (quantizeBtn_->isChecked() != enabled) {
+            QSignalBlocker block(quantizeBtn_);
+            quantizeBtn_->setChecked(enabled);
+        }
+        break;
+    }
     default:
         break; // Play/Stop/etc. are mirrored from engine state on the timer
     }
@@ -895,6 +1862,12 @@ void DeckWidget::refresh()
     if (playBtn_->isChecked() != playing) {
         QSignalBlocker block(playBtn_);
         playBtn_->setChecked(playing);
+    }
+
+    const bool quantize = deck.quantizeHotCues.load(std::memory_order_acquire);
+    if (quantizeBtn_->isChecked() != quantize) {
+        QSignalBlocker block(quantizeBtn_);
+        quantizeBtn_->setChecked(quantize);
     }
 
     if (t && t->durationSec > 0.0) {

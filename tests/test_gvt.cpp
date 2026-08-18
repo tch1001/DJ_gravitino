@@ -94,6 +94,8 @@ bool initialEqual(const gvt::GvtInitialState& a,
            near(a.fader, b.fader) && near(a.trim, b.trim) &&
            near(a.eqLow, b.eqLow) && near(a.eqMid, b.eqMid) &&
            near(a.eqHigh, b.eqHigh) && near(a.filter, b.filter) &&
+           a.quantizeCaptured == b.quantizeCaptured &&
+           a.quantize == b.quantize &&
            a.loopActive == b.loopActive &&
            near(a.loopStartBeat, b.loopStartBeat) &&
            near(a.loopEndBeat, b.loopEndBeat) && a.fxType == b.fxType &&
@@ -262,6 +264,8 @@ int main() {
         complete.initialFrom.positionBeat = 224.0;
         complete.initialFrom.cueBeat = 220.0;
         complete.initialFrom.loopActive = true;
+        complete.initialFrom.quantizeCaptured = true;
+        complete.initialFrom.quantize = false;
         complete.initialFrom.loopStartBeat = 220.0;
         complete.initialFrom.loopEndBeat = 228.0;
         complete.initialFrom.fxType = 2;
@@ -278,6 +282,8 @@ int main() {
         complete.initialTo.fader = 0.0;
         complete.initialTo.eqLow = 0.0;
         complete.initialTo.filter = 0.61;
+        complete.initialTo.quantizeCaptured = true;
+        complete.initialTo.quantize = true;
         complete.initialTo.fxType = 1;
         complete.initialTo.fxWet = 0.44;
         complete.initialTo.stemDrums = 0.5;
@@ -296,6 +302,26 @@ int main() {
         CHECK(near(parsed.fromHotCueBeats[2], 220.5));
         CHECK(near(parsed.toHotCueBeats[0], 32.0));
         CHECK(!parsed.events.empty() && near(parsed.events.back().value, 0.0));
+        CHECK(parsed.initialFrom.quantizeCaptured &&
+              !parsed.initialFrom.quantize);
+        CHECK(parsed.initialTo.quantizeCaptured && parsed.initialTo.quantize);
+    }
+
+    // Six-decimal engine tempo precision survives the text round-trip.
+    {
+        GvtFile precise = f;
+        precise.from.bpm = 127.987654;
+        precise.to.bpm = 129.912345;
+        precise.masterBpm = 127.991234;
+        precise.initialFrom.tempoRatio = 1.000027;
+        precise.initialTo.captured = true;
+        precise.initialTo.tempoRatio = 0.985643;
+        precise.events.push_back(
+            {33.234567, Role::ToDeck, ControlId::Tempo, 0.985643,
+             Curve::Step});
+        GvtFile parsed;
+        CHECK(gvtParse(gvtSerialize(precise), parsed, nullptr, nullptr));
+        CHECK(filesEqual(precise, parsed));
     }
 
     // ---- structural failure: bad magic ------------------------------------

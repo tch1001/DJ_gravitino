@@ -11,7 +11,6 @@ class QStackedWidget;
 class QTableView;
 class QTreeWidget;
 class QTreeWidgetItem;
-class QSortFilterProxyModel;
 class QTimer;
 
 namespace gvt {
@@ -19,6 +18,7 @@ namespace gvt {
 class CrateFilterProxy;   // path-prefix + title/artist search proxy
 class HistoryModel;       // table model over gvt::History (newest first)
 class TransitionEdgeModel; // all saved transitions as from -> to rows
+class TransitionSortProxy; // pins currently-playing FROM tracks above the rest
 
 // Serato-style library chrome: a collapsible left crate sidebar (one crate
 // per subdirectory of the scanned folder), a right-aligned [Library]
@@ -36,9 +36,14 @@ signals:
     void trackLoaded(int deck);          // a track was loaded onto deck 0/1
     void statusMessage(const QString& msg, int timeoutMs);
 
+public slots:
+    void browseBy(int rows);             // physical browser encoder
+    void confirmBrowseSelection();       // physical browser encoder press
+    void loadSelectedTo(int deck);       // physical or on-screen LOAD
+
 private slots:
-    void loadSelectedTo(int deck);
     void onDoubleClicked(const QModelIndex& proxyIndex);
+    void onTransitionClicked(const QModelIndex& proxyIndex);
     void rebuildCrates();                // model rows changed
     void onCrateSelected();
     void showTab(int index);             // 0 Library, 1 History, 2 Transitions
@@ -46,6 +51,7 @@ private slots:
 
 private:
     int sourceRowFor(const QModelIndex& proxyIndex) const;
+    int trackRowFor(const GvtTrackRef& ref) const;
     void loadRowTo(int sourceRow, int deck);
 
     TrackLibrary* library_;
@@ -55,7 +61,7 @@ private:
     CrateFilterProxy* proxy_ = nullptr;
     HistoryModel* historyModel_ = nullptr;
     TransitionEdgeModel* transitionModel_ = nullptr;
-    QSortFilterProxyModel* transitionProxy_ = nullptr;
+    TransitionSortProxy* transitionProxy_ = nullptr;
 
     QSplitter* splitter_ = nullptr;
     QTreeWidget* crateTree_ = nullptr;

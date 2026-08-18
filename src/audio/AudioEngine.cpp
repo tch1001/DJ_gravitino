@@ -28,6 +28,7 @@ float normalizedValue(double value) noexcept
 bool isReleaseAwareTrigger(ControlId id) noexcept
 {
     return id == ControlId::Cue ||
+        id == ControlId::PlatterTouch ||
         (id >= ControlId::HotCue1 && id <= ControlId::HotCue8);
 }
 
@@ -594,19 +595,15 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
     case ControlId::TempoSync: {
         Deck& other = deck(1 - event.deck);
         const TrackDataPtr targetTrack = target.track();
-        const double otherBpm = other.effectiveBpm();
-        if (!targetTrack || !std::isfinite(targetTrack->bpm) ||
-            targetTrack->bpm <= 0.0 || !std::isfinite(otherBpm) ||
-            otherBpm <= 0.0) {
+        const TrackDataPtr otherTrack = other.track();
+        if (!targetTrack || !otherTrack ||
+            !std::isfinite(targetTrack->bpm) || targetTrack->bpm <= 0.0 ||
+            !std::isfinite(otherTrack->bpm) || otherTrack->bpm <= 0.0) {
             break;
         }
 
-        // Clamp to the range render() honors, or effectiveBpm() would report
-        // a tempo the audio thread silently refuses to run at.
-        target.tempoRatio.store(
-            std::clamp(otherBpm / targetTrack->bpm, 0.01, 4.0),
-            std::memory_order_relaxed);
-
+        // One-shot phase alignment only. Tempo remains under the user's
+        // control, so tracks at different effective BPM will drift afterward.
         const double targetBeat = target.beatPosition();
         const double otherBeat = other.beatPosition();
         if (std::isfinite(targetBeat) && std::isfinite(otherBeat)) {
@@ -737,9 +734,36 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
     case ControlId::Jog:
         target.nudge(event.value);
         break;
+    case ControlId::PlatterScratch:
+        target.scratch(event.value);
+        break;
+    case ControlId::PlatterTouch:
+        if (event.value >= 0.5)
+            target.beginScratch();
+        else
+            target.endScratch();
+        break;
+    case ControlId::Quantize:
+        target.quantizeHotCues.store(
+            event.value > 0.5, std::memory_order_release);
+        break;
+    case ControlId::PerformancePadMode:
+    case ControlId::PerformancePad1:
+    case ControlId::PerformancePad2:
+    case ControlId::PerformancePad3:
+    case ControlId::PerformancePad4:
+    case ControlId::PerformancePad5:
+    case ControlId::PerformancePad6:
+    case ControlId::PerformancePad7:
+    case ControlId::PerformancePad8:
+        // MidiEngine forwards these UI gestures to DeckWidget, which resolves
+        // programmable assignments into ordinary deck ControlEvents.
+        break;
     case ControlId::Crossfader:
     case ControlId::MasterCue:
     case ControlId::HeadphoneMix:
+    case ControlId::BrowseSelect:
+    case ControlId::BrowseNavigate:
     case ControlId::Count:
         break;
     }

@@ -39,7 +39,11 @@ std::optional<Flx4TutorialMapping> flx4TutorialMapping(
     case ControlId::HeadphoneCue: return simple(Flx4SurfaceControl::ChannelCue);
     case ControlId::MasterCue:    return simple(Flx4SurfaceControl::MasterCue);
     case ControlId::HeadphoneMix: return simple(Flx4SurfaceControl::HeadphoneMix);
-    case ControlId::Jog:          return simple(Flx4SurfaceControl::JogWheel);
+    case ControlId::Quantize:     return simple(Flx4SurfaceControl::ChannelCue);
+    case ControlId::Jog:
+    case ControlId::PlatterScratch:
+    case ControlId::PlatterTouch:
+        return simple(Flx4SurfaceControl::JogWheel);
     case ControlId::FxType:       return fx(Flx4SurfaceControl::BeatFxSelect);
     case ControlId::FxOn:         return fx(Flx4SurfaceControl::BeatFxOn);
     case ControlId::FxWet:        return fx(Flx4SurfaceControl::BeatFxWet);
@@ -83,6 +87,17 @@ std::optional<Flx4TutorialMapping> flx4TutorialMapping(
     case ControlId::StemMelody:
     case ControlId::StemBass:
     case ControlId::StemDrums:
+    case ControlId::BrowseSelect:
+    case ControlId::BrowseNavigate:
+    case ControlId::PerformancePadMode:
+    case ControlId::PerformancePad1:
+    case ControlId::PerformancePad2:
+    case ControlId::PerformancePad3:
+    case ControlId::PerformancePad4:
+    case ControlId::PerformancePad5:
+    case ControlId::PerformancePad6:
+    case ControlId::PerformancePad7:
+    case ControlId::PerformancePad8:
     case ControlId::Count:
         return std::nullopt;
     }

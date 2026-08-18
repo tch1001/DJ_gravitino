@@ -7,11 +7,13 @@ namespace {
 struct NameEntry { ControlId id; const char* name; };
 constexpr NameEntry kNames[] = {
     {ControlId::Play, "play"}, {ControlId::Stop, "stop"}, {ControlId::Cue, "cue"},
-    {ControlId::Load, "load"}, {ControlId::TempoSync, "tempo_sync"},
+    {ControlId::Load, "load"}, {ControlId::BrowseSelect, "browse_select"},
+    {ControlId::TempoSync, "tempo_sync"},
     {ControlId::HotCue1, "hotcue_1"}, {ControlId::HotCue2, "hotcue_2"},
     {ControlId::HotCue3, "hotcue_3"}, {ControlId::HotCue4, "hotcue_4"},
     {ControlId::HotCue5, "hotcue_5"}, {ControlId::HotCue6, "hotcue_6"},
     {ControlId::HotCue7, "hotcue_7"}, {ControlId::HotCue8, "hotcue_8"},
+    {ControlId::BrowseNavigate, "browse_navigate"},
     {ControlId::Tempo, "tempo"}, {ControlId::Fader, "fader"},
     {ControlId::Trim, "trim"}, {ControlId::EqLow, "eq_low"},
     {ControlId::EqMid, "eq_mid"}, {ControlId::EqHigh, "eq_high"},
@@ -28,19 +30,38 @@ constexpr NameEntry kNames[] = {
     {ControlId::FxWet, "fx_wet"}, {ControlId::FxBeats, "fx_beats"},
     {ControlId::StemVocals, "stem_vocals"}, {ControlId::StemMelody, "stem_melody"},
     {ControlId::StemBass, "stem_bass"}, {ControlId::StemDrums, "stem_drums"},
+    {ControlId::PlatterScratch, "platter_scratch"},
+    {ControlId::Quantize, "quantize"},
+    {ControlId::PerformancePadMode, "performance_pad_mode"},
+    {ControlId::PerformancePad1, "performance_pad_1"},
+    {ControlId::PerformancePad2, "performance_pad_2"},
+    {ControlId::PerformancePad3, "performance_pad_3"},
+    {ControlId::PerformancePad4, "performance_pad_4"},
+    {ControlId::PerformancePad5, "performance_pad_5"},
+    {ControlId::PerformancePad6, "performance_pad_6"},
+    {ControlId::PerformancePad7, "performance_pad_7"},
+    {ControlId::PerformancePad8, "performance_pad_8"},
+    {ControlId::PlatterTouch, "platter_touch"},
 };
 } // namespace
 
 bool controlIsTrigger(ControlId id) {
     switch (id) {
         case ControlId::Play: case ControlId::Stop: case ControlId::Cue:
-        case ControlId::Load: case ControlId::TempoSync:
+        case ControlId::Load: case ControlId::BrowseSelect:
+        case ControlId::TempoSync:
         case ControlId::HotCue1: case ControlId::HotCue2: case ControlId::HotCue3:
         case ControlId::HotCue4: case ControlId::HotCue5: case ControlId::HotCue6:
         case ControlId::HotCue7: case ControlId::HotCue8:
         case ControlId::LoopIn: case ControlId::LoopOut:
         case ControlId::LoopExit: case ControlId::LoopHalve:
         case ControlId::LoopDouble:
+        case ControlId::PerformancePadMode:
+        case ControlId::PerformancePad1: case ControlId::PerformancePad2:
+        case ControlId::PerformancePad3: case ControlId::PerformancePad4:
+        case ControlId::PerformancePad5: case ControlId::PerformancePad6:
+        case ControlId::PerformancePad7: case ControlId::PerformancePad8:
+        case ControlId::PlatterTouch:
             return true;
         // LoopAuto/BeatJump carry a beats value; Filter is continuous.
         default:

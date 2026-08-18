@@ -1,4 +1,5 @@
 #include "LibraryWidget.h"
+#include "FitButton.h"
 #include "Theme.h"
 
 #include <QAbstractTableModel>
@@ -8,7 +9,6 @@
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPushButton>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -149,6 +149,8 @@ private:
 
 // ------------------------------------------------------ TransitionEdgeModel
 
+constexpr int kTransitionFromPlayingRole = Qt::UserRole + 1;
+
 // Read-only graph edge list over every saved transition. Each row is one
 // directed From -> To edge, which makes possible set routes easy to scan and
 // sort without first loading a pair onto the decks.
@@ -157,8 +159,9 @@ public:
     enum Col { ColFrom, ColArrow, ColTo, ColName, ColBpm, ColLength,
                ColCues, ColCount };
 
-    TransitionEdgeModel(TransitionStore* store, QObject* parent)
-        : QAbstractTableModel(parent), store_(store)
+    TransitionEdgeModel(TransitionStore* store, AudioEngine* engine,
+                        QObject* parent)
+        : QAbstractTableModel(parent), store_(store), engine_(engine)
     {
         if (store_) {
             connect(store_, &TransitionStore::changed, this, [this] {
@@ -184,6 +187,18 @@ public:
             idx.row() >= (int)store_->all().size())
             return {};
         const GvtFile& file = store_->all()[(size_t)idx.row()];
+        if (role == kTransitionFromPlayingRole) {
+            if (!engine_) return false;
+            for (int deck = 0; deck < kNumDecks; ++deck) {
+                if (!engine_->deck(deck).playing.load()) continue;
+                const TrackDataPtr track = engine_->deck(deck).track();
+                if (track && matchTrack(file.from, *track) !=
+                                 MatchQuality::None) {
+                    return true;
+                }
+            }
+            return false;
+        }
         double endBeat = 0.0;
         for (const GvtEvent& event : file.events)
             endBeat = std::max(endBeat, event.beat);
@@ -261,6 +276,59 @@ public:
 
 private:
     TransitionStore* store_;
+    AudioEngine* engine_;
+};
+
+// The user's chosen column/order remains the secondary sort. The live
+// currently-playing FROM group is always pinned first, including when the
+// secondary column is descending.
+class TransitionSortProxy : public QSortFilterProxyModel {
+public:
+    TransitionSortProxy(AudioEngine* engine, QObject* parent)
+        : QSortFilterProxyModel(parent), engine_(engine)
+    {
+    }
+
+    void refreshPlayingPriority()
+    {
+        std::array<QString, kNumDecks> current;
+        if (engine_) {
+            for (int deck = 0; deck < kNumDecks; ++deck) {
+                if (!engine_->deck(deck).playing.load()) continue;
+                const TrackDataPtr track = engine_->deck(deck).track();
+                if (!track) continue;
+                current[static_cast<std::size_t>(deck)] =
+                    !track->fingerprint.isEmpty()
+                        ? track->fingerprint : track->filePath;
+            }
+        }
+        if (current == playingTrackKeys_)
+            return;
+        playingTrackKeys_ = std::move(current);
+        invalidate();
+        sort(sortColumn(), sortOrder());
+    }
+
+protected:
+    bool lessThan(const QModelIndex& left,
+                  const QModelIndex& right) const override
+    {
+        const bool leftPlaying =
+            left.data(kTransitionFromPlayingRole).toBool();
+        const bool rightPlaying =
+            right.data(kTransitionFromPlayingRole).toBool();
+        if (leftPlaying != rightPlaying) {
+            // QSortFilterProxyModel reverses this comparator for descending
+            // sorts, so reverse our group key too to keep playing rows first.
+            return sortOrder() == Qt::AscendingOrder
+                ? leftPlaying : !leftPlaying;
+        }
+        return QSortFilterProxyModel::lessThan(left, right);
+    }
+
+private:
+    AudioEngine* engine_ = nullptr;
+    std::array<QString, kNumDecks> playingTrackKeys_ {};
 };
 
 // ------------------------------------------------------------ LibraryWidget
@@ -322,9 +390,9 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     // directly above the table).
     auto* tabs = new QHBoxLayout;
     tabs->setSpacing(0);
-    libraryTabBtn_ = new QPushButton(tr("Library"));
-    historyTabBtn_ = new QPushButton(tr("History"));
-    transitionTabBtn_ = new QPushButton(tr("Transitions"));
+    libraryTabBtn_ = new FitPushButton(tr("Library"));
+    historyTabBtn_ = new FitPushButton(tr("History"));
+    transitionTabBtn_ = new FitPushButton(tr("Transitions"));
     for (QPushButton* b : {libraryTabBtn_, historyTabBtn_, transitionTabBtn_}) {
         b->setCheckable(true);
         b->setAutoExclusive(true);
@@ -336,8 +404,8 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     topRow->addLayout(tabs);
     topRow->addSpacing(6);
 
-    loadABtn_ = new QPushButton(tr("Load ▶ A"));
-    loadBBtn_ = new QPushButton(tr("Load ▶ B"));
+    loadABtn_ = new FitPushButton(tr("Load ▶ A"));
+    loadBBtn_ = new FitPushButton(tr("Load ▶ B"));
     const auto loadStyle = [](const QColor& accent) {
         return QStringLiteral(
             "QPushButton { color:%1; font-weight:bold; }"
@@ -400,8 +468,8 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
         historyTabBtn_->hide();
     }
 
-    transitionModel_ = new TransitionEdgeModel(transitions_, this);
-    transitionProxy_ = new QSortFilterProxyModel(this);
+    transitionModel_ = new TransitionEdgeModel(transitions_, engine_, this);
+    transitionProxy_ = new TransitionSortProxy(engine_, this);
     transitionProxy_->setSourceModel(transitionModel_);
     transitionProxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
     transitionProxy_->setFilterKeyColumn(-1);
@@ -456,6 +524,8 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             [this] { loadSelectedTo(1); });
     connect(table_, &QTableView::doubleClicked, this,
             &LibraryWidget::onDoubleClicked);
+    connect(transitionTable_, &QTableView::clicked, this,
+            &LibraryWidget::onTransitionClicked);
     connect(libraryTabBtn_, &QPushButton::clicked, this,
             [this] { showTab(0); });
     connect(historyTabBtn_, &QPushButton::clicked, this,
@@ -483,10 +553,13 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
 
     loadStateTimer_ = new QTimer(this);
     loadStateTimer_->setInterval(100);
-    connect(loadStateTimer_, &QTimer::timeout,
-            this, &LibraryWidget::updateLoadButtons);
+    connect(loadStateTimer_, &QTimer::timeout, this, [this] {
+        updateLoadButtons();
+        transitionProxy_->refreshPlayingPriority();
+    });
     loadStateTimer_->start();
     updateLoadButtons();
+    transitionProxy_->refreshPlayingPriority();
 }
 
 void LibraryWidget::showTab(int index)
@@ -583,8 +656,71 @@ int LibraryWidget::sourceRowFor(const QModelIndex& proxyIndex) const
     return proxy_->mapToSource(proxyIndex).row();
 }
 
+void LibraryWidget::browseBy(int rows)
+{
+    if (rows == 0)
+        return;
+
+    // Hardware browsing always targets tracks, even if History or the
+    // transition edge list was most recently open.
+    showTab(0);
+    const int count = proxy_->rowCount();
+    if (count <= 0) {
+        emit statusMessage(tr("The library has no tracks to select"), 3000);
+        return;
+    }
+
+    int row = table_->currentIndex().row();
+    // Treat no current row as just outside the relevant edge so one tick
+    // lands on the first/last visible track. Accelerated ticks still skip the
+    // corresponding number of rows.
+    if (row < 0)
+        row = rows > 0 ? -1 : count;
+    row = std::clamp(row + rows, 0, count - 1);
+
+    const QModelIndex index = proxy_->index(row, 0);
+    table_->setCurrentIndex(index);
+    table_->selectRow(row);
+    table_->scrollTo(index, QAbstractItemView::EnsureVisible);
+    table_->setFocus(Qt::OtherFocusReason);
+    updateLoadButtons();
+}
+
+void LibraryWidget::confirmBrowseSelection()
+{
+    showTab(0);
+    if (proxy_->rowCount() <= 0) {
+        emit statusMessage(tr("The library has no tracks to select"), 3000);
+        return;
+    }
+    if (!table_->currentIndex().isValid()) {
+        browseBy(1);
+        return;
+    }
+
+    const int row = table_->currentIndex().row();
+    table_->selectRow(row);
+    table_->scrollTo(proxy_->index(row, 0),
+                     QAbstractItemView::EnsureVisible);
+    table_->setFocus(Qt::OtherFocusReason);
+    updateLoadButtons();
+}
+
 void LibraryWidget::loadSelectedTo(int deck)
 {
+    if (deck < 0 || deck >= kNumDecks)
+        return;
+    // A hardware LOAD should never act on a selection hidden behind History
+    // or Transitions. Reveal the track library before resolving the row.
+    showTab(0);
+    if (engine_->deck(deck).playing.load()) {
+        emit statusMessage(
+            tr("⚠ Stop deck %1 before loading another track")
+                .arg(deck == 0 ? QStringLiteral("A") : QStringLiteral("B")),
+            4000);
+        updateLoadButtons();
+        return;
+    }
     int row = sourceRowFor(table_->currentIndex());
     if (row < 0) {
         emit statusMessage(tr("Select a track first"), 3000);
@@ -609,13 +745,96 @@ void LibraryWidget::onDoubleClicked(const QModelIndex& proxyIndex)
     loadRowTo(row, deck);
 }
 
+int LibraryWidget::trackRowFor(const GvtTrackRef& ref) const
+{
+    int bestRow = -1;
+    MatchQuality best = MatchQuality::None;
+    for (int row = 0; row < library_->trackCount(); ++row) {
+        const TrackDataPtr track = library_->trackAt(row);
+        if (!track) continue;
+        const MatchQuality quality = matchTrack(ref, *track);
+        if (quality > best) {
+            best = quality;
+            bestRow = row;
+        }
+    }
+    return bestRow;
+}
+
+void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
+{
+    if (!transitions_ || !proxyIndex.isValid()) return;
+    const QModelIndex source = transitionProxy_->mapToSource(proxyIndex);
+    if (!source.isValid() || source.row() < 0 ||
+        source.row() >= static_cast<int>(transitions_->all().size())) {
+        return;
+    }
+    const GvtFile& transition =
+        transitions_->all()[static_cast<std::size_t>(source.row())];
+
+    const bool playingA = engine_->deck(0).playing.load();
+    const bool playingB = engine_->deck(1).playing.load();
+    const int playingCount = static_cast<int>(playingA) +
+                             static_cast<int>(playingB);
+    if (playingCount == 2) {
+        emit statusMessage(
+            tr("⚠ Transition not loaded: both decks are playing, so neither track can be replaced"),
+            5500);
+        return;
+    }
+
+    const int fromRow = trackRowFor(transition.from);
+    const int toRow = trackRowFor(transition.to);
+    if (playingCount == 0) {
+        if (fromRow < 0 || toRow < 0) {
+            emit statusMessage(
+                tr("Transition tracks are not ready in the current library"),
+                5000);
+            return;
+        }
+        loadRowTo(fromRow, 0);
+        loadRowTo(toRow, 1);
+        emit statusMessage(
+            tr("Loaded transition '%1': FROM on deck A, TO on deck B")
+                .arg(transition.name),
+            5000);
+        return;
+    }
+
+    const int playingDeck = playingA ? 0 : 1;
+    const TrackDataPtr playingTrack = engine_->deck(playingDeck).track();
+    if (!playingTrack ||
+        matchTrack(transition.from, *playingTrack) == MatchQuality::None) {
+        emit statusMessage(
+            tr("Transition not loaded: the playing track does not match its FROM track"),
+            5500);
+        return;
+    }
+    if (toRow < 0) {
+        emit statusMessage(
+            tr("Transition TO track is not ready in the current library"),
+            5000);
+        return;
+    }
+
+    const int toDeck = 1 - playingDeck;
+    loadRowTo(toRow, toDeck);
+    emit statusMessage(
+        tr("FROM matched deck %1; loaded TO on deck %2")
+            .arg(playingDeck == 0 ? QStringLiteral("A")
+                                  : QStringLiteral("B"))
+            .arg(toDeck == 0 ? QStringLiteral("A")
+                             : QStringLiteral("B")),
+        5000);
+}
+
 void LibraryWidget::loadRowTo(int sourceRow, int deck)
 {
     if (deck < 0 || deck >= kNumDecks)
         return;
     if (engine_->deck(deck).playing.load()) {
         emit statusMessage(
-            tr("Stop deck %1 before loading another track")
+            tr("⚠ Stop deck %1 before loading another track")
                 .arg(deck == 0 ? QStringLiteral("A") : QStringLiteral("B")),
             4000);
         updateLoadButtons();

@@ -39,6 +39,10 @@ struct GvtInitialState {
     double trim = 0.5;
     double eqLow = 0.5, eqMid = 0.5, eqHigh = 0.5;
     double filter = 0.5;
+    // Optional so legacy complete snapshots do not unexpectedly force the
+    // modern per-deck Quantize default during replay.
+    bool quantizeCaptured = false;
+    bool quantize = true;
     bool loopActive = false;
     double loopStartBeat = 0.0, loopEndBeat = 0.0;
     int fxType = 0;

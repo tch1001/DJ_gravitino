@@ -38,6 +38,32 @@ QRectF loopButtonRect(int deck, int slot)
 
 qreal channelX(int deck) { return deck == 0 ? 414.0 : 546.0; }
 
+bool isAnimatedContinuous(Flx4SurfaceControl surface)
+{
+    switch (surface) {
+    case Flx4SurfaceControl::TempoFader:
+    case Flx4SurfaceControl::ChannelFader:
+    case Flx4SurfaceControl::Trim:
+    case Flx4SurfaceControl::EqHigh:
+    case Flx4SurfaceControl::EqMid:
+    case Flx4SurfaceControl::EqLow:
+    case Flx4SurfaceControl::Filter:
+    case Flx4SurfaceControl::Crossfader:
+    case Flx4SurfaceControl::HeadphoneMix:
+    case Flx4SurfaceControl::BeatFxWet:
+        return true;
+    default:
+        return false;
+    }
+}
+
+double surfaceValue(ControlId control, double value)
+{
+    if (control == ControlId::Tempo)
+        return std::clamp((value - 0.92) / 0.16, 0.0, 1.0);
+    return std::clamp(value, 0.0, 1.0);
+}
+
 } // namespace
 
 Flx4TutorialWidget::Flx4TutorialWidget(QWidget* parent)
@@ -51,6 +77,7 @@ Flx4TutorialWidget::Flx4TutorialWidget(QWidget* parent)
     pulseTimer->setInterval(360);
     connect(pulseTimer, &QTimer::timeout, this, [this] {
         pulse_ = !pulse_;
+        animationPhase_ = (animationPhase_ + 1) % 8;
         update();
     });
     pulseTimer->start();
@@ -66,6 +93,7 @@ void Flx4TutorialWidget::setWaiting(const QString& transitionName,
     detail_ = tr("Use the physical controller or click the highlighted virtual control");
     warning_ = warning;
     feedback_.clear();
+    hardwareValue_.reset();
     activationEnabled_ = false;
     update();
 }
@@ -75,6 +103,8 @@ void Flx4TutorialWidget::setExpected(
     const QString& detail, double beatsAhead, bool activationEnabled,
     const QString& warning)
 {
+    const bool samePhysicalControl = expected_ &&
+        expected_->deck == event.deck && expected_->id == event.id;
     expected_ = event;
     mapping_ = flx4TutorialMapping(event.id, event.value);
     instruction_ = instruction;
@@ -82,6 +112,7 @@ void Flx4TutorialWidget::setExpected(
     beatsAhead_ = beatsAhead;
     activationEnabled_ = activationEnabled && mapping_.has_value();
     warning_ = warning;
+    if (!samePhysicalControl) hardwareValue_.reset();
     update();
 }
 
@@ -106,6 +137,17 @@ void Flx4TutorialWidget::clearExpected()
     detail_ = tr("Keep the outgoing track running and follow the recorded sequence");
     warning_.clear();
     activationEnabled_ = false;
+    hardwareValue_.reset();
+    update();
+}
+
+void Flx4TutorialWidget::setHardwareValue(const ControlEvent& event)
+{
+    if (!expected_ || expected_->deck != event.deck ||
+        expected_->id != event.id || !std::isfinite(event.value)) {
+        return;
+    }
+    hardwareValue_ = event.value;
     update();
 }
 
@@ -372,6 +414,67 @@ void Flx4TutorialWidget::paintEvent(QPaintEvent*)
                        mapping_->padMode == Flx4PadMode::HotCue
                            ? tr("PAD MODE: HOT CUE")
                            : tr("PAD MODE: BEAT JUMP"));
+        }
+
+        // Continuous tutorial moves get an actual motion cue, not just a
+        // blinking halo: a white ghost marker is the recorded target and the
+        // animated dot travels from the last physical FLX4 value toward it.
+        if (isAnimatedContinuous(mapping_->surface)) {
+            const double targetValue = surfaceValue(
+                expected_->id, expected_->value);
+            const double currentValue = surfaceValue(
+                expected_->id,
+                hardwareValue_.value_or(expected_->id == ControlId::Tempo
+                                            ? 1.0 : 0.5));
+            QPointF from;
+            QPointF to;
+            if (mapping_->surface == Flx4SurfaceControl::Crossfader) {
+                from = QPointF(target.left() + currentValue * target.width(),
+                               target.center().y());
+                to = QPointF(target.left() + targetValue * target.width(),
+                             target.center().y());
+            } else if (mapping_->surface ==
+                           Flx4SurfaceControl::ChannelFader) {
+                from = QPointF(target.center().x(),
+                               target.bottom() - currentValue * target.height());
+                to = QPointF(target.center().x(),
+                             target.bottom() - targetValue * target.height());
+            } else if (mapping_->surface ==
+                           Flx4SurfaceControl::TempoFader) {
+                from = QPointF(target.center().x(),
+                               target.top() + currentValue * target.height());
+                to = QPointF(target.center().x(),
+                             target.top() + targetValue * target.height());
+            } else {
+                const auto dialPoint = [&target](double value) {
+                    const double radians =
+                        (225.0 + value * 270.0) * 3.141592653589793 / 180.0;
+                    const double radius = std::min(target.width(),
+                                                   target.height()) * 0.42;
+                    return target.center() +
+                        QPointF(std::cos(radians) * radius,
+                                std::sin(radians) * radius);
+                };
+                from = dialPoint(currentValue);
+                to = dialPoint(targetValue);
+            }
+            const double progress =
+                (static_cast<double>(animationPhase_) + 1.0) / 8.0;
+            const QPointF moving = from + (to - from) * progress;
+            p.setPen(QPen(QColor(255, 255, 255, 180), 2, Qt::DashLine));
+            p.drawLine(from, to);
+            p.setPen(QPen(Qt::white, 3));
+            p.setBrush(QColor(255, 255, 255, pulse_ ? 230 : 150));
+            p.drawEllipse(to, 6, 6);
+            p.setPen(Qt::NoPen);
+            p.drawEllipse(moving, 4, 4);
+            QFont targetFont = p.font();
+            targetFont.setBold(true);
+            targetFont.setPixelSize(9);
+            p.setFont(targetFont);
+            p.setPen(Qt::white);
+            p.drawText(target.adjusted(-34, -22, 34, -4),
+                       Qt::AlignCenter, tr("TARGET"));
         }
     }
 }

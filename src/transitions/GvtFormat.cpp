@@ -163,6 +163,10 @@ void storeKnownKv(GvtFile& out, Section sec, const QString& secName,
         else if (deckKey == QLatin1String("eq_mid"))          state.eqMid = asDouble();
         else if (deckKey == QLatin1String("eq_high"))         state.eqHigh = asDouble();
         else if (deckKey == QLatin1String("filter"))          state.filter = asDouble();
+        else if (deckKey == QLatin1String("quantize")) {
+            state.quantize = parseBool(value);
+            state.quantizeCaptured = true;
+        }
         else if (deckKey == QLatin1String("loop_active"))     state.loopActive = parseBool(value);
         else if (deckKey == QLatin1String("loop_start_beat")) state.loopStartBeat = asDouble();
         else if (deckKey == QLatin1String("loop_end_beat"))   state.loopEndBeat = asDouble();
@@ -425,6 +429,10 @@ QString gvtSerialize(const GvtFile& f) {
             s += kvLine(key("eq_high"), fmtNum(state.eqHigh, 3, 6));
             s += kvLine(key("filter"), fmtNum(state.filter, 3, 6));
             if (!complete) return;
+            if (state.quantizeCaptured)
+                s += kvLine(key("quantize"), state.quantize
+                                                  ? QStringLiteral("1")
+                                                  : QStringLiteral("0"));
             s += kvLine(key("playing"), state.playing ? QStringLiteral("1")
                                                        : QStringLiteral("0"));
             s += kvLine(key("position_beat"), fmtNum(state.positionBeat, 3, 6));

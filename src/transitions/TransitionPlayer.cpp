@@ -41,6 +41,8 @@ void prependInitialState(std::vector<GvtEvent>& events,
     add(ControlId::EqHigh, state.eqHigh);
     add(ControlId::Filter, state.filter);
     if (complete) {
+        if (state.quantizeCaptured)
+            add(ControlId::Quantize, state.quantize ? 1.0 : 0.0);
         add(ControlId::FxType, state.fxType);
         add(ControlId::FxOn, state.fxOn ? 1.0 : 0.0);
         add(ControlId::FxWet, state.fxWet);
@@ -63,6 +65,16 @@ double replayTempoRatio(const GvtInitialState& state,
                                     : recorded.bpm * state.tempoRatio;
     return effectiveBpm > 0.0 ? effectiveBpm / loaded->bpm
                               : state.tempoRatio;
+}
+
+double replayTempoEvent(double recordedRatio,
+                        const GvtTrackRef& recorded,
+                        const TrackDataPtr& loaded) {
+    if (!loaded || loaded->bpm <= 0.0 || recorded.bpm <= 0.0)
+        return recordedRatio;
+    const double recordedEffectiveBpm = recorded.bpm * recordedRatio;
+    return recordedEffectiveBpm > 0.0
+               ? recordedEffectiveBpm / loaded->bpm : recordedRatio;
 }
 
 } // namespace
@@ -144,11 +156,24 @@ TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
         }
         if (best < 0) return;
         ScheduledEvent& s = im2.sched[best];
-        im2.done[best] = 1;
         const double beatError = rel - s.e.beat;
+        const double expectedValue =
+            s.e.control == ControlId::Crossfader
+                ? im2.xfaderRoleToPhysical(s.e.value) : s.e.value;
         const double valueError = controlIsTrigger(s.e.control)
                                       ? 0.0
-                                      : std::fabs(e.value - s.e.value);
+                                      : std::fabs(e.value - expectedValue);
+        // Keep continuous controls highlighted while the student moves them.
+        // A first nudge identifies the right knob but is not the completed
+        // gesture; MidiEngine still feeds its live value to the tutorial's
+        // animated target marker until it is genuinely close.
+        if (!controlIsTrigger(s.e.control)) {
+            const double tolerance = s.e.control == ControlId::Tempo
+                                         ? 0.002 : 0.04;
+            if (valueError > tolerance)
+                return;
+        }
+        im2.done[best] = 1;
         emit tutorialScored(s.e, beatError, valueError);
     });
 }
@@ -181,6 +206,18 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     im.mode = (it != modeTable().end()) ? it->second : PlayerMode::Perform;
 
     std::vector<GvtEvent> events = f.events;
+    // A library re-scan or manual regrid can change the loaded track's native
+    // BPM after recording. Preserve every recorded effective BPM, including
+    // later tempo moves, rather than blindly replaying a now-wrong ratio.
+    for (GvtEvent& event : events) {
+        if (event.control != ControlId::Tempo) continue;
+        if (event.role == Role::FromDeck)
+            event.value = replayTempoEvent(
+                event.value, f.from, im.engine->deck(fromDeck).track());
+        else if (event.role == Role::ToDeck)
+            event.value = replayTempoEvent(
+                event.value, f.to, im.engine->deck(toDeck).track());
+    }
     // Setup snapshots are replay actions, not tutorial gestures.  In Perform
     // mode they fire at the anchor (including when PRIME has waited there), so
     // the outgoing deck starts at the BPM/EQ used by the recording.
@@ -214,6 +251,25 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     im.totalBeats = events.empty() ? 0.0 : events.back().beat;
     im.haveLastBeat = false;
     im.lastBeat = 0.0;
+    im.timelineStarted = false;
+    im.timelineRunning = false;
+    im.timelineBpm = f.masterBpm;
+    im.wallBeat = 0.0;
+    im.deckBeat = 0.0;
+    im.lastDeckTrackBeat = 0.0;
+    im.haveDeckTrackBeat = false;
+    im.lastTimelineNs = 0;
+    if (startNow) {
+        const Deck& outgoing = im.engine->deck(fromDeck);
+        im.timelineStarted = true;
+        im.timelineRunning = outgoing.playing.load();
+        im.haveLastBeat = im.timelineRunning;
+        im.lastDeckTrackBeat = outgoing.beatPosition();
+        im.haveDeckTrackBeat = true;
+        const double effective = outgoing.effectiveBpm();
+        if (effective > 0.0) im.timelineBpm = effective;
+        im.timelineClock.start();
+    }
     im.preStateTransportApplied = false;
 
     im.active = true;

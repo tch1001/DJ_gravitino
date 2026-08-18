@@ -6,6 +6,147 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-18 (codex): **Post-transition FLX4 pickup gate and tutorial motion
+  coaching.** Perform captures every automatic absolute-control change and,
+  at the final event, compares Gravitino with the FLX4's last physical TEMPO,
+  channel-fader, TRIM, HIGH/MID/LOW, FILTER, and crossfader positions. Any
+  mismatch freezes the complete controller input link; only target pickup
+  moves are consumed until all controls reach/cross software truth, preventing
+  the next touch from causing an audible jump. A blinking white status alert
+  shows hardware→target values while affected virtual controls receive a
+  pulsing white-static veil. Software edits retarget safely and disconnect
+  clears the gate. Tutorial's virtual FLX4 now animates continuous controls
+  from the last observed hardware position toward a white target marker and
+  keeps the prompt until the target is reached. Verified: build, ctest 19/19,
+  full audio/transition/loop/stem self-test, and `git diff --check`; physical
+  FLX4 feel/visibility smoke test remains appropriate after restart.
+
+- 2026-08-18 (codex): **FLX4-ordered virtual mixer.** Replaced the unusual
+  side-by-side TRIM / stacked-EQ / FILTER arrangement with one uninterrupted
+  `TRIM → HIGH → MID → LOW → FILTER` vertical stack per channel. Deck B now
+  mirrors deck A, placing both channel faders next to the center crossfader,
+  and symmetric spacing keeps the mixer centered without reclaiming horizontal
+  room from transitions. Verified visually in the running app, clean build,
+  ctest 18/18, and `git diff --check`.
+
+- 2026-08-18 (codex): **Loop- and tempo-exact transition replay.** The
+  transition timeline is now a monotonic musical clock, independent of the
+  outgoing track position that wraps backward inside a loop. New recordings
+  retain six-decimal BPM, tempo-ratio, anchor, loop/hot-cue, and event-time
+  precision instead of rounding tempo to 0.001. Perform/Tutorial rebase every
+  recorded tempo event against the currently loaded native BPM, preserving the
+  actual recorded effective BPM after regrid/rescan changes. Complete
+  snapshots persist and restore each deck's Quantize state, and mid-transition
+  Quantize toggles are recorded, so manual loop boundaries reproduce their
+  original snapping behavior. Regression coverage simulates a loop wrap,
+  verifies exact incoming anchor seek, Quantize restoration, later tempo-event
+  rebasing, and recorder precision. The legacy Clarity → Party Rock file still
+  requires re-recording: its old missing incoming PLAY time and rounded ratio
+  cannot be reconstructed from data that was never saved. Verified: clean
+  build, ctest 18/18, full audio/transition/loop/stem self-test,
+  `git diff --check`, and a single-process restart of the verified binary.
+
+- 2026-08-18 (codex): **Deterministic replay and draggable compact mixer /
+  transition layout.** PERFORM now treats incoming PLAY as authoritative:
+  when its recorded beat arrives it seeks to `anchor_to` before starting,
+  regardless of live deck drift. An incoming deck recorded as already rolling
+  is restored and started from its initial beat at transition beat zero.
+  Recordings missing any incoming start gesture are rejected with a clear
+  re-record message instead of silently omitting the new track. Integration
+  coverage proves deck B stays stopped before the due outgoing beat, then
+  starts at the exact TO position, and also covers initially rolling pre-state.
+  Mixer HI/MID/LOW knobs now stack vertically. Persistent draggable splitters
+  resize mixer/transition, transition list/event sequence/controls, and the
+  transition/library height. Verified: clean build, ctest 18/18, full
+  `--selftest`, and `git diff --check`.
+
+- 2026-08-18 (codex): **Saved-loop starts are transition-recordable.** The
+  “clarity to party rock” file proved that its incoming deck began audibly but
+  contained no `play` event: its direct saved-loop retrigger bypassed the
+  recorder, and `anchor_to` was inferred only when LOOP EXIT arrived 39.740
+  beats later. A successful combined sampler/saved-loop retrigger now publishes
+  an idempotent PLAY after seeking, capturing the event time and exact loop IN
+  beat as the incoming replay anchor. Focused coverage checks the incoming
+  PLAY event, anchor, and initial loop state. Existing recordings with a
+  missing event are not silently rewritten because their original start time
+  is not stored. Verified: clean build, ctest 17/17, full `--selftest`,
+  `git diff --check`, and a single-process restart.
+
+- 2026-08-18 (codex): **Close Enough transition readiness; combined sampler /
+  saved-loop bank.** Transition setup matching now has a persisted, default-off
+  CLOSE ENOUGH checkbox and independently configurable BPM, volume, and EQ
+  margins (defaults ±0.5 BPM / ±5% / ±5%). Discrete/identity/transport,
+  loop, FX, filter, stem, and timing checks remain strict, and the status label
+  identifies readiness accepted only by the relaxed margins. The separate
+  SAVED LOOP layer is consolidated into SAMPLER / SAVED LOOPS using the FLX4's
+  actual sampler bank; every press of a filled saved-loop pad jumps to its
+  start and plays, retriggering an already-active loop like a one-shot hot cue.
+  LOOP EXIT remains the explicit way to disengage it. Loop and sampler editing
+  coexist in one context menu and their occupancy drives pad LEDs. Verified:
+  clean build, ctest 17/17, full
+  `--selftest`, and `git diff --check`.
+
+- 2026-08-18 (codex): **Playing FROM transitions first; crossfader starts
+  centered.** Library > Transitions now pins rows whose FROM track matches any
+  currently playing deck above all other edges, while retaining the selected
+  column/direction as the secondary sort. The priority refreshes as transport
+  state changes. Fresh audio engines and the visible mixer now both start the
+  crossfader at exact `0.5` (equal-power 50/50); explicit controller or
+  transition setup state still overrides it normally. Verified: clean build,
+  ctest 16/16 (including startup-center assertion), full `--selftest`, and
+  `git diff --check`.
+
+- 2026-08-18 (codex): **Compact button labels auto-shrink instead of crop.**
+  New shared `FitPushButton`/`FitToolButton` painting preserves Qt/QSS button
+  chrome, states, palettes, and menu arrows, while fitting the full visible
+  label into the live content rectangle. Existing short labels retain their
+  configured size; long and dynamic labels refit automatically. Applied across
+  deck, pad/loop/FX/stem, transition, library, recording, and waveform zoom
+  controls. A focused regression covers short-label non-shrink, long-label
+  width/height fitting, and mnemonic ampersands. Verified: clean build, ctest
+  16/16, full `--selftest`, and `git diff --check`.
+
+- 2026-08-18 (codex): **Saved Loops, real scratch audio, Quantized IN/OUT,
+  phase-only SYNC, and transition-edge loading.** A host-only SAVED LOOP pad
+  layer captures, recalls/toggles, renames, replaces, and clears eight exact
+  per-track loop slots; hot cues/loops merge atomically into the cache. FLX4
+  touch note 0x36 and stacked-waveform drags now suspend normal transport and
+  render signed forward/reverse PCM only while moving, restoring the prior
+  play state on release. QUANT applies to manual IN/OUT; SYNC aligns beat phase
+  once without changing tempo ratio/effective BPM. Clicking a transition edge
+  loads both tracks with zero playing decks, only TO after a matching FROM with
+  one, and refuses with an explanation when two play. Verified: clean build,
+  ctest 15/15, full `--selftest`, `git diff --check`, and a single-process
+  restart of the verified binary.
+
+- 2026-08-18 (codex): **Host-authoritative FLX4 pad layers and tempo-scaled
+  stacked waveforms.** The FLX4's private pad-bank latch can disagree with a
+  virtual mode selected in Gravitino; MIDI output only changed LEDs. Incoming
+  pads are now resolved through Gravitino's selected layer, while the reported
+  hardware bank is retained solely to mirror logical pad lights into the bank
+  the controller is displaying. Physical mode buttons still update the host
+  immediately, and SHIFT deletes only when the host layer is HOT CUE. Stacked
+  lanes now span equal playback time by multiplying source-window seconds by
+  each deck's tempo ratio, so matched effective BPM produces matched beat
+  spacing. Pointer seek/scratch uses the identical transform. Verified: build,
+  ctest 15/15, full `--selftest`, and `git diff --check` pass.
+
+- 2026-08-18 (codex): **FLX4 loops, Quantize, browser/load, scratching,
+  programmable pad layers, LEDs, and persistent manual regrid integrated.**
+  The physical IN/1/2X and OUT/2X controls resize an active loop contextually,
+  while armed/completed loop regions render live in both waveforms. Per-deck
+  persisted Quantize snaps hot-cue placement and jumps to playable whole
+  beats. The center browser and LOAD buttons drive the visible library but
+  refuse a playing deck with a temporary warning. Stacked-waveform drag and
+  top-platter packets position-scratch; the jog rim remains a fine tempo nudge.
+  Eight persisted/programmed virtual pad layers mirror FLX4 mode/pad LEDs, and
+  SHIFT+HOT CUE deletes a cue. GRID menus set/nudge downbeats and correct BPM;
+  edits update Deck's realtime grid and merge atomically into the cache. PAD FX,
+  beat jump/loop, and hot cues execute now; sampler/keyboard/key-shift settings
+  persist but await sampler/pitch DSP. Verified: clean build, ctest 15/15, full
+  `--selftest`, `git diff --check`, direct visual layout inspection, and a
+  single-process restart with the FLX4 connected.
+
 - 2026-08-18 (codex): **Full FLX4 transition tutor + selectable dual-device
   audio.** Tutorial mode now opens a full, pulsing virtual DDJ-FLX4 surface,
   queues prompts in transition order, labels the physical deck/control/value,
@@ -216,9 +357,10 @@
   LoopAuto/LoopIn/LoopOut/LoopExit/LoopHalve/LoopDouble/BeatJump. The 30 Hz
   refresh highlights (deck-accent) the matching auto-loop length button
   (beats ≈ (end−start)·bpm/60, ±20% match) plus IN (pending start set) and
-  OUT (loop active). Loop region [loopStartSec,loopEndSec] is shaded in the
-  deck accent (~25% alpha active / dimmer when stored-but-inactive, brighter
-  edge lines) in BOTH the deck overview and the DetailWaveformView lanes;
+  OUT (loop active). LOOP IN now immediately draws a labeled dashed marker;
+  before OUT, its accent shading grows to the live playhead. The completed
+  loop region [loopStartSec,loopEndSec] remains shaded in BOTH the deck
+  overview and the DetailWaveformView lanes while playback advances/wraps;
   the detail view's dirty check now watches the loop atomics so edits
   repaint while paused. Deck overview waveform is now band-colored from
   overviewLow/Mid/High (Theme.h waveLow/Mid/HighColor, unplayed part drawn
@@ -352,12 +494,12 @@ the completed value on receipt of the LSB. Deck A/B below are ControlBus deck
 | FILTER, 14-bit | B | `B6 18 mm`, then `B6 38 ll` | `Filter = raw / 3FFF`; center `2000` is bypass, left is LPF, right is HPF |
 | Crossfader, 14-bit | Global | `B6 1F mm`, then `B6 3F ll` | `Crossfader = raw / 3FFF`; `0000` = full left/deck A, `3FFF` = full right/deck B |
 | Jog side / platter (vinyl on / vinyl off) | A / B | `B0/B1 21/22/23 vv` | `Jog = signed(vv - 40)` ticks; `41` = +1 clockwise, `3F` = -1 counterclockwise, `40` ignored; all modes nudge for MVP |
-| LOOP IN | A / B | `90/91 10 hh` | Nonzero press → `LoopIn`; active-loop LED output `90/91 10 7F/00` |
-| LOOP OUT | A / B | `90/91 11 hh` | Nonzero press → `LoopOut`; active-loop LED output `90/91 11 7F/00` |
+| LOOP IN / 1/2X | A / B | `90/91 10 hh` | Nonzero press → `LoopIn` when inactive, `LoopHalve` when active; active-loop LED output `90/91 10 7F/00` |
+| LOOP OUT / 2X | A / B | `90/91 11 hh` | Nonzero press → `LoopOut` when inactive, `LoopDouble` when active; active-loop LED output `90/91 11 7F/00` |
 | 4 BEAT / EXIT | A / B | `90/91 4D hh` | Nonzero press → `LoopAuto=4.0` when inactive, `LoopExit` when active; LED `90/91 4D 7F/00` |
 | SHIFT + 4 BEAT / EXIT | A / B | `90/91 50 hh` | Nonzero press → `LoopExit`; modifier-state LED mirrors active state |
 | CUE/LOOP CALL left / right | A / B | `90/91 51 hh` / `90/91 53 hh` | Nonzero press → `LoopHalve` / `LoopDouble` |
-| SHIFT + LOOP IN / OUT (1/2X / 2X alternate) | A / B | `90/91 4C hh` / `90/91 4E hh` | Nonzero press → `LoopHalve` / `LoopDouble`; modifier-state LEDs mirror active state |
+| SHIFT + LOOP IN / OUT aliases | A / B | `90/91 4C hh` / `90/91 4E hh` | Nonzero press → `LoopHalve` / `LoopDouble`; modifier-state LEDs mirror active state |
 | Beat-jump pads 1–8 (BEAT JUMP mode) | A / B | `97/99 20..27 hh` | Nonzero presses → `BeatJump=-1,+1,-2,+2,-4,+4,-8,+8`; releases ignored |
 | BEAT FX channel assign | A / B | `94 10 hh` / `95 11 hh` | ON/OFF assignment state selects which deck(s) receive the shared Beat FX controls; before the first assignment report, controls target both decks |
 | BEAT FX SELECT / SHIFT+SELECT | Assigned | `94 63 hh` / `94 64 hh` | Nonzero press cycles `FxType` next / previous modulo echo, reverb, flanger |
@@ -429,7 +571,8 @@ Beat FX LED messages.
 - Checkable buttons wire `toggled` (not `clicked`) so programmatic/AX toggles
   dispatch too; `refresh()` mirrors engine state under QSignalBlocker.
 - PERFORM/TUTORIAL auto-start the from-deck if stopped.
-- Recorder quantizes saved files (0.01 BPM/sec, 0.001 beats) for clean diffs.
+- Recorder retains six-decimal timing/BPM/tempo precision; normalized
+  fader/EQ-style values remain quantized to their actual 0.001 UI resolution.
 - BPM octave preference window is 80..160 (threshold 0.65× best score).
 - Library scan is fully recursive under the chosen folder, hidden dirs skipped.
 - Dev flags: `--selftest`, `--autoload [substrA substrB]` (loads matching

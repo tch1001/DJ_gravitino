@@ -24,6 +24,7 @@ class DetailWaveformView;
 class MixerWidget;
 class LibraryWidget;
 class TransitionPanel;
+class PickupFuzzOverlay;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -58,6 +59,7 @@ private slots:
     void onStemsRequested(int deck);
     void rebuildAudioOutputMenu();
     void selectAudioOutput(const QString& preferredName);
+    void refreshSoftTakeoverUi();
 
 private:
     ControlBus* bus_;
@@ -75,6 +77,7 @@ private:
     TransitionPanel* transitionPanel_ = nullptr;
     QLabel* midiLabel_ = nullptr;
     QLabel* rateLabel_ = nullptr;
+    QLabel* pickupLabel_ = nullptr;
     QMenu* audioOutputMenu_ = nullptr;
     QActionGroup* audioOutputGroup_ = nullptr;
 
@@ -82,6 +85,9 @@ private:
     MasterRecorder* rec_ = nullptr;
     QPushButton* recBtn_ = nullptr;
     QTimer* recTimer_ = nullptr; // 1 s elapsed-time updates while recording
+    QTimer* pickupTimer_ = nullptr;
+    QList<PickupFuzzOverlay*> pickupOverlays_;
+    bool pickupPulse_ = false;
 
     // Stem separation (null stems_ = STEMS button stays inert).
     // Results are matched to decks by track fingerprint: a deck whose track

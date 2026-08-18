@@ -56,6 +56,7 @@ int main()
 
     ControlBus bus;
     AudioEngine engine(&bus);
+    CHECK(std::fabs(engine.crossfader.load() - 0.5f) < 1e-6f);
     const TrackDataPtr a = constantTrack(0.20f);
     const TrackDataPtr b = constantTrack(-0.40f);
     engine.deck(0).loadTrack(a);
@@ -95,6 +96,9 @@ int main()
     engine.deck(1).stop();
     engine.deck(0).loadTrack(old);
     engine.deck(0).loadTrack(replacement);
+    // This test is about source replacement rather than beat-grid behavior;
+    // retain the exact legacy cue timestamp now that Quantize defaults on.
+    engine.deck(0).quantizeHotCues.store(false);
     bus.dispatch({0, ControlId::HotCue1, 1.0}, Origin::Midi);
     CHECK(engine.deck(0).track() == replacement);
     CHECK(std::fabs(engine.deck(0).positionSec() - 0.75) < 1e-6);

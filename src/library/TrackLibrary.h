@@ -18,6 +18,16 @@ public:
     TrackDataPtr trackAt(int row) const;     // null while still analyzing
     QString pathAt(int row) const;
 
+    // Persist corrected bpm/firstBeatSec into the existing analysis cache.
+    // `corrected` must be a ready track in this library. The shared live
+    // TrackData is updated and the BPM model cell emits dataChanged.
+    bool persistBeatGrid(const TrackData& corrected, QString* error = nullptr);
+
+    // Persist user-authored hot cues and saved-loop slots without replacing
+    // newer analysis/grid metadata held by the library after a rescan.
+    bool persistPerformanceMetadata(
+        const TrackData& updated, QString* error = nullptr);
+
     int rowCount(const QModelIndex& = {}) const override;
     int columnCount(const QModelIndex& = {}) const override;
     QVariant data(const QModelIndex&, int role) const override;

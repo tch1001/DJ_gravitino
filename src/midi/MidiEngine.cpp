@@ -3,6 +3,8 @@
 #include "MidiEngine.h"
 #include "../audio/AudioEngine.h"
 #include "Flx4Mapping.h"
+#include "SoftTakeover.h"
+#include "../performance/PerformancePads.h"
 
 #include <QMetaObject>
 #include <QString>
@@ -15,6 +17,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -288,6 +291,13 @@ struct MidiEngine::Impl {
         }
         connected = newConnected;
         connectedName = std::move(newName);
+        if (!connected) {
+            takeover.clearHardware();
+            takeoverTracking = false;
+            takeoverTouched.clear();
+            takeoverFrozen.store(false, std::memory_order_release);
+            emit owner->softTakeoverChanged();
+        }
         emit owner->connectionChanged(connected, connectedName);
     }
 
@@ -311,6 +321,121 @@ struct MidiEngine::Impl {
 
     void postMidiEvent(ControlEvent event) noexcept
     {
+        // After automatic replay, every FLX4 action is frozen except moving
+        // the absolute controls needed to pick up Gravitino's final state.
+        if (takeoverFrozen.load(std::memory_order_acquire) &&
+            !SoftTakeover::supports(event)) {
+            return;
+        }
+
+        if (event.id == ControlId::PerformancePadMode) {
+            const int mode = static_cast<int>(std::lround(event.value));
+            if (event.deck < 0 || event.deck >= 2 || mode < 0 ||
+                mode >= static_cast<int>(PerformancePadMode::Count)) {
+                return;
+            }
+            // Mode buttons are genuine controller input. Update the routing
+            // latch immediately on the MIDI callback thread so a pad pressed
+            // in the same gesture cannot race the queued GUI repaint.
+            activePadMode[static_cast<std::size_t>(event.deck)].store(
+                mode, std::memory_order_release);
+            hardwarePadMode[static_cast<std::size_t>(event.deck)].store(
+                mode, std::memory_order_release);
+            MidiEngine* const targetOwner = owner;
+            QMetaObject::invokeMethod(
+                targetOwner,
+                [targetOwner, deck = event.deck, mode] {
+                    emit targetOwner->performancePadModeRequested(deck, mode);
+                },
+                Qt::QueuedConnection);
+            return;
+        }
+
+        const auto eventId = static_cast<unsigned int>(event.id);
+        const auto firstPad =
+            static_cast<unsigned int>(ControlId::PerformancePad1);
+        const auto lastPad =
+            static_cast<unsigned int>(ControlId::PerformancePad8);
+        if (eventId >= firstPad && eventId <= lastPad) {
+            if (event.deck < 0 || event.deck >= 2)
+                return;
+            const int pad = static_cast<int>(eventId - firstPad);
+            MidiEngine* const targetOwner = owner;
+            int encoded = static_cast<int>(std::lround(
+                std::fabs(event.value)));
+            const bool shifted =
+                encoded > Flx4Mapping::kShiftedPadEncodingOffset;
+            if (shifted)
+                encoded -= Flx4Mapping::kShiftedPadEncodingOffset;
+            const int reportedMode = encoded - 1;
+            if (reportedMode < 0 ||
+                reportedMode >= static_cast<int>(PerformancePadMode::Count)) {
+                return;
+            }
+            hardwarePadMode[static_cast<std::size_t>(event.deck)].store(
+                reportedMode, std::memory_order_release);
+
+            const int mode = activePadMode[
+                static_cast<std::size_t>(event.deck)].load(
+                    std::memory_order_acquire);
+            if (mode < 0 ||
+                mode >= static_cast<int>(PerformancePadMode::Count)) {
+                return;
+            }
+            const bool pressed = event.value > 0.0;
+            if (shifted && mode == static_cast<int>(PerformancePadMode::HotCue)) {
+                // SHIFT deletes only when the host-selected layer is HOT CUE.
+                // A stale hardware HOT CUE latch must never delete a cue while
+                // Gravitino says this pad is PAD FX, BEAT JUMP, etc.
+                if (!pressed)
+                    return;
+                QMetaObject::invokeMethod(
+                    targetOwner,
+                    [targetOwner, deck = event.deck, pad] {
+                        emit targetOwner->hotCueClearRequested(deck, pad);
+                    },
+                    Qt::QueuedConnection);
+                return;
+            }
+            QMetaObject::invokeMethod(
+                targetOwner,
+                [targetOwner, deck = event.deck, mode, pad, pressed] {
+                    emit targetOwner->performancePadRequested(
+                        deck, mode, pad, pressed);
+                },
+                Qt::QueuedConnection);
+            return;
+        }
+
+        if (event.id == ControlId::BrowseNavigate ||
+            event.id == ControlId::BrowseSelect ||
+            event.id == ControlId::Load) {
+            // Library navigation/loading must not become part of a recorded
+            // transition. Forward the physical UI command on the GUI thread
+            // instead of publishing it as an audio ControlBus event.
+            MidiEngine* const targetOwner = owner;
+            ControlBus* const targetBus = bus;
+            QMetaObject::invokeMethod(
+                targetOwner,
+                [targetOwner, targetBus, event] {
+                    if (event.id == ControlId::BrowseNavigate) {
+                        emit targetOwner->browseMoved(
+                            static_cast<int>(event.value));
+                    } else if (event.id == ControlId::BrowseSelect) {
+                        emit targetOwner->browsePressed();
+                    } else {
+                        emit targetOwner->loadRequested(event.deck);
+                        // LOAD remains a tutorial-scored control. Dispatch it
+                        // after the UI handler has attempted the guarded load;
+                        // AudioEngine treats it as a no-op transport command.
+                        if (targetBus)
+                            targetBus->dispatch(event, Origin::Midi);
+                    }
+                },
+                Qt::QueuedConnection);
+            return;
+        }
+
         if (event.deck == kNoDeck &&
             (event.id == ControlId::FxType ||
              event.id == ControlId::FxOn ||
@@ -352,6 +477,24 @@ struct MidiEngine::Impl {
         }
 
         if (event.deck >= 0 && event.deck < 2 &&
+            event.id == ControlId::Quantize && event.value > 0.0 &&
+            engine != nullptr) {
+            event.value = engine->deck(event.deck).quantizeHotCues.load(
+                              std::memory_order_relaxed)
+                ? 0.0 : 1.0;
+        }
+
+        if (event.deck >= 0 && event.deck < 2 && engine != nullptr) {
+            // The FLX4's physical IN/1/2X and OUT/2X buttons always send the
+            // ordinary LOOP IN/OUT notes. Their meaning is contextual: set
+            // manual bounds while no loop is active, or resize the current
+            // loop when it is active.
+            event = Flx4Mapping::resolveLoopButtonAction(
+                event, engine->deck(event.deck).loopActive.load(
+                           std::memory_order_relaxed));
+        }
+
+        if (event.deck >= 0 && event.deck < 2 &&
             event.id == ControlId::LoopAuto && engine != nullptr &&
             engine->deck(event.deck).loopActive.load(
                 std::memory_order_relaxed)) {
@@ -367,11 +510,24 @@ struct MidiEngine::Impl {
         }
 
         QMetaObject::invokeMethod(
-            targetBus,
-            [targetBus, event] {
-                targetBus->dispatch(event, Origin::Midi);
+            owner,
+            [this, event] {
+                handleMidiEventOnGui(event);
             },
             Qt::QueuedConnection);
+    }
+
+    void handleMidiEventOnGui(const ControlEvent& event)
+    {
+        emit owner->hardwareControlObserved(event);
+        bool changed = false;
+        const bool accepted = takeover.acceptHardware(event, &changed);
+        if (changed) {
+            takeoverFrozen.store(takeover.active(), std::memory_order_release);
+            emit owner->softTakeoverChanged();
+        }
+        if (accepted && bus != nullptr)
+            bus->dispatch(event, Origin::Midi);
     }
 
     void postSharedFxEvent(const ControlEvent& event) noexcept
@@ -431,6 +587,18 @@ struct MidiEngine::Impl {
 
     void observeEvent(const ControlEvent& event, Origin origin)
     {
+        if (takeoverTracking && origin != Origin::Midi &&
+            SoftTakeover::supports(event)) {
+            takeoverTouched.insert(
+                {event.deck, static_cast<unsigned int>(event.id)});
+        } else if (!takeoverTracking && takeover.active() &&
+                   origin != Origin::Midi &&
+                   SoftTakeover::supports(event) &&
+                   takeover.retarget(event)) {
+            takeoverFrozen.store(takeover.active(), std::memory_order_release);
+            emit owner->softTakeoverChanged();
+        }
+
         if (event.deck < 0 || event.deck > 1) {
             return;
         }
@@ -472,6 +640,16 @@ struct MidiEngine::Impl {
             // The FLX4 channel-CUE LED is host-controlled, so acknowledge
             // physical MIDI presses as well as UI/system-origin changes.
             sendLed(event.deck, ControlId::HeadphoneCue, actual);
+            return;
+        }
+
+        if (event.id == ControlId::Quantize) {
+            const bool actual = engine != nullptr &&
+                engine->deck(event.deck).quantizeHotCues.load(
+                    std::memory_order_relaxed);
+            quantize[deck] = actual;
+            // Quantize is host state, so acknowledge physical toggles too.
+            sendLed(event.deck, ControlId::Quantize, actual);
             return;
         }
 
@@ -536,6 +714,63 @@ struct MidiEngine::Impl {
             midiOut->sendMessage(message->data(), message->size());
         } catch (...) {
             closeOutput();
+        }
+    }
+
+    void sendRaw(
+        const std::optional<std::array<unsigned char, 3>>& message) noexcept
+    {
+        if (!message || midiOut == nullptr || !midiOut->isPortOpen())
+            return;
+        try {
+            midiOut->sendMessage(message->data(), message->size());
+        } catch (...) {
+            closeOutput();
+        }
+    }
+
+    void sendPerformancePadState(DeckId deck) noexcept
+    {
+        if (deck < 0 || deck >= 2)
+            return;
+        const auto index = static_cast<std::size_t>(deck);
+        const int selectedMode = padMode[index];
+        for (int mode = 0;
+             mode < static_cast<int>(PerformancePadMode::Count); ++mode) {
+            sendRaw(Flx4Mapping::padModeLedMessage(
+                deck, mode, mode == selectedMode));
+        }
+
+        const unsigned int visibleMask =
+            padEnabledMask[index] | padPressedMask[index];
+        const auto sendBank = [this, deck, visibleMask](int bankMode) {
+            const auto mode = static_cast<PerformancePadMode>(bankMode);
+            const bool shiftedBank = performancePadModeIsShifted(mode);
+            for (int pad = 0; pad < kPerformancePadCount; ++pad) {
+                const unsigned int bit = 1U << static_cast<unsigned int>(pad);
+                const unsigned char velocity =
+                    (visibleMask & bit) != 0U ? 0x7F : 0x00;
+                sendRaw(Flx4Mapping::performancePadLedMessage(
+                    deck, bankMode, pad, shiftedBank, velocity));
+                // HOT CUE has an explicit SHIFT delete gesture, so keep its
+                // shifted address space mirrored too.
+                if (mode == PerformancePadMode::HotCue) {
+                    sendRaw(Flx4Mapping::performancePadLedMessage(
+                        deck, bankMode, pad, true, velocity));
+                }
+            }
+        };
+
+        sendBank(selectedMode);
+        // MIDI OUT can light a bank but cannot change the FLX4's private pad
+        // latch. If the user selected a virtual layer, also render that layer's
+        // state into the last bank the controller actually reported so the
+        // physical pads do not visually contradict their host-routed action.
+        const int reportedHardwareMode = hardwarePadMode[index].load(
+            std::memory_order_acquire);
+        if (reportedHardwareMode != selectedMode && reportedHardwareMode >= 0 &&
+            reportedHardwareMode < static_cast<int>(PerformancePadMode::Count)) {
+            sendBank(reportedHardwareMode);
         }
     }
 
@@ -605,6 +840,15 @@ struct MidiEngine::Impl {
                             actualHeadphoneCue);
             }
 
+            const bool actualQuantize =
+                engine->deck(deck).quantizeHotCues.load(
+                    std::memory_order_relaxed);
+            if (quantize[index] != actualQuantize) {
+                quantize[index] = actualQuantize;
+                if (connected)
+                    sendLed(deck, ControlId::Quantize, actualQuantize);
+            }
+
             const TrackDataPtr currentTrack = engine->deck(deck).track();
             for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
                 const bool actualHotCue = currentTrack
@@ -639,6 +883,8 @@ struct MidiEngine::Impl {
                     std::memory_order_relaxed);
                 headphoneCue[index] = engine->headphoneCue[deck].load(
                     std::memory_order_relaxed);
+                quantize[index] = engine->deck(deck).quantizeHotCues.load(
+                    std::memory_order_relaxed);
 
                 const TrackDataPtr currentTrack = engine->deck(deck).track();
                 for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
@@ -656,13 +902,67 @@ struct MidiEngine::Impl {
             sendLed(deck, ControlId::FxOn, fxOn[index]);
             sendLed(deck, ControlId::HeadphoneCue,
                     headphoneCue[index]);
+            sendLed(deck, ControlId::Quantize, quantize[index]);
 
             for (std::size_t pad = 0; pad < hotCue[index].size(); ++pad) {
                 const auto id = static_cast<ControlId>(
                     static_cast<unsigned int>(ControlId::HotCue1) + pad);
                 sendLed(deck, id, hotCue[index][pad]);
             }
+            sendPerformancePadState(deck);
         }
+    }
+
+    double engineValue(DeckId deck, ControlId id) const noexcept
+    {
+        if (engine == nullptr) return 0.0;
+        if (id == ControlId::Crossfader)
+            return engine->crossfader.load(std::memory_order_relaxed);
+        if (deck < 0 || deck >= 2) return 0.0;
+        const Deck& target = engine->deck(deck);
+        switch (id) {
+        case ControlId::Tempo:  return target.tempoRatio.load(std::memory_order_relaxed);
+        case ControlId::Fader:  return target.fader.load(std::memory_order_relaxed);
+        case ControlId::Trim:   return target.trim.load(std::memory_order_relaxed);
+        case ControlId::EqLow:  return target.eqLow.load(std::memory_order_relaxed);
+        case ControlId::EqMid:  return target.eqMid.load(std::memory_order_relaxed);
+        case ControlId::EqHigh: return target.eqHigh.load(std::memory_order_relaxed);
+        case ControlId::Filter: return target.filter.load(std::memory_order_relaxed);
+        default:                return 0.0;
+        }
+    }
+
+    void beginTakeoverTracking()
+    {
+        takeover.clear();
+        takeoverTouched.clear();
+        takeoverTracking = true;
+        takeoverFrozen.store(false, std::memory_order_release);
+        emit owner->softTakeoverChanged();
+    }
+
+    void finishTakeoverTracking()
+    {
+        takeoverTracking = false;
+        if (!connected || takeoverTouched.empty()) {
+            takeover.clear();
+            takeoverTouched.clear();
+            takeoverFrozen.store(false, std::memory_order_release);
+            emit owner->softTakeoverChanged();
+            return;
+        }
+
+        std::vector<ControlEvent> targets;
+        targets.reserve(takeoverTouched.size());
+        for (const auto& [deck, rawControl] : takeoverTouched) {
+            const ControlId control = static_cast<ControlId>(rawControl);
+            targets.push_back(
+                ControlEvent {deck, control, engineValue(deck, control)});
+        }
+        takeoverTouched.clear();
+        takeover.arm(targets);
+        takeoverFrozen.store(takeover.active(), std::memory_order_release);
+        emit owner->softTakeoverChanged();
     }
 
     MidiEngine* owner = nullptr;
@@ -680,7 +980,23 @@ struct MidiEngine::Impl {
     std::array<bool, 2> loopActive {};
     std::array<bool, 2> fxOn {};
     std::array<bool, 2> headphoneCue {};
+    std::array<bool, 2> quantize {true, true};
     std::array<std::array<bool, 8>, 2> hotCue {};
+    std::array<int, 2> padMode {
+        static_cast<int>(PerformancePadMode::HotCue),
+        static_cast<int>(PerformancePadMode::HotCue)};
+    std::array<std::atomic<int>, 2> activePadMode {
+        std::atomic<int> {static_cast<int>(PerformancePadMode::HotCue)},
+        std::atomic<int> {static_cast<int>(PerformancePadMode::HotCue)}};
+    std::array<std::atomic<int>, 2> hardwarePadMode {
+        std::atomic<int> {static_cast<int>(PerformancePadMode::HotCue)},
+        std::atomic<int> {static_cast<int>(PerformancePadMode::HotCue)}};
+    std::array<unsigned int, 2> padEnabledMask {};
+    std::array<unsigned int, 2> padPressedMask {};
+    SoftTakeover takeover;
+    bool takeoverTracking = false;
+    std::set<std::pair<DeckId, unsigned int>> takeoverTouched;
+    std::atomic_bool takeoverFrozen {false};
 };
 
 MidiEngine::MidiEngine(
@@ -702,6 +1018,21 @@ void MidiEngine::start()
     impl_->start();
 }
 
+void MidiEngine::beginTransitionTakeoverTracking()
+{
+    impl_->beginTakeoverTracking();
+}
+
+void MidiEngine::finishTransitionTakeoverTracking()
+{
+    impl_->finishTakeoverTracking();
+}
+
+std::vector<SoftTakeoverState> MidiEngine::pendingTakeovers() const
+{
+    return impl_->takeover.pending();
+}
+
 bool MidiEngine::controllerConnected() const
 {
     return impl_->connected;
@@ -710,6 +1041,30 @@ bool MidiEngine::controllerConnected() const
 QString MidiEngine::controllerName() const
 {
     return impl_->connectedName;
+}
+
+void MidiEngine::setPerformancePadState(
+    int deck, int mode, unsigned int enabledMask,
+    unsigned int pressedMask)
+{
+    if (deck < 0 || deck >= 2 || mode < 0 ||
+        mode >= static_cast<int>(PerformancePadMode::Count)) {
+        return;
+    }
+    const auto index = static_cast<std::size_t>(deck);
+    impl_->activePadMode[index].store(mode, std::memory_order_release);
+    const unsigned int normalizedEnabled = enabledMask & 0xFFU;
+    const unsigned int normalizedPressed = pressedMask & 0xFFU;
+    if (impl_->padMode[index] == mode &&
+        impl_->padEnabledMask[index] == normalizedEnabled &&
+        impl_->padPressedMask[index] == normalizedPressed) {
+        return;
+    }
+    impl_->padMode[index] = mode;
+    impl_->padEnabledMask[index] = normalizedEnabled;
+    impl_->padPressedMask[index] = normalizedPressed;
+    if (impl_->connected)
+        impl_->sendPerformancePadState(deck);
 }
 
 } // namespace gvt

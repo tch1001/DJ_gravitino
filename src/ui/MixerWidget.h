@@ -8,15 +8,17 @@ class QSlider;
 
 namespace gvt {
 
-// Compact horizontal mixer strip (<= ~110 px tall): per channel inline
-// TRIM + HI/MID/LOW knobs and a small vertical fader, with the crossfader
-// in the center. User actions dispatch onto the ControlBus (Origin::Ui);
+// Compact mixer: each channel follows the FLX4's vertical TRIM, HI, MID, LOW,
+// FILTER order, with mirrored channel faders flanking the crossfader. This
+// minimizes the mixer's preferred width beside the transition workspace. User actions
+// dispatch onto the ControlBus (Origin::Ui);
 // bus events from MIDI/Replay are mirrored back into the controls without
 // re-dispatching.
 class MixerWidget : public QWidget {
     Q_OBJECT
 public:
     explicit MixerWidget(ControlBus* bus, QWidget* parent = nullptr);
+    QWidget* controlWidget(DeckId deck, ControlId control) const;
 
 protected:
     // Double-click on a FILTER dial re-centers it to 0.5 (off).

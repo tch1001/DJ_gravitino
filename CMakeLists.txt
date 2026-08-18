@@ -28,16 +28,19 @@ add_library(gvtcore STATIC
     src/analysis/StemSeparator.cpp
     src/analysis/TrackData.cpp
     src/analysis/BeatAnalyzer.cpp
+    src/analysis/BeatGridEditor.cpp
     src/analysis/KeyAnalyzer.cpp
     src/library/TrackLibrary.cpp
     src/library/History.cpp
     src/library/TransitionStore.cpp
+    src/performance/PerformancePads.cpp
     src/transitions/GvtFormat.cpp
     src/transitions/TransitionRecorder.cpp
     src/transitions/TransitionPlayer.cpp
     src/midi/MidiEngine.cpp
     src/midi/Flx4Mapping.cpp
     src/midi/Flx4TutorialMap.cpp
+    src/midi/SoftTakeover.cpp
 )
 target_include_directories(gvtcore PUBLIC src ${RTMIDI_INCLUDE} ${TAGLIB_INCLUDE})
 target_link_libraries(gvtcore PUBLIC

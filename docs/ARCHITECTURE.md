@@ -115,6 +115,13 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
    position and wait for A to cross the anchor. The player reasserts incoming
    transport at that boundary, then fires events on schedule with linear/
    s-curve interpolation between sparse values.
+6. Perform records which FLX4 absolute controls were changed by setup/replay.
+   At the final event, `SoftTakeover` compares their last known physical
+   positions with engine truth. If any differ, all controller input is frozen
+   while only TEMPO/channel fader/TRIM/HIGH/MID/LOW/FILTER/crossfader pickup
+   moves are consumed. Crossing the target releases that control; the final
+   pickup re-enables the controller without ever applying a discontinuous
+   hardware value to audio.
 
 ## Testing
 
@@ -134,3 +141,7 @@ Appears as MIDI device "DDJ-FLX4". Mapping constants in
 Channels: deck1 = ch0, deck2 = ch1, mixer = ch6. Jog: CC with relative ticks;
 platter touch = note. LEDs: send the same note/CC back with velocity 0/127.
 Hot-plug: MidiEngine polls port list every 2 s; connect/disconnect anytime.
+Controller disconnect clears any pending soft-takeover gate. Tutorial mode
+does not arm takeover: its FLX4 diagram instead animates continuous controls
+toward their recorded targets and keeps the prompt alive until the value is
+actually reached.

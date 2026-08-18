@@ -1,0 +1,191 @@
+#include "audio/AudioEngine.h"
+#include "control/ControlBus.h"
+#include "transitions/TransitionEngine.h"
+#include "transitions/TransitionPlayerExt.h"
+
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QTimer>
+#include <cmath>
+#include <cstdio>
+#include <memory>
+
+namespace {
+int failures = 0;
+#define CHECK(condition) do { \
+    if (!(condition)) { \
+        std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, \
+                     #condition); \
+        ++failures; \
+    } \
+} while (0)
+
+void spinEvents(int milliseconds = 30)
+{
+    QEventLoop loop;
+    QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
+    loop.exec();
+}
+
+gvt::TrackDataPtr makeTrack(double bpm = 120.0)
+{
+    auto track = std::make_shared<gvt::TrackData>();
+    track->durationSec = 8.0;
+    track->bpm = bpm;
+    track->firstBeatSec = 0.0;
+    track->pcm.resize(
+        static_cast<std::size_t>(gvt::kSampleRate) * 8U * 2U);
+    return track;
+}
+}
+
+int main(int argc, char** argv)
+{
+    using namespace gvt;
+    QCoreApplication app(argc, argv);
+    ControlBus bus;
+    AudioEngine engine(&bus);
+    engine.deck(0).loadTrack(makeTrack());
+    engine.deck(1).loadTrack(makeTrack());
+    engine.deck(0).seekSec(0.0);
+    engine.deck(0).play();
+
+    GvtFile file;
+    file.initialComplete = true;
+    file.initialMixerCaptured = true;
+    file.anchorFromBeat = 0.0;
+    file.anchorToBeat = 2.0; // one second at 120 BPM
+    file.masterBpm = 120.0;
+    file.initialFrom.captured = true;
+    file.initialFrom.playing = true;
+    file.initialFrom.loopActive = true;
+    file.initialFrom.loopStartBeat = 0.0;
+    file.initialFrom.loopEndBeat = 2.0;
+    file.initialTo.captured = true;
+    file.initialTo.playing = false;
+    file.initialTo.positionBeat = 7.0; // deliberately not the play anchor
+    file.events.push_back(
+        {0.12, Role::ToDeck, ControlId::Play, 1.0, Curve::Step});
+
+    TransitionPlayer player(&bus, &engine);
+    QString error;
+
+    // A recorded PLAY always overrides a disturbed live incoming position.
+    engine.deck(0).seekSec(0.99); // just before the outgoing loop wraps
+    engine.deck(1).seekSec(3.0);
+    engine.deck(1).play();
+    CHECK(player.arm(file, 0, true, &error));
+    spinEvents(25);
+    CHECK(error.isEmpty());
+    CHECK(!engine.deck(1).playing.load());
+    // A simulated loop wrap must not rewind the transition's monotonic clock.
+    engine.deck(0).seekSec(0.0);
+    spinEvents(60);
+    CHECK(engine.deck(1).playing.load());
+    CHECK(std::fabs(engine.deck(1).positionSec() - 1.0) < 1.0e-6);
+    player.abort();
+
+    // If the incoming deck was already rolling in the recorded pre-state,
+    // restore and start it at transition beat zero without requiring a PLAY
+    // event or any manual deck alignment.
+    file.events.clear();
+    file.initialTo.playing = true;
+    file.initialTo.positionBeat = 3.0; // 1.5 seconds
+    engine.deck(1).stop();
+    engine.deck(1).seekSec(0.0);
+    CHECK(player.arm(file, 0, true, &error));
+    spinEvents();
+    CHECK(engine.deck(1).playing.load());
+    CHECK(std::fabs(engine.deck(1).positionSec() - 1.5) < 1.0e-6);
+    player.abort();
+
+    // Regridding can change native BPM after a transition was recorded. Both
+    // initial and later tempo ratios are rebased to preserve effective BPM,
+    // while the captured Quantize state is restored for deterministic loops.
+    file.initialTo.playing = false;
+    file.initialTo.quantizeCaptured = true;
+    file.initialTo.quantize = false;
+    file.to.bpm = 129.912345;
+    file.initialTo.tempoRatio = 0.985643;
+    constexpr double eventRatio = 0.986127;
+    file.events = {
+        {0.0, Role::ToDeck, ControlId::Tempo, eventRatio, Curve::Step},
+    };
+    engine.deck(1).stop();
+    engine.deck(1).quantizeHotCues.store(true);
+    CHECK(player.arm(file, 0, true, &error));
+    spinEvents();
+    const double wantedRatio = file.to.bpm * eventRatio /
+                               engine.deck(1).track()->bpm;
+    CHECK(std::fabs(engine.deck(1).tempoRatio.load() - wantedRatio) < 1.0e-9);
+    CHECK(!engine.deck(1).quantizeHotCues.load());
+    player.abort();
+
+    // Recorder output retains the controller/audio engine's six-decimal
+    // tempo precision instead of rounding it to a drift-inducing 0.001.
+    engine.deck(0).loadTrack(makeTrack(127.987654));
+    engine.deck(0).tempoRatio.store(1.000027);
+    engine.deck(0).stop();
+    TransitionRecorder recorder(&bus, &engine);
+    recorder.start(0);
+    constexpr double capturedRatio = 0.985643;
+    bus.dispatch({0, ControlId::Tempo, capturedRatio}, Origin::Ui);
+    const GvtFile recorded = recorder.finish();
+    CHECK(std::fabs(recorded.from.bpm - 127.987654) < 1.0e-9);
+    CHECK(std::fabs(recorded.initialFrom.tempoRatio - 1.000027) < 1.0e-9);
+    CHECK(recorded.initialFrom.quantizeCaptured);
+    bool foundTempo = false;
+    for (const GvtEvent& event : recorded.events) {
+        if (event.role == Role::FromDeck &&
+            event.control == ControlId::Tempo) {
+            foundTempo = true;
+            CHECK(std::fabs(event.value - capturedRatio) < 1.0e-9);
+        }
+    }
+    CHECK(foundTempo);
+
+    // Recorder timestamps also stay monotonic when the outgoing position
+    // wraps from the end of an active loop back to its start.
+    Deck& outgoing = engine.deck(0);
+    const TrackDataPtr outgoingTrack = outgoing.track();
+    outgoing.loopStartSec.store(outgoingTrack->secAtBeat(0.0));
+    outgoing.loopEndSec.store(outgoingTrack->secAtBeat(2.0));
+    outgoing.loopActive.store(true);
+    outgoing.seekSec(outgoingTrack->secAtBeat(1.99));
+    outgoing.play();
+    TransitionRecorder loopRecorder(&bus, &engine);
+    loopRecorder.start(0);
+    bus.dispatch({0, ControlId::Fader, 0.4}, Origin::Ui);
+    outgoing.seekSec(outgoingTrack->secAtBeat(0.01));
+    bus.dispatch({0, ControlId::EqLow, 0.4}, Origin::Ui);
+    const GvtFile loopRecorded = loopRecorder.finish();
+    CHECK(loopRecorded.events.size() == 2);
+    if (loopRecorded.events.size() == 2)
+        CHECK(loopRecorded.events[1].beat > loopRecorded.events[0].beat);
+
+    // Tutorial continuous controls remain pending after a mere nudge and are
+    // completed only once the student reaches the recorded target.
+    GvtFile tutorial;
+    tutorial.anchorFromBeat = outgoing.beatPosition();
+    tutorial.masterBpm = outgoing.effectiveBpm();
+    tutorial.events.push_back(
+        {0.0, Role::FromDeck, ControlId::EqHigh, 0.8, Curve::Step});
+    int tutorialScores = 0;
+    QObject::connect(&player, &TransitionPlayer::tutorialScored,
+                     [&tutorialScores](const GvtEvent&, double, double) {
+                         ++tutorialScores;
+                     });
+    transitionPlayerSetMode(&player, PlayerMode::Tutorial);
+    CHECK(player.arm(tutorial, 0, true, &error));
+    spinEvents();
+    bus.dispatch({0, ControlId::EqHigh, 0.3}, Origin::Ui);
+    CHECK(tutorialScores == 0);
+    bus.dispatch({0, ControlId::EqHigh, 0.8}, Origin::Ui);
+    CHECK(tutorialScores == 1);
+    player.abort();
+
+    if (failures != 0)
+        return 1;
+    std::printf("test_transition_replay: loops, tempo, and transport are deterministic\n");
+    return 0;
+}

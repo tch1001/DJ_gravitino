@@ -6,11 +6,13 @@
 
 #include "TrackLibrary.h"
 #include "../analysis/AnalysisInternal.h"
+#include "../analysis/BeatGridEditor.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -59,6 +61,9 @@ std::shared_ptr<LibState> state(const TrackLibrary* m)
 
 QString cacheDirPath()
 {
+    const QByteArray overridePath = qgetenv("GRAVITINO_CACHE_DIR");
+    if (!overridePath.isEmpty())
+        return QFile::decodeName(overridePath);
     return QDir::homePath() + QStringLiteral("/.gravitino/cache");
 }
 
@@ -69,9 +74,19 @@ QString cacheFileFor(const QString& trackPath)
     return cacheDirPath() + QLatin1Char('/') + QString::fromLatin1(sha1) + QStringLiteral(".json");
 }
 
-void writeCache(const TrackData& t, qint64 mtimeMs)
+bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
+                const TrackData* gridOverride = nullptr,
+                const TrackData* performanceOverride = nullptr)
 {
-    QDir().mkpath(cacheDirPath());
+    if (error)
+        error->clear();
+    const QString dirPath = cacheDirPath();
+    if (!QDir().mkpath(dirPath)) {
+        if (error)
+            *error = QStringLiteral("Could not create analysis cache: %1")
+                         .arg(dirPath);
+        return false;
+    }
     QJsonObject o;
     o[QStringLiteral("path")]         = t.filePath;
     o[QStringLiteral("mtime")]        = (double)mtimeMs;
@@ -79,20 +94,49 @@ void writeCache(const TrackData& t, qint64 mtimeMs)
     o[QStringLiteral("artist")]       = t.artist;
     o[QStringLiteral("album")]        = t.album;
     o[QStringLiteral("durationSec")]  = t.durationSec;
-    o[QStringLiteral("bpm")]          = t.bpm;
-    o[QStringLiteral("firstBeatSec")] = t.firstBeatSec;
+    o[QStringLiteral("bpm")] = gridOverride ? gridOverride->bpm : t.bpm;
+    o[QStringLiteral("firstBeatSec")] = gridOverride
+        ? gridOverride->firstBeatSec : t.firstBeatSec;
     o[QStringLiteral("fingerprint")]  = t.fingerprint;
     o[QStringLiteral("camelotKey")]   = t.camelotKey;
     o[QStringLiteral("keyName")]      = t.keyName;
+    const TrackData& performance = performanceOverride
+        ? *performanceOverride : t;
     QJsonArray cues;
-    for (double c : t.hotCues) cues.append(c);
+    for (double c : performance.hotCues) cues.append(c);
     o[QStringLiteral("hotCues")] = cues;
+    QJsonArray savedLoops;
+    for (const SavedLoopSlot& slot : performance.savedLoops) {
+        QJsonObject saved;
+        saved[QStringLiteral("startSec")] = slot.startSec;
+        saved[QStringLiteral("endSec")] = slot.endSec;
+        saved[QStringLiteral("label")] = slot.label;
+        savedLoops.append(saved);
+    }
+    o[QStringLiteral("savedLoops")] = savedLoops;
 
     QSaveFile f(cacheFileFor(t.filePath));
-    if (f.open(QIODevice::WriteOnly)) {
-        f.write(QJsonDocument(o).toJson(QJsonDocument::Indented));
-        f.commit();
+    if (!f.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = QStringLiteral("Could not open analysis cache: %1")
+                         .arg(f.errorString());
+        return false;
     }
+    const QByteArray json = QJsonDocument(o).toJson(QJsonDocument::Indented);
+    if (f.write(json) != json.size()) {
+        if (error)
+            *error = QStringLiteral("Could not write analysis cache: %1")
+                         .arg(f.errorString());
+        f.cancelWriting();
+        return false;
+    }
+    if (!f.commit()) {
+        if (error)
+            *error = QStringLiteral("Could not save analysis cache: %1")
+                         .arg(f.errorString());
+        return false;
+    }
+    return true;
 }
 
 // Cache hit: decode PCM (needed for playback) but skip beat analysis.
@@ -122,6 +166,17 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
     t->durationSec  = (double)t->frameCount() / (double)kSampleRate;
     const QJsonArray cues = o.value(QStringLiteral("hotCues")).toArray();
     for (int i = 0; i < 8 && i < cues.size(); ++i) t->hotCues[i] = cues[i].toDouble(-1.0);
+    const QJsonArray savedLoops =
+        o.value(QStringLiteral("savedLoops")).toArray();
+    for (int i = 0; i < 8 && i < savedLoops.size(); ++i) {
+        const QJsonObject saved = savedLoops.at(i).toObject();
+        SavedLoopSlot slot;
+        slot.startSec = saved.value(QStringLiteral("startSec")).toDouble(-1.0);
+        slot.endSec = saved.value(QStringLiteral("endSec")).toDouble(-1.0);
+        slot.label = saved.value(QStringLiteral("label")).toString();
+        if (slot.isSet())
+            t->savedLoops[i] = slot;
+    }
     if (t->title.isEmpty()) t->title = QFileInfo(path).completeBaseName();
     t->overviewPeaks = detail::computeOverviewPeaks(t->pcm);
     detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh);
@@ -134,7 +189,7 @@ TrackDataPtr analyzeWithCache(const QString& path, QString* error)
     if (TrackDataPtr cached = loadFromCache(path, mtimeMs, error))
         return cached;
     TrackDataPtr t = loadAndAnalyzeTrack(path, error);
-    if (t) writeCache(*t, mtimeMs);
+    if (t) (void)writeCache(*t, mtimeMs);
     return t;
 }
 
@@ -224,6 +279,106 @@ QString TrackLibrary::pathAt(int row) const
     auto st = state(this);
     if (row < 0 || row >= (int)st->rows.size()) return {};
     return st->rows[(size_t)row].path;
+}
+
+bool TrackLibrary::persistBeatGrid(const TrackData& corrected, QString* error)
+{
+    if (error)
+        error->clear();
+    if (corrected.filePath.isEmpty()) {
+        if (error) *error = QStringLiteral("Track has no file path");
+        return false;
+    }
+    if (!BeatGridEditor::isValidBpm(corrected.bpm)) {
+        if (error) {
+            *error = QStringLiteral("BPM must be between %1 and %2")
+                         .arg(BeatGridEditor::kMinBpm, 0, 'f', 1)
+                         .arg(BeatGridEditor::kMaxBpm, 0, 'f', 1);
+        }
+        return false;
+    }
+    if (!std::isfinite(corrected.firstBeatSec)) {
+        if (error) *error = QStringLiteral("Beat-grid anchor is not finite");
+        return false;
+    }
+
+    auto st = state(this);
+    int row = -1;
+    for (int index = 0; index < static_cast<int>(st->rows.size()); ++index) {
+        if (st->rows[static_cast<std::size_t>(index)].path ==
+            corrected.filePath) {
+            row = index;
+            break;
+        }
+    }
+    if (row < 0) {
+        if (error) *error = QStringLiteral("Track is not in this library");
+        return false;
+    }
+
+    Row& libraryRow = st->rows[static_cast<std::size_t>(row)];
+    if (!libraryRow.track) {
+        if (error) *error = QStringLiteral("Track is still being analyzed");
+        return false;
+    }
+
+    // The loaded deck may hold an older TrackData instance after a rescan.
+    // Serialize the library's current metadata/hot cues and override only the
+    // two corrected grid fields, so a regrid cannot resurrect stale analysis.
+    // QSaveFile commits the merged object atomically.
+    const qint64 mtimeMs =
+        QFileInfo(corrected.filePath).lastModified().toMSecsSinceEpoch();
+    if (!writeCache(*libraryRow.track, mtimeMs, error, &corrected))
+        return false;
+
+    libraryRow.track->bpm = corrected.bpm;
+    libraryRow.track->firstBeatSec = corrected.firstBeatSec;
+    emit dataChanged(index(row, ColBpm), index(row, ColBpm),
+                     {Qt::DisplayRole});
+    return true;
+}
+
+bool TrackLibrary::persistPerformanceMetadata(
+    const TrackData& updated, QString* error)
+{
+    if (error)
+        error->clear();
+    if (updated.filePath.isEmpty()) {
+        if (error) *error = QStringLiteral("Track has no file path");
+        return false;
+    }
+
+    auto st = state(this);
+    int row = -1;
+    for (int index = 0; index < static_cast<int>(st->rows.size()); ++index) {
+        if (st->rows[static_cast<std::size_t>(index)].path ==
+            updated.filePath) {
+            row = index;
+            break;
+        }
+    }
+    if (row < 0) {
+        if (error) *error = QStringLiteral("Track is not in this library");
+        return false;
+    }
+
+    Row& libraryRow = st->rows[static_cast<std::size_t>(row)];
+    if (!libraryRow.track) {
+        if (error) *error = QStringLiteral("Track is still being analyzed");
+        return false;
+    }
+
+    const qint64 mtimeMs =
+        QFileInfo(updated.filePath).lastModified().toMSecsSinceEpoch();
+    if (!writeCache(*libraryRow.track, mtimeMs, error, nullptr, &updated))
+        return false;
+
+    for (int pad = 0; pad < 8; ++pad) {
+        libraryRow.track->hotCues[pad] = updated.hotCues[pad];
+        libraryRow.track->savedLoops[pad] = updated.savedLoops[pad].isSet()
+            ? updated.savedLoops[pad] : SavedLoopSlot {};
+    }
+    return true;
 }
 
 int TrackLibrary::rowCount(const QModelIndex& parent) const

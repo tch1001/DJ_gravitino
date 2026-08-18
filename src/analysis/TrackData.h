@@ -8,6 +8,17 @@ namespace gvt {
 
 constexpr int kSampleRate = 48000; // engine + all decoded tracks run at 48 kHz
 
+struct SavedLoopSlot {
+    double startSec = -1.0;
+    double endSec = -1.0;
+    QString label;
+
+    bool isSet() const noexcept
+    {
+        return startSec >= 0.0 && endSec > startSec;
+    }
+};
+
 // A fully decoded, analyzed track resident in memory.
 struct TrackData {
     QString filePath;
@@ -41,6 +52,9 @@ struct TrackData {
 
     // Hot cue positions in seconds; <0 = unset. Index 0..7.
     double hotCues[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
+
+    // Serato-style saved loop slots. Empty slots have negative bounds.
+    SavedLoopSlot savedLoops[8];
 };
 using TrackDataPtr = std::shared_ptr<TrackData>;
 

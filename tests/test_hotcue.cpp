@@ -77,6 +77,76 @@ int main()
     CHECK(engine.deck(0).positionSec() >= cueLatchedSec);
     engine.deck(0).stop();
 
+    // Quantize defaults on per deck. Placement snaps to the nearest whole
+    // beat, and triggering also snaps legacy/off-grid saved cues.
+    CHECK(engine.deck(0).quantizeHotCues.load());
+    track->firstBeatSec = 0.1;
+    engine.deck(0).seekSec(0.38); // beat 0.56 -> beat 1 at 0.6 s
+    engine.deck(0).setHotCue(1);
+    CHECK(std::fabs(track->hotCues[1] - 0.6) < 1e-6);
+
+    track->hotCues[2] = 0.82; // beat 1.44 -> beat 1 at 0.6 s
+    engine.deck(0).seekSec(2.0);
+    engine.deck(0).handleHotCue(2, true);
+    CHECK(engine.deck(0).previewActive());
+    CHECK(std::fabs(engine.deck(0).positionSec() - 0.6) < 1e-6);
+    engine.deck(0).handleHotCue(2, false);
+    CHECK(!engine.deck(0).playing.load());
+    CHECK(std::fabs(engine.deck(0).positionSec() - 0.6) < 1e-6);
+
+    engine.deck(0).seekSec(1.31); // direct jump path also quantizes off-grid cue
+    engine.deck(0).jumpHotCue(2);
+    CHECK(std::fabs(engine.deck(0).positionSec() - 0.6) < 1e-6);
+
+    // With Quantize off, both placement and triggering preserve exact time.
+    bus.dispatch({0, ControlId::Quantize, 0.0}, Origin::Ui);
+    CHECK(!engine.deck(0).quantizeHotCues.load());
+    engine.deck(0).seekSec(1.37);
+    engine.deck(0).setHotCue(3);
+    CHECK(std::fabs(track->hotCues[3] - 1.37) < 1e-6);
+    engine.deck(0).seekSec(2.0);
+    engine.deck(0).handleHotCue(3, true);
+    CHECK(std::fabs(engine.deck(0).positionSec() - 1.37) < 1e-6);
+    engine.deck(0).play(); // retain the existing PLAY-latch contract
+    engine.deck(0).handleHotCue(3, false);
+    CHECK(engine.deck(0).playing.load());
+    CHECK(std::fabs(engine.deck(0).positionSec() - 1.37) < 1e-6);
+    engine.deck(0).stop();
+
+    // Manual loop IN/OUT follows the same per-deck Quantize preference.
+    // Enabled means whole beat lines; disabled preserves exact pointer time.
+    engine.deck(0).quantizeHotCues.store(true);
+    track->bpm = 120.0;
+    track->firstBeatSec = 0.1;
+    engine.deck(0).seekSec(0.38); // nearest whole beat is 0.6 s
+    engine.deck(0).loopIn();
+    engine.deck(0).seekSec(1.38); // nearest whole beat is 1.6 s
+    engine.deck(0).loopOut();
+    CHECK(engine.deck(0).loopActive.load());
+    CHECK(std::fabs(engine.deck(0).loopStartSec.load() - 0.6) < 1e-6);
+    CHECK(std::fabs(engine.deck(0).loopEndSec.load() - 1.6) < 1e-6);
+    engine.deck(0).loopExit();
+
+    engine.deck(0).quantizeHotCues.store(false);
+    engine.deck(0).seekSec(0.73);
+    engine.deck(0).loopIn();
+    engine.deck(0).seekSec(1.41);
+    engine.deck(0).loopOut();
+    CHECK(engine.deck(0).loopActive.load());
+    CHECK(std::fabs(engine.deck(0).loopStartSec.load() - 0.73) < 1e-6);
+    CHECK(std::fabs(engine.deck(0).loopEndSec.load() - 1.41) < 1e-6);
+    engine.deck(0).loopExit();
+
+    // A missing beat grid degrades safely to exact positioning even while the
+    // user's Quantize preference remains enabled.
+    engine.deck(0).quantizeHotCues.store(true);
+    track->bpm = 0.0;
+    engine.deck(0).seekSec(1.23);
+    engine.deck(0).setHotCue(4);
+    CHECK(std::fabs(track->hotCues[4] - 1.23) < 1e-6);
+    track->bpm = 120.0;
+    track->firstBeatSec = 0.0;
+
     // A transition that references a hot cue stores the pad's track-relative
     // beat so Tutorial can later reject missing or incorrectly mapped pads.
     auto incoming = std::make_shared<TrackData>();
@@ -91,7 +161,28 @@ int main()
     const GvtFile recorded = recorder.finish();
     CHECK(std::fabs(recorded.fromHotCueBeats[0] - 2.0) < 1e-6);
 
+    // A combined sampler/saved-loop pad retriggers audio directly, then
+    // publishes PLAY so a transition retains the incoming start gesture and
+    // captures the loop IN point as its replay anchor.
+    CHECK(engine.deck(1).activateSavedLoop(0.5, 1.5));
+    engine.deck(1).stop();
+    recorder.start(0);
+    CHECK(engine.deck(1).retriggerSavedLoop(0.5, 1.5));
+    bus.dispatch({1, ControlId::Play, 1.0}, Origin::Ui);
+    const GvtFile loopRecorded = recorder.finish();
+    bool foundIncomingPlay = false;
+    for (const GvtEvent& event : loopRecorded.events) {
+        if (event.role == Role::ToDeck &&
+            event.control == ControlId::Play) {
+            foundIncomingPlay = true;
+            break;
+        }
+    }
+    CHECK(foundIncomingPlay);
+    CHECK(std::fabs(loopRecorded.anchorToBeat - 1.0) < 1e-6);
+    CHECK(loopRecorded.initialTo.loopActive);
+
     if (failures) return 1;
-    std::printf("test_hotcue: hold-preview and release-return passed\n");
+    std::printf("test_hotcue: quantize, hold-preview, and release-return passed\n");
     return 0;
 }

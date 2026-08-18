@@ -1,10 +1,16 @@
 #include "TransitionPanel.h"
+#include "FitButton.h"
 #include "Flx4TutorialWidget.h"
 #include "../transitions/TransitionPlayerExt.h"
 #include "Theme.h"
 
 #include <QHBoxLayout>
 #include <QAbstractButton>
+#include <QCheckBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QLabel>
@@ -12,8 +18,9 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QProgressBar>
-#include <QPushButton>
+#include <QSettings>
 #include <QSet>
+#include <QSplitter>
 #include <QLineEdit>
 #include <QTableWidget>
 #include <QTimer>
@@ -91,10 +98,18 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
 
     auto* root = new QHBoxLayout(this);
     root->setContentsMargins(6, 4, 6, 4);
-    root->setSpacing(8);
+    root->setSpacing(0);
+    auto* contentSplitter = new QSplitter(Qt::Horizontal, this);
+    contentSplitter->setObjectName(
+        QStringLiteral("transitionContentSplitter"));
+    contentSplitter->setChildrenCollapsible(false);
+    root->addWidget(contentSplitter);
 
     // Left: matching transitions list.
-    auto* leftCol = new QVBoxLayout;
+    auto* leftPane = new QWidget(contentSplitter);
+    leftPane->setMinimumWidth(140);
+    auto* leftCol = new QVBoxLayout(leftPane);
+    leftCol->setContentsMargins(0, 0, 4, 0);
     auto* header = new QLabel(tr("TRANSITIONS"));
     header->setStyleSheet(QStringLiteral("color:%1; font-weight:bold; "
                                          "letter-spacing:2px;")
@@ -103,8 +118,8 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     headerRow->setSpacing(3);
     headerRow->addWidget(header);
     headerRow->addStretch(1);
-    renameBtn_ = new QPushButton(tr("RENAME…"));
-    deleteBtn_ = new QPushButton(tr("DELETE…"));
+    renameBtn_ = new FitPushButton(tr("RENAME…"));
+    deleteBtn_ = new FitPushButton(tr("DELETE…"));
     renameBtn_->setFixedHeight(18);
     deleteBtn_->setFixedHeight(18);
     headerRow->addWidget(renameBtn_);
@@ -113,10 +128,13 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     list_ = new ToggleSelectionList;
     list_->setMinimumHeight(52);
     leftCol->addWidget(list_, 1);
-    root->addLayout(leftCol, 2);
+    contentSplitter->addWidget(leftPane);
 
     // Center: deterministic sequence preview for the selected transition.
-    auto* previewCol = new QVBoxLayout;
+    auto* previewPane = new QWidget(contentSplitter);
+    previewPane->setMinimumWidth(220);
+    auto* previewCol = new QVBoxLayout(previewPane);
+    previewCol->setContentsMargins(4, 0, 4, 0);
     auto* previewHeader = new QLabel(tr("EVENT SEQUENCE"));
     previewHeader->setStyleSheet(QStringLiteral("color:%1; font-weight:bold; "
                                                 "letter-spacing:2px;")
@@ -125,7 +143,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     previewHeaderRow->setSpacing(3);
     previewHeaderRow->addWidget(previewHeader);
     previewHeaderRow->addStretch(1);
-    labelCueBtn_ = new QPushButton(tr("LABEL CUE…"));
+    labelCueBtn_ = new FitPushButton(tr("LABEL CUE…"));
     labelCueBtn_->setFixedHeight(18);
     labelCueBtn_->setToolTip(
         tr("Add, change, or clear a waveform label at the selected event beat"));
@@ -145,26 +163,29 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     preview_->setColumnWidth(2, 92);
     preview_->setColumnWidth(3, 72);
     previewCol->addWidget(preview_, 1);
-    root->addLayout(previewCol, 3);
+    contentSplitter->addWidget(previewPane);
 
     // Right: controls.
-    auto* rightCol = new QVBoxLayout;
+    auto* rightPane = new QWidget(contentSplitter);
+    rightPane->setMinimumWidth(240);
+    auto* rightCol = new QVBoxLayout(rightPane);
+    rightCol->setContentsMargins(4, 0, 0, 0);
     auto* buttons = new QHBoxLayout;
-    recBtn_ = new QPushButton(tr("● REC"));
+    recBtn_ = new FitPushButton(tr("● REC"));
     recBtn_->setStyleSheet(
         "QPushButton { color:#e85555; font-weight:bold; }"
         "QPushButton:disabled { color:#4f545e; background:#24272e; "
         "border-color:#30343c; }");
-    stopSaveBtn_ = new QPushButton(tr("■ STOP && SAVE"));
-    performBtn_ = new QPushButton(tr("▶ PERFORM"));
+    stopSaveBtn_ = new FitPushButton(tr("■ STOP && SAVE"));
+    performBtn_ = new FitPushButton(tr("▶ PERFORM"));
     performBtn_->setStyleSheet(
         QStringLiteral("color:%1; font-weight:bold;").arg(deckAccent(0).name()));
-    tutorialBtn_ = new QPushButton(tr("🎓 TUTORIAL"));
+    tutorialBtn_ = new FitPushButton(tr("🎓 TUTORIAL"));
     tutorialBtn_->setToolTip(
         tr("Practice this transition: prompts appear 4 beats ahead,\n"
            "your moves are scored against the recording."));
-    abortBtn_ = new QPushButton(tr("⏹ ABORT"));
-    primeBtn_ = new QPushButton(tr("⚡ PRIME"));
+    abortBtn_ = new FitPushButton(tr("⏹ ABORT"));
+    primeBtn_ = new FitPushButton(tr("⚡ PRIME"));
     primeBtn_->setToolTip(
         tr("Arm the selected transition without seeking: it fires\n"
            "automatically when playback reaches the marked entry beat\n"
@@ -177,7 +198,29 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     setupLabel_ = new QLabel;
     setupLabel_->setWordWrap(true);
     setupRow->addWidget(setupLabel_, 1);
-    applySetupBtn_ = new QPushButton(tr("MATCH SETUP"));
+    QSettings setupSettings;
+    setupTolerances_.closeEnough = setupSettings.value(
+        QStringLiteral("transitions/closeEnoughEnabled"), false).toBool();
+    setupTolerances_.bpm = std::clamp(setupSettings.value(
+        QStringLiteral("transitions/closeEnoughBpm"), 0.5).toDouble(),
+        0.05, 10.0);
+    setupTolerances_.volume = std::clamp(setupSettings.value(
+        QStringLiteral("transitions/closeEnoughVolume"), 5.0).toDouble() /
+        100.0, 0.015, 0.25);
+    setupTolerances_.eq = std::clamp(setupSettings.value(
+        QStringLiteral("transitions/closeEnoughEq"), 5.0).toDouble() /
+        100.0, 0.015, 0.25);
+    closeEnoughCheck_ = new QCheckBox(tr("CLOSE ENOUGH"), this);
+    closeEnoughCheck_->setChecked(setupTolerances_.closeEnough);
+    closeEnoughCheck_->setToolTip(
+        tr("Accept configured BPM, volume, and EQ differences as ready; "
+           "tracks and discrete setup states must still match exactly"));
+    setupRow->addWidget(closeEnoughCheck_);
+    toleranceBtn_ = new FitPushButton(tr("TOLERANCE…"), this);
+    toleranceBtn_->setToolTip(
+        tr("Set the accepted BPM, volume-fader, and EQ differences"));
+    setupRow->addWidget(toleranceBtn_);
+    applySetupBtn_ = new FitPushButton(tr("MATCH SETUP"));
     applySetupBtn_->setToolTip(
         tr("Restore the recorded pre-transition audio state across both "
            "decks and the mixer"));
@@ -195,7 +238,21 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     statusRow->addWidget(progress_, 1);
     rightCol->addLayout(statusRow);
     rightCol->addStretch(1);
-    root->addLayout(rightCol, 1);
+    contentSplitter->addWidget(rightPane);
+    contentSplitter->setStretchFactor(0, 2);
+    contentSplitter->setStretchFactor(1, 3);
+    contentSplitter->setStretchFactor(2, 2);
+    contentSplitter->setSizes({260, 480, 360});
+    const QByteArray contentState = setupSettings.value(
+        QStringLiteral("layout/transitionContentSplitter")).toByteArray();
+    if (!contentState.isEmpty())
+        contentSplitter->restoreState(contentState);
+    connect(contentSplitter, &QSplitter::splitterMoved, this,
+            [contentSplitter] {
+                QSettings().setValue(
+                    QStringLiteral("layout/transitionContentSplitter"),
+                    contentSplitter->saveState());
+            });
 
     bannerTimer_ = new QTimer(this);
     bannerTimer_->setSingleShot(true);
@@ -230,6 +287,20 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
             &TransitionPanel::onLabelCue);
     connect(applySetupBtn_, &QPushButton::clicked, this,
             &TransitionPanel::onApplySetup);
+    connect(closeEnoughCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
+        setupTolerances_.closeEnough = enabled;
+        QSettings().setValue(
+            QStringLiteral("transitions/closeEnoughEnabled"), enabled);
+        updateSetupStatus();
+        updateControls();
+        emit statusMessage(
+            enabled
+                ? tr("Close Enough enabled: configured BPM, volume, and EQ margins are accepted")
+                : tr("Close Enough disabled: strict recorded setup matching restored"),
+            4000);
+    });
+    connect(toleranceBtn_, &QPushButton::clicked, this,
+            &TransitionPanel::onEditSetupTolerance);
 
     connect(store_, &TransitionStore::changed, this,
             &TransitionPanel::refreshMatches);
@@ -467,7 +538,7 @@ void TransitionPanel::announceEntryMarker()
 QString TransitionPanel::automaticCueLabel(const GvtEvent& event) const
 {
     switch (event.control) {
-    case ControlId::TempoSync: return tr("Start beatmatch");
+    case ControlId::TempoSync: return tr("Align beats");
     case ControlId::Play:
         return event.role == Role::ToDeck ? tr("Bring in track")
                                           : tr("Start outgoing");
@@ -567,6 +638,8 @@ void TransitionPanel::updatePreview()
         } else if (event.control == ControlId::FxType) {
             const int type = std::clamp((int)std::lround(event.value), 0, 2);
             value = QStringList {tr("echo"), tr("reverb"), tr("flanger")}.at(type);
+        } else if (event.control == ControlId::Quantize) {
+            value = event.value >= 0.5 ? tr("On") : tr("Off");
         } else {
             value = QStringLiteral("%1%").arg(event.value * 100.0, 0, 'f', 0);
         }
@@ -582,13 +655,22 @@ void TransitionPanel::updatePreview()
 }
 
 bool TransitionPanel::setupMatches(const Match& match,
-                                   QStringList* differences) const
+                                   QStringList* differences,
+                                   bool honorCloseEnough) const
 {
     QStringList local;
     const bool complete = match.file->initialComplete;
-    const auto compare = [&local, this](const QString& name, double actual,
-                                        double wanted, double tolerance = 0.015) {
-        if (std::fabs(actual - wanted) > tolerance)
+    TransitionSetupTolerances tolerance = setupTolerances_;
+    if (!honorCloseEnough)
+        tolerance.closeEnough = false;
+    const auto compare = [&local, this, &tolerance](
+                             const QString& name, double actual,
+                             double wanted,
+                             SetupToleranceField field =
+                                 SetupToleranceField::Other,
+                             double strictTolerance = 0.015) {
+        if (!transitionSetupValueMatches(
+                actual, wanted, field, strictTolerance, tolerance))
             local.append(tr("%1 %2 → %3")
                              .arg(name)
                              .arg(actual, 0, 'f', 2)
@@ -609,20 +691,29 @@ bool TransitionPanel::setupMatches(const Match& match,
         if (!expected.captured) {
             if (fromRole && match.file->masterBpm > 0.0)
                 compare(tr("%1 BPM").arg(deckName), deck.effectiveBpm(),
-                        match.file->masterBpm, 0.05);
+                        match.file->masterBpm, SetupToleranceField::Bpm, 0.05);
             return;
         }
 
         const double wantedRatio = expectedTempoRatio(match, fromRole);
         compare(tr("%1 BPM").arg(deckName), deck.effectiveBpm(),
-                track->bpm * wantedRatio, 0.05);
-        compare(tr("%1 fader").arg(deckName), deck.fader.load(), expected.fader);
-        compare(tr("%1 trim").arg(deckName), deck.trim.load(), expected.trim);
-        compare(tr("%1 low").arg(deckName), deck.eqLow.load(), expected.eqLow);
-        compare(tr("%1 mid").arg(deckName), deck.eqMid.load(), expected.eqMid);
-        compare(tr("%1 high").arg(deckName), deck.eqHigh.load(), expected.eqHigh);
+                track->bpm * wantedRatio, SetupToleranceField::Bpm, 0.05);
+        compare(tr("%1 fader").arg(deckName), deck.fader.load(), expected.fader,
+                SetupToleranceField::Volume);
+        compare(tr("%1 trim").arg(deckName), deck.trim.load(), expected.trim,
+                SetupToleranceField::Volume);
+        compare(tr("%1 low").arg(deckName), deck.eqLow.load(), expected.eqLow,
+                SetupToleranceField::Eq);
+        compare(tr("%1 mid").arg(deckName), deck.eqMid.load(), expected.eqMid,
+                SetupToleranceField::Eq);
+        compare(tr("%1 high").arg(deckName), deck.eqHigh.load(), expected.eqHigh,
+                SetupToleranceField::Eq);
         compare(tr("%1 filter").arg(deckName), deck.filter.load(), expected.filter);
         if (!complete) return;
+
+        if (expected.quantizeCaptured &&
+            deck.quantizeHotCues.load() != expected.quantize)
+            local.append(tr("%1 Quantize on/off").arg(deckName));
 
         if (deck.fxType.load() != expected.fxType)
             local.append(tr("%1 FX type").arg(deckName));
@@ -630,7 +721,7 @@ bool TransitionPanel::setupMatches(const Match& match,
             local.append(tr("%1 FX on/off").arg(deckName));
         compare(tr("%1 FX wet").arg(deckName), deck.fxWet.load(), expected.fxWet);
         compare(tr("%1 FX beats").arg(deckName), deck.fxBeats.load(),
-                expected.fxBeats, 0.01);
+                expected.fxBeats, SetupToleranceField::Other, 0.01);
         compare(tr("%1 vocals").arg(deckName), deck.stemVocals.load(),
                 expected.stemVocals);
         compare(tr("%1 melody").arg(deckName), deck.stemMelody.load(),
@@ -644,14 +735,14 @@ bool TransitionPanel::setupMatches(const Match& match,
         if (expected.loopActive) {
             compare(tr("%1 loop start").arg(deckName),
                     track->beatAtSec(deck.loopStartSec.load()),
-                    expected.loopStartBeat, 0.02);
+                    expected.loopStartBeat, SetupToleranceField::Other, 0.02);
             compare(tr("%1 loop end").arg(deckName),
                     track->beatAtSec(deck.loopEndSec.load()),
-                    expected.loopEndBeat, 0.02);
+                    expected.loopEndBeat, SetupToleranceField::Other, 0.02);
         }
         compare(tr("%1 cue").arg(deckName),
                 track->beatAtSec(deck.cuePointSec.load()),
-                expected.cueBeat, 0.02);
+                expected.cueBeat, SetupToleranceField::Other, 0.02);
     };
 
     compareDeck(true);
@@ -660,7 +751,8 @@ bool TransitionPanel::setupMatches(const Match& match,
         const double wanted = match.fromDeck == 0
                                   ? match.file->initialCrossfader
                                   : 1.0 - match.file->initialCrossfader;
-        compare(tr("crossfader"), engine_->crossfader.load(), wanted);
+        compare(tr("crossfader"), engine_->crossfader.load(), wanted,
+                SetupToleranceField::Volume);
     }
     if (differences) *differences = local;
     return local.isEmpty();
@@ -730,9 +822,18 @@ void TransitionPanel::updateSetupStatus()
     const Match& match = matches_[(size_t)idx];
     QStringList differences;
     const bool ready = setupMatches(match, &differences);
+    const bool strictlyReady = ready && setupTolerances_.closeEnough
+        ? setupMatches(match, nullptr, false) : ready;
+    const QString acceptedSuffix = ready && !strictlyReady
+        ? tr(" (close enough: ±%1 BPM, ±%2% volume, ±%3% EQ)")
+              .arg(setupTolerances_.bpm, 0, 'f', 2)
+              .arg(setupTolerances_.volume * 100.0, 0, 'f', 1)
+              .arg(setupTolerances_.eq * 100.0, 0, 'f', 1)
+        : QString();
     if (!match.file->initialFrom.captured) {
         QString text = ready
-                           ? tr("Outgoing setup: BPM ready; EQ was not stored in this older transition")
+                           ? tr("Outgoing setup: BPM ready%1; EQ was not stored in this older transition")
+                                 .arg(acceptedSuffix)
                            : tr("Outgoing setup: %1; EQ was not stored in this older transition")
                                  .arg(differences.join(QStringLiteral(", ")));
         setupLabel_->setText(text);
@@ -744,8 +845,9 @@ void TransitionPanel::updateSetupStatus()
         summary += tr(", +%1 more").arg(differences.size() - 4);
     setupLabel_->setText(
         ready ? (match.file->initialComplete
-                     ? tr("Full pre-transition state: ready")
-                     : tr("Outgoing setup: ready (legacy partial snapshot)"))
+                     ? tr("Full pre-transition state: ready%1").arg(acceptedSuffix)
+                     : tr("Outgoing setup: ready%1 (legacy partial snapshot)")
+                           .arg(acceptedSuffix))
               : (match.file->initialComplete
                      ? tr("Pre-transition state: %1").arg(summary)
                      : tr("Outgoing setup: %1").arg(summary)));
@@ -786,6 +888,8 @@ void TransitionPanel::updateControls()
     bool setupReady = true;
     if (selected) setupReady = setupMatches(matches_[(size_t)selectedMatch()]);
     applySetupBtn_->setEnabled(selected && !busy && !setupReady);
+    closeEnoughCheck_->setEnabled(!busy);
+    toleranceBtn_->setEnabled(!busy);
     list_->setEnabled(!busy);
     preview_->setEnabled(!busy);
 
@@ -850,6 +954,9 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
         };
         for (const auto& [control, value] : extended)
             bus_->dispatch({deckIndex, control, value}, Origin::System);
+        if (setup.quantizeCaptured)
+            bus_->dispatch({deckIndex, ControlId::Quantize,
+                            setup.quantize ? 1.0 : 0.0}, Origin::System);
 
         if (TrackDataPtr track = deck.track()) {
             deck.cuePointSec.store(track->secAtBeat(setup.cueBeat));
@@ -899,6 +1006,73 @@ void TransitionPanel::onApplySetup()
 {
     const int idx = selectedMatch();
     if (idx >= 0) applyInitialSetup(matches_[(size_t)idx], true);
+}
+
+void TransitionPanel::onEditSetupTolerance()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Close Enough tolerances"));
+    auto* root = new QVBoxLayout(&dialog);
+    auto* explanation = new QLabel(
+        tr("When CLOSE ENOUGH is enabled, these are the maximum accepted "
+           "differences from the recorded pre-transition state. Tracks, "
+           "transport, loops, and discrete FX states still match strictly."),
+        &dialog);
+    explanation->setWordWrap(true);
+    root->addWidget(explanation);
+
+    auto* form = new QFormLayout;
+    auto* bpm = new QDoubleSpinBox(&dialog);
+    bpm->setRange(0.05, 10.0);
+    bpm->setDecimals(2);
+    bpm->setSingleStep(0.1);
+    bpm->setSuffix(tr(" BPM"));
+    bpm->setValue(setupTolerances_.bpm);
+    form->addRow(tr("BPM difference:"), bpm);
+
+    auto* volume = new QDoubleSpinBox(&dialog);
+    volume->setRange(1.5, 25.0);
+    volume->setDecimals(1);
+    volume->setSingleStep(0.5);
+    volume->setSuffix(tr("%"));
+    volume->setValue(setupTolerances_.volume * 100.0);
+    form->addRow(tr("Volume/fader difference:"), volume);
+
+    auto* eq = new QDoubleSpinBox(&dialog);
+    eq->setRange(1.5, 25.0);
+    eq->setDecimals(1);
+    eq->setSingleStep(0.5);
+    eq->setSuffix(tr("%"));
+    eq->setValue(setupTolerances_.eq * 100.0);
+    form->addRow(tr("LOW/MID/HIGH EQ difference:"), eq);
+    root->addLayout(form);
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    root->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    setupTolerances_.bpm = bpm->value();
+    setupTolerances_.volume = volume->value() / 100.0;
+    setupTolerances_.eq = eq->value() / 100.0;
+    QSettings settings;
+    settings.setValue(QStringLiteral("transitions/closeEnoughBpm"),
+                      setupTolerances_.bpm);
+    settings.setValue(QStringLiteral("transitions/closeEnoughVolume"),
+                      setupTolerances_.volume * 100.0);
+    settings.setValue(QStringLiteral("transitions/closeEnoughEq"),
+                      setupTolerances_.eq * 100.0);
+    updateSetupStatus();
+    updateControls();
+    emit statusMessage(
+        tr("Close Enough tolerances saved: ±%1 BPM, ±%2% volume, ±%3% EQ")
+            .arg(setupTolerances_.bpm, 0, 'f', 2)
+            .arg(setupTolerances_.volume * 100.0, 0, 'f', 1)
+            .arg(setupTolerances_.eq * 100.0, 0, 'f', 1),
+        5000);
 }
 
 void TransitionPanel::onRename()
@@ -1005,6 +1179,26 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         return;
     }
     const Match& m = matches_[(size_t)idx];
+    const bool incomingInitiallyPlaying =
+        m.file->initialComplete && m.file->initialTo.captured &&
+        m.file->initialTo.playing;
+    const bool hasIncomingStartEvent = std::any_of(
+        m.file->events.begin(), m.file->events.end(), [](const GvtEvent& event) {
+            if (event.role != Role::ToDeck || event.value < 0.5)
+                return false;
+            return event.control == ControlId::Play ||
+                   (event.control >= ControlId::HotCue1 &&
+                    event.control <= ControlId::HotCue8);
+        });
+    if (mode == PlayerMode::Perform && !incomingInitiallyPlaying &&
+        !hasIncomingStartEvent) {
+        emit statusMessage(
+            tr("Can't perform “%1” accurately: the recording has no incoming "
+               "PLAY or hot-cue event. Re-record it with the current saved-loop fix.")
+                .arg(m.file->name),
+            9000);
+        return;
+    }
     if (mode == PlayerMode::Tutorial) {
         const QStringList warnings = tutorialWarnings(m);
         if (!warnings.isEmpty()) {
@@ -1022,6 +1216,11 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
     }
     transitionPlayerSetMode(player_, mode);
 
+    if (mode == PlayerMode::Perform) {
+        takeoverTrackingActive_ = true;
+        emit hardwareTakeoverTrackingStarted();
+    }
+
     if (prime) {
         // PRIME leaves the outgoing song's live position alone, but restores
         // every recorded audible parameter and fully prepares the incoming
@@ -1030,6 +1229,10 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
                           /*prepareToTransport=*/true);
         const QStringList issues = primeReadinessIssues(m);
         if (!issues.isEmpty()) {
+            if (takeoverTrackingActive_) {
+                takeoverTrackingActive_ = false;
+                emit hardwareTakeoverTrackingFinished();
+            }
             emit statusMessage(tr("Can't prime: %1")
                                    .arg(issues.mid(0, 4).join(QStringLiteral(", "))),
                                7000);
@@ -1049,6 +1252,10 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
 
     QString error;
     if (!player_->arm(*m.file, m.fromDeck, /*startNow=*/false, &error)) {
+        if (takeoverTrackingActive_) {
+            takeoverTrackingActive_ = false;
+            emit hardwareTakeoverTrackingFinished();
+        }
         emit statusMessage(tr("Can't start: %1").arg(error), 6000);
         return;
     }
@@ -1111,6 +1318,14 @@ void TransitionPanel::onProgress(double beatsIn, double beatsTotal)
 {
     tutorialBeatsIn_ = beatsIn;
     if (tutorialActive_) showNextTutorialPrompt();
+    if (takeoverTrackingActive_ && beatsTotal > 0.0 &&
+        beatsIn >= beatsTotal) {
+        // Arm pickup as soon as the final automatic event lands. Waiting for
+        // the player's one-beat completion grace would leave a short window
+        // where a mismatched hardware control could overwrite replay state.
+        takeoverTrackingActive_ = false;
+        emit hardwareTakeoverTrackingFinished();
+    }
     if (beatsTotal <= 0.0) { progress_->setValue(0); return; }
     progress_->setValue(
         (int)std::lround(std::clamp(beatsIn / beatsTotal, 0.0, 1.0) * 1000.0));
@@ -1118,6 +1333,10 @@ void TransitionPanel::onProgress(double beatsIn, double beatsTotal)
 
 void TransitionPanel::onFinished(bool completed)
 {
+    if (takeoverTrackingActive_) {
+        takeoverTrackingActive_ = false;
+        emit hardwareTakeoverTrackingFinished();
+    }
     progress_->setValue(completed ? 1000 : 0);
     if (banner_) banner_->hide();
     closeTutorialOverlay();
@@ -1125,6 +1344,13 @@ void TransitionPanel::onFinished(bool completed)
     emit statusMessage(completed ? tr("Transition complete")
                                  : tr("Transition stopped"),
                        3000);
+}
+
+void TransitionPanel::observeTutorialHardwareControl(
+    const ControlEvent& event)
+{
+    if (tutorialActive_ && tutorialOverlay_)
+        tutorialOverlay_->setHardwareValue(event);
 }
 
 void TransitionPanel::showBanner(const QString& text, const QColor& color,
@@ -1318,7 +1544,16 @@ QString TransitionPanel::tutorialInstruction(
     case ControlId::HeadphoneMix:
         return tr("Turn HEADPHONES MIX to %1%").arg(
             event.value * 100.0, 0, 'f', 0);
-    case ControlId::Jog: return tr("Nudge the jog wheel on %1").arg(deck);
+    case ControlId::Quantize:
+        return tr("Press SHIFT + channel CUE on %1").arg(deck);
+    case ControlId::Jog:
+        return tr("Nudge the jog-wheel rim on %1").arg(deck);
+    case ControlId::PlatterScratch:
+        return tr("Scratch the top platter on %1").arg(deck);
+    case ControlId::PlatterTouch:
+        return event.value >= 0.5
+                   ? tr("Touch and hold the top platter on %1").arg(deck)
+                   : tr("Release the top platter on %1").arg(deck);
     case ControlId::FxType: {
         const QString type = QStringList {tr("ECHO"), tr("REVERB"), tr("FLANGER")}
                                  .value(std::clamp((int)std::lround(event.value), 0, 2));
@@ -1335,6 +1570,12 @@ QString TransitionPanel::tutorialInstruction(
             .arg(event.value, 0, 'f', 2);
     case ControlId::StemVocals: case ControlId::StemMelody:
     case ControlId::StemBass: case ControlId::StemDrums:
+    case ControlId::BrowseSelect: case ControlId::BrowseNavigate:
+    case ControlId::PerformancePadMode:
+    case ControlId::PerformancePad1: case ControlId::PerformancePad2:
+    case ControlId::PerformancePad3: case ControlId::PerformancePad4:
+    case ControlId::PerformancePad5: case ControlId::PerformancePad6:
+    case ControlId::PerformancePad7: case ControlId::PerformancePad8:
     case ControlId::Count:
         break;
     }

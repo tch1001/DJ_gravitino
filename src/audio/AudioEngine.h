@@ -34,14 +34,24 @@ public:
     void setHotCue(int i);                   // store current pos
     void jumpHotCue(int i);                  // jump if set
     void nudge(double ticks);                // transient tempo bend from jog
+    void beginScratch();                     // suspend transport while top held
+    void scratch(double ticks);              // signed audible platter motion
+    void endScratch();                       // restore pre-touch play state
+    void updateBeatGrid(double bpm, double firstBeatSec); // live regrid
 
-    // Loops (all GUI thread; beat-snapped to the track grid; audio thread
-    // wraps position inside [loopStartSec, loopEndSec) while loopActive).
+    // Per-deck Quantize. When enabled, hot cues and manual loop IN/OUT resolve
+    // to playable whole beats on the track grid.
+    std::atomic<bool> quantizeHotCues { true };
+
+    // Loops (all GUI thread; manual IN/OUT use whole-beat snapping only while
+    // Quantize is enabled; audio wraps [loopStartSec, loopEndSec)).
     void loopAuto(double beats);             // start N-beat loop at current beat
     void loopIn();                           // set/replace loop start (pending)
     void loopOut();                          // set end + activate (after loopIn)
     void loopExit();                         // deactivate, keep stored bounds
     void loopHalve(); void loopDouble();     // resize active loop (min 1/8 beat)
+    bool activateSavedLoop(double startSec, double endSec);
+    bool retriggerSavedLoop(double startSec, double endSec); // jump to IN + play
     void beatJump(double beats);             // signed, beat-aligned jump
     std::atomic<double> loopStartSec { -1.0 };
     std::atomic<double> loopEndSec   { -1.0 };
@@ -106,7 +116,7 @@ public:
     void stopDevice();
 
     Deck& deck(int i);
-    std::atomic<float> crossfader { 0.0f };  // 0 = A, 1 = B
+    std::atomic<float> crossfader { 0.5f };  // startup center; 0 = A, 1 = B
     std::atomic<bool> headphoneCue[kNumDecks] {}; // channel PFL selection
     std::atomic<bool> masterCue { false };        // master in headphone bus
     std::atomic<float> headphoneMix { 0.0f };     // 0 = CUE, 1 = MASTER

@@ -57,6 +57,7 @@ eq_low      = 0.500
 eq_mid      = 0.500
 eq_high     = 0.500
 filter      = 0.500
+quantize    = 1         ; hot-cue/manual-loop snapping state
 loop_active = 0
 loop_start_beat = 224.000
 loop_end_beat = 224.000
@@ -78,6 +79,7 @@ to_eq_low   = 0.500
 to_eq_mid   = 0.500
 to_eq_high  = 0.500
 to_filter   = 0.500
+to_quantize = 1
 to_loop_active = 0
 to_loop_start_beat = 32.000
 to_loop_end_beat = 32.000
@@ -123,10 +125,10 @@ b1          = 32.000
   recordings set `complete = 1` and snapshot both role-based decks plus the
   mixer crossfader. Unprefixed keys are the outgoing deck; `to_*` keys are the
   incoming deck. The snapshot covers transport/cue position, tempo, channel
-  level, trim, EQ, filter, loops, FX, and stem levels. Perform reconstructs it
-  before rolling; Prime prepares it immediately and reasserts transport state
-  at the entry boundary. Older partial sections containing only the outgoing
-  tempo/gain/EQ/filter keys remain supported.
+  level, trim, EQ, filter, Quantize, loops, FX, and stem levels. Perform
+  reconstructs it before rolling; Prime prepares it immediately and reasserts
+  transport state at the entry boundary. Older partial sections containing
+  only the outgoing tempo/gain/EQ/filter keys remain supported.
 - **`[cues]`** is optional and holds user labels as `beat = label`. Labels are
   annotations only: they populate the event preview and waveform markers.
   `#`, `;`, and line breaks are reserved because they delimit comments/lines.
@@ -160,6 +162,7 @@ b1          = 32.000
 | `load`       | b       | (trigger; load the TO track)   |
 | `tempo_sync` | a,b     | (trigger; match master bpm)    |
 | `tempo`      | a,b     | playback ratio, 1.0 = native   |
+| `quantize`   | a,b     | per-deck hot-cue/manual-loop snapping, 0 or 1 |
 | `fader`      | a,b     | 0..1 channel fader             |
 | `trim`       | a,b     | 0..1 gain knob                 |
 | `eq_low`,`eq_mid`,`eq_high` | a,b | 0..1 (0.5 = flat, 0 = kill) |

@@ -36,23 +36,31 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
 {
     setObjectName(QStringLiteral("mixerWidget"));
     setProperty("panel", true);
-    setMaximumHeight(110);
+    setMinimumHeight(154);
+    setMaximumHeight(190);
+    setMinimumWidth(400);
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 
-    // One horizontal row: [channel A] | crossfader | [channel B].
+    // One compact, symmetric row. Each channel follows the physical FLX4
+    // order from top to bottom: TRIM, HI, MID, LOW, FILTER. Channel faders
+    // flank the crossfader just as they do in the controller's mixer section.
     auto* row = new QHBoxLayout(this);
     row->setContentsMargins(8, 4, 8, 4);
     row->setSpacing(10);
 
+    row->addStretch(1);
     row->addWidget(buildStrip(0));
 
-    // Center: crossfader (~200 px).
+    // Center: crossfader. It contracts with the draggable workspace splitter.
     auto* xfCol = new QVBoxLayout;
     xfCol->setSpacing(2);
     xfCol->addStretch(1);
     crossfader_ = new QSlider(Qt::Horizontal);
     crossfader_->setRange(0, kSteps);
-    crossfader_->setValue(0);
-    crossfader_->setFixedWidth(200);
+    crossfader_->setValue(toSteps(0.5));
+    crossfader_->setMinimumWidth(120);
+    crossfader_->setMaximumWidth(200);
+    crossfader_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     crossfader_->setToolTip(tr("Crossfader: A ↔ B"));
     connect(crossfader_, &QSlider::valueChanged, this, [this](int v) {
         if (!crossfader_->signalsBlocked())
@@ -91,7 +99,7 @@ void MixerWidget::wireDial(QDial* d, int deck, ControlId id, double initial)
     // angular seam would turn a small drag into an audible min/max jump.
     d->setWrapping(false);
     d->setNotchesVisible(true);
-    d->setFixedSize(32, 32);
+    d->setFixedSize(27, 27);
     connect(d, &QDial::valueChanged, this, [this, d, deck, id](int v) {
         if (!d->signalsBlocked())
             bus_->dispatch(ControlEvent{deck, id, fromSteps(v)}, Origin::Ui);
@@ -100,36 +108,51 @@ void MixerWidget::wireDial(QDial* d, int deck, ControlId id, double initial)
 
 QWidget* MixerWidget::buildStrip(int deck)
 {
-    // Inline horizontal channel strip:
-    // [A] [TRIM] [HI] [MID] [LOW] [fader]
+    // Compact FLX4-style channel strip. The five rotary controls form one
+    // uninterrupted top-to-bottom stack instead of placing TRIM/FILTER beside
+    // the EQs. Deck B mirrors deck A so both channel faders sit toward the
+    // center crossfader.
     auto* w = new QWidget(this);
-    auto* row = new QHBoxLayout(w);
-    row->setContentsMargins(0, 0, 0, 0);
-    row->setSpacing(4);
+    w->setMinimumWidth(104);
+    w->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
+    auto* root = new QVBoxLayout(w);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(1);
 
     auto* deckLbl = new QLabel(deck == 0 ? QStringLiteral("A")
                                          : QStringLiteral("B"));
+    deckLbl->setAlignment(Qt::AlignHCenter);
     deckLbl->setStyleSheet(QStringLiteral("color:%1; font-weight:bold;")
                                .arg(deckAccent(deck).name()));
-    row->addWidget(deckLbl);
+    root->addWidget(deckLbl);
+
+    auto* body = new QHBoxLayout;
+    body->setContentsMargins(0, 0, 0, 0);
+    body->setSpacing(4);
 
     Strip& s = strips_[deck];
-    auto addKnob = [&](QDial*& dial, ControlId id,
-                       const QString& name) -> QLabel* {
-        auto* col = new QVBoxLayout;
-        col->setSpacing(1);
+    auto* knobStack = new QVBoxLayout;
+    knobStack->setSpacing(0);
+    const auto addKnob = [&](QDial*& dial, ControlId id,
+                             const QString& name) -> QLabel* {
+        auto* knobRow = new QHBoxLayout;
+        knobRow->setSpacing(3);
         dial = new QDial(w);
         wireDial(dial, deck, id, 0.5);
-        col->addStretch(1);
-        col->addWidget(dial, 0, Qt::AlignHCenter);
         QLabel* cap = caption(name);
-        col->addWidget(cap);
-        col->addStretch(1);
-        row->addLayout(col);
+        cap->setFixedWidth(36);
+        if (deck == 0) {
+            knobRow->addWidget(cap);
+            knobRow->addWidget(dial);
+        } else {
+            knobRow->addWidget(dial);
+            knobRow->addWidget(cap);
+        }
+        knobStack->addLayout(knobRow);
         return cap;
     };
     addKnob(s.trim, ControlId::Trim, tr("TRIM"));
-    addKnob(s.eqHigh, ControlId::EqHigh, tr("HI"));
+    addKnob(s.eqHigh, ControlId::EqHigh, tr("HIGH"));
     addKnob(s.eqMid, ControlId::EqMid, tr("MID"));
     addKnob(s.eqLow, ControlId::EqLow, tr("LOW"));
 
@@ -150,11 +173,11 @@ QWidget* MixerWidget::buildStrip(int deck)
     s.fader = new QSlider(Qt::Vertical, w);
     s.fader->setRange(0, kSteps);
     s.fader->setValue(kSteps);
-    s.fader->setFixedHeight(64);
+    s.fader->setFixedHeight(108);
     // The app stylesheet's QSlider:vertical min-height (84px) would defeat
     // the compact strip; override locally.
     s.fader->setStyleSheet(
-        QStringLiteral("QSlider:vertical { min-height: 64px; }"));
+        QStringLiteral("QSlider:vertical { min-height: 108px; }"));
     connect(s.fader, &QSlider::valueChanged, this, [this, deck](int v) {
         QSlider* f = strips_[deck].fader;
         if (!f->signalsBlocked())
@@ -163,8 +186,32 @@ QWidget* MixerWidget::buildStrip(int deck)
     });
     faderCol->addWidget(s.fader, 0, Qt::AlignHCenter);
     faderCol->addWidget(caption(tr("FADER")));
-    row->addLayout(faderCol);
+    if (deck == 0) {
+        body->addLayout(knobStack);
+        body->addLayout(faderCol);
+    } else {
+        body->addLayout(faderCol);
+        body->addLayout(knobStack);
+    }
+    root->addLayout(body);
     return w;
+}
+
+QWidget* MixerWidget::controlWidget(DeckId deck, ControlId control) const
+{
+    if (control == ControlId::Crossfader && deck == kNoDeck)
+        return crossfader_;
+    if (deck < 0 || deck >= 2) return nullptr;
+    const Strip& strip = strips_[deck];
+    switch (control) {
+    case ControlId::Fader:  return strip.fader;
+    case ControlId::Trim:   return strip.trim;
+    case ControlId::EqHigh: return strip.eqHigh;
+    case ControlId::EqMid:  return strip.eqMid;
+    case ControlId::EqLow:  return strip.eqLow;
+    case ControlId::Filter: return strip.filter;
+    default:                return nullptr;
+    }
 }
 
 bool MixerWidget::eventFilter(QObject* watched, QEvent* event)

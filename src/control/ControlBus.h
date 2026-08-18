@@ -12,10 +12,10 @@ constexpr DeckId kNoDeck = -1;
 
 enum class ControlId : uint8_t {
     // Triggers (value: 1.0 = press; 0.0 = release where relevant)
-    Play, Stop, Cue, Load, TempoSync,
+    Play, Stop, Cue, Load, TempoSync, // one-shot phase align; no tempo change
     HotCue1, HotCue2, HotCue3, HotCue4,
     HotCue5, HotCue6, HotCue7, HotCue8,
-    LoopIn, LoopOut,   // manual loop bounds at current position (beat-snapped)
+    LoopIn, LoopOut,   // whole-beat snapped only while Quantize is enabled
     LoopExit,          // exit active loop (RELOOP re-enters via LoopIn history)
     LoopHalve, LoopDouble,
     // Continuous, normalized 0..1 unless noted
@@ -37,6 +37,16 @@ enum class ControlId : uint8_t {
     FxBeats,      // echo/flanger time base in beats (0.25..4, default 0.5)
     // Stem levels, 0..1 (0 = muted). Active only once stems are separated.
     StemVocals, StemMelody, StemBass, StemDrums,
+    // Hardware-library UI commands (kept at the end to preserve existing
+    // ControlId numeric values; MidiEngine does not publish these to audio).
+    BrowseSelect,
+    BrowseNavigate, // signed library-row delta from the browse encoder
+    PlatterScratch, // signed coarse position-scrub ticks (deck-scoped)
+    Quantize,       // per-deck hot-cue/manual-loop quantize state
+    PerformancePadMode, // value = PerformancePadMode enum value
+    PerformancePad1, PerformancePad2, PerformancePad3, PerformancePad4,
+    PerformancePad5, PerformancePad6, PerformancePad7, PerformancePad8,
+    PlatterTouch,   // top-platter contact state, 1 = held / 0 = released
     Count
 };
 

@@ -14,12 +14,32 @@ namespace gvt {
 // emitted when the LSB completes a 14-bit value.
 class Flx4Mapping final {
 public:
+    // Pad packets include the controller's own latched bank in their note
+    // number. Shifted-channel packets add this offset to the parsed value so
+    // MidiEngine can retain the modifier while choosing the host's active
+    // layer as the actual action source of truth.
+    static constexpr int kShiftedPadEncodingOffset = 100;
+
     std::optional<ControlEvent> parse(std::span<const unsigned char> message) noexcept;
+
+    // The physical IN/1/2X and OUT/2X buttons send the ordinary IN/OUT notes
+    // regardless of loop state. Resolve their active-loop meanings after the
+    // parser has identified the target deck.
+    static ControlEvent resolveLoopButtonAction(
+        ControlEvent event, bool loopActive) noexcept;
 
     // Returns the three-byte note message used by the FLX4 for an LED, or no
     // value when the requested control has no MVP LED mapping.
     static std::optional<std::array<unsigned char, 3>> ledMessage(
         DeckId deck, ControlId id, bool on) noexcept;
+
+    // Performance-pad LEDs use mode-specific note ranges rather than
+    // ControlIds. `mode` is the integer PerformancePadMode value.
+    static std::optional<std::array<unsigned char, 3>> padModeLedMessage(
+        DeckId deck, int mode, bool on) noexcept;
+    static std::optional<std::array<unsigned char, 3>> performancePadLedMessage(
+        DeckId deck, int mode, int pad, bool shifted,
+        unsigned char velocity) noexcept;
 
     // The FLX4 reports its shared Beat FX channel assignment as two on/off
     // notes. Until the first report, both decks are selected as a safe fallback.

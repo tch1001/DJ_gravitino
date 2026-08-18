@@ -38,6 +38,8 @@ GvtInitialState captureDeckState(const Deck& deck) {
     state.eqMid = deck.eqMid.load();
     state.eqHigh = deck.eqHigh.load();
     state.filter = deck.filter.load();
+    state.quantizeCaptured = true;
+    state.quantize = deck.quantizeHotCues.load();
     state.loopActive = deck.loopActive.load();
     const double loopStart = deck.loopStartSec.load();
     const double loopEnd = deck.loopEndSec.load();
@@ -71,7 +73,7 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
         Impl& im = *impl_;
         if (!im.recording) return;
 
-        const double beat = im.currentBeat();
+        const double beat = im.currentBeat(&e);
 
         // Capture the TO-deck anchor the moment it first starts playing.
         if (!im.toAnchorSet) {
@@ -89,6 +91,13 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
         // Jog nudges are transient rate bends; headphone monitoring is local
         // to the DJ and never part of the audible transition. Skip both.
         if (e.id == ControlId::Jog ||
+            e.id == ControlId::PlatterScratch ||
+            e.id == ControlId::PlatterTouch ||
+            e.id == ControlId::BrowseNavigate ||
+            e.id == ControlId::BrowseSelect ||
+            e.id == ControlId::PerformancePadMode ||
+            (e.id >= ControlId::PerformancePad1 &&
+             e.id <= ControlId::PerformancePad8) ||
             e.id == ControlId::HeadphoneCue ||
             e.id == ControlId::MasterCue ||
             e.id == ControlId::HeadphoneMix)
@@ -165,8 +174,16 @@ void TransitionRecorder::start(int fromDeck) {
         im.toAnchorBeat = im.engine->deck(im.toDeck).beatPosition();
         im.toAnchorSet = true;
     }
-    im.haveLastBeat = false;
+    im.haveLastBeat = im.engine->deck(fromDeck).playing.load();
     im.lastBeat = 0.0;
+    im.timelineRunning = im.haveLastBeat;
+    im.timelineBpm = im.masterBpm;
+    im.wallBeat = 0.0;
+    im.deckBeat = 0.0;
+    im.lastDeckTrackBeat = im.engine->deck(fromDeck).beatPosition();
+    im.haveDeckTrackBeat = true;
+    im.timelineClock.start();
+    im.lastTimelineNs = 0;
     im.fromHotCueBeats.fill(-1.0);
     im.toHotCueBeats.fill(-1.0);
     im.events.clear();
@@ -296,27 +313,32 @@ GvtFile TransitionRecorder::finish() {
             mappings[static_cast<std::size_t>(pad)] = track->beatAtSec(sec);
     }
 
-    // Quantize for clean, human-editable files: 0.01 for BPM/durations,
-    // 0.001 beats (~0.5 ms at 128 BPM) for anchors and event times/values.
+    // Keep timing and tempo at the precision produced by the audio engine.
+    // Coarser rounding made a 129.91-BPM incoming track drift audibly when a
+    // 14-bit tempo ratio was reduced to only three decimals. Channel/fader
+    // controls remain at 0.001 because that is their actual UI resolution.
     auto q = [](double v, double step) { return std::round(v / step) * step; };
-    f.from.bpm = q(f.from.bpm, 0.01); f.to.bpm = q(f.to.bpm, 0.01);
+    constexpr double kPrecise = 0.000001;
+    f.from.bpm = q(f.from.bpm, kPrecise);
+    f.to.bpm = q(f.to.bpm, kPrecise);
     f.from.durationSec = q(f.from.durationSec, 0.01);
     f.to.durationSec = q(f.to.durationSec, 0.01);
-    f.anchorFromBeat = q(f.anchorFromBeat, 0.001);
-    f.anchorToBeat = q(f.anchorToBeat, 0.001);
-    f.masterBpm = q(f.masterBpm, 0.01);
+    f.anchorFromBeat = q(f.anchorFromBeat, kPrecise);
+    f.anchorToBeat = q(f.anchorToBeat, kPrecise);
+    f.masterBpm = q(f.masterBpm, kPrecise);
     const auto quantizeState = [&q](GvtInitialState& state) {
-        state.positionBeat = q(state.positionBeat, 0.001);
-        state.cueBeat = q(state.cueBeat, 0.001);
-        state.tempoRatio = q(state.tempoRatio, 0.001);
+        constexpr double precise = 0.000001;
+        state.positionBeat = q(state.positionBeat, precise);
+        state.cueBeat = q(state.cueBeat, precise);
+        state.tempoRatio = q(state.tempoRatio, precise);
         state.fader = q(state.fader, 0.001);
         state.trim = q(state.trim, 0.001);
         state.eqLow = q(state.eqLow, 0.001);
         state.eqMid = q(state.eqMid, 0.001);
         state.eqHigh = q(state.eqHigh, 0.001);
         state.filter = q(state.filter, 0.001);
-        state.loopStartBeat = q(state.loopStartBeat, 0.001);
-        state.loopEndBeat = q(state.loopEndBeat, 0.001);
+        state.loopStartBeat = q(state.loopStartBeat, precise);
+        state.loopEndBeat = q(state.loopEndBeat, precise);
         state.fxWet = q(state.fxWet, 0.001);
         state.fxBeats = q(state.fxBeats, 0.001);
         state.stemVocals = q(state.stemVocals, 0.001);
@@ -329,8 +351,12 @@ GvtFile TransitionRecorder::finish() {
     f.initialCrossfader = q(f.initialCrossfader, 0.001);
     for (auto* mappings : {&f.fromHotCueBeats, &f.toHotCueBeats})
         for (double& beat : *mappings)
-            if (std::isfinite(beat) && beat >= 0.0) beat = q(beat, 0.001);
-    for (GvtEvent& e : f.events) { e.beat = q(e.beat, 0.001); e.value = q(e.value, 0.001); }
+            if (std::isfinite(beat) && beat >= 0.0) beat = q(beat, kPrecise);
+    for (GvtEvent& e : f.events) {
+        e.beat = q(e.beat, kPrecise);
+        e.value = q(e.value,
+                    e.control == ControlId::Tempo ? kPrecise : 0.001);
+    }
 
     im.events.clear();
     return f;

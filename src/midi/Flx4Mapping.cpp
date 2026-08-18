@@ -1,4 +1,5 @@
 #include "Flx4Mapping.h"
+#include "../performance/PerformancePads.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -16,23 +17,40 @@ constexpr std::uint8_t kFxChannel1 = 0x04;
 constexpr std::uint8_t kFxChannel2 = 0x05;
 constexpr std::uint8_t kMixerChannel = 0x06;
 constexpr std::uint8_t kDeck1HotCueChannel = 0x07;
+constexpr std::uint8_t kDeck1ShiftPadChannel = 0x08;
 constexpr std::uint8_t kDeck2HotCueChannel = 0x09;
+constexpr std::uint8_t kDeck2ShiftPadChannel = 0x0A;
 
+constexpr std::uint8_t kBrowseTurnController = 0x40;
+constexpr std::uint8_t kBrowsePressNote = 0x41;
+constexpr std::uint8_t kLoadDeck1Note = 0x46;
+constexpr std::uint8_t kLoadDeck2Note = 0x47;
 constexpr std::uint8_t kPlayNote = 0x0B;
 constexpr std::uint8_t kCueNote = 0x0C;
 constexpr std::uint8_t kHeadphoneCueNote = 0x54;
 constexpr std::uint8_t kMasterCueNote = 0x63;
 constexpr std::uint8_t kBeatSyncNote = 0x58;
+constexpr std::uint8_t kQuantizeNote = 0x68;
+constexpr std::uint8_t kHotCueModeNote = 0x1B;
+constexpr std::uint8_t kPadFx1ModeNote = 0x1E;
+constexpr std::uint8_t kBeatJumpModeNote = 0x20;
+constexpr std::uint8_t kSamplerModeNote = 0x22;
+constexpr std::uint8_t kKeyboardModeNote = 0x69;
+constexpr std::uint8_t kPadFx2ModeNote = 0x6B;
+constexpr std::uint8_t kBeatLoopModeNote = 0x6D;
+constexpr std::uint8_t kKeyShiftModeNote = 0x6F;
 constexpr std::uint8_t kLoopInNote = 0x10;
 constexpr std::uint8_t kLoopOutNote = 0x11;
 constexpr std::uint8_t kFourBeatExitNote = 0x4D;
 constexpr std::uint8_t kShiftFourBeatExitNote = 0x50;
-constexpr std::uint8_t kLoopHalveNote = 0x51;
-constexpr std::uint8_t kLoopDoubleNote = 0x53;
-constexpr std::uint8_t kShiftLoopHalveNote = 0x4C;
-constexpr std::uint8_t kShiftLoopDoubleNote = 0x4E;
-constexpr std::uint8_t kBeatJumpPadFirstNote = 0x20;
-constexpr std::uint8_t kBeatJumpPadLastNote = 0x27;
+// The FLX4 sends the ordinary IN/OUT notes for the dual-purpose IN/1/2X and
+// OUT/2X controls. The host interprets those contextually when a loop is
+// active. CUE/LOOP CALL and shifted IN/OUT are useful dedicated aliases for
+// loop sizing in Gravitino's MVP mapping.
+constexpr std::uint8_t kCueLoopCallPreviousNote = 0x51;
+constexpr std::uint8_t kCueLoopCallNextNote = 0x53;
+constexpr std::uint8_t kShiftLoopInNote = 0x4C;
+constexpr std::uint8_t kShiftLoopOutNote = 0x4E;
 constexpr std::uint8_t kBeatFxAssignDeck1Note = 0x10;
 constexpr std::uint8_t kBeatFxAssignDeck2Note = 0x11;
 constexpr std::uint8_t kBeatFxOnNote = 0x47;
@@ -67,6 +85,7 @@ constexpr std::uint8_t kBeatFxWetLsb = 0x22;
 constexpr std::uint8_t kJogSide = 0x21;
 constexpr std::uint8_t kJogPlatterVinylOn = 0x22;
 constexpr std::uint8_t kJogPlatterVinylOff = 0x23;
+constexpr std::uint8_t kJogTouchNote = 0x36;
 constexpr int kRelativeCenter = 0x40;
 
 constexpr int kFourteenBitCenter = 0x2000;
@@ -83,10 +102,76 @@ DeckId deckForChannel(std::uint8_t channel) noexcept
     return channel == kDeck1Channel ? 0 : 1;
 }
 
-ControlId hotCueId(std::uint8_t pad) noexcept
+ControlId performancePadId(std::uint8_t pad) noexcept
 {
-    const auto first = static_cast<unsigned int>(ControlId::HotCue1);
+    const auto first = static_cast<unsigned int>(ControlId::PerformancePad1);
     return static_cast<ControlId>(first + pad);
+}
+
+std::optional<PerformancePadMode> padModeForButton(
+    std::uint8_t note) noexcept
+{
+    switch (note) {
+    case kHotCueModeNote:  return PerformancePadMode::HotCue;
+    case kPadFx1ModeNote:  return PerformancePadMode::PadFx1;
+    case kBeatJumpModeNote:return PerformancePadMode::BeatJump;
+    case kSamplerModeNote: return PerformancePadMode::Sampler;
+    case kKeyboardModeNote:return PerformancePadMode::Keyboard;
+    case kPadFx2ModeNote:  return PerformancePadMode::PadFx2;
+    case kBeatLoopModeNote:return PerformancePadMode::BeatLoop;
+    case kKeyShiftModeNote:return PerformancePadMode::KeyShift;
+    default:               return std::nullopt;
+    }
+}
+
+std::optional<PerformancePadMode> padModeForNote(
+    std::uint8_t note) noexcept
+{
+    switch (note & 0xF0U) {
+    case 0x00: return PerformancePadMode::HotCue;
+    case 0x10: return PerformancePadMode::PadFx1;
+    case 0x20: return PerformancePadMode::BeatJump;
+    case 0x30: return PerformancePadMode::Sampler;
+    case 0x40: return PerformancePadMode::Keyboard;
+    case 0x50: return PerformancePadMode::PadFx2;
+    case 0x60: return PerformancePadMode::BeatLoop;
+    case 0x70: return PerformancePadMode::KeyShift;
+    default:   return std::nullopt;
+    }
+}
+
+std::uint8_t modeButtonNote(PerformancePadMode mode) noexcept
+{
+    switch (mode) {
+    case PerformancePadMode::HotCue:  return kHotCueModeNote;
+    case PerformancePadMode::PadFx1:  return kPadFx1ModeNote;
+    case PerformancePadMode::BeatJump:return kBeatJumpModeNote;
+    case PerformancePadMode::Sampler: return kSamplerModeNote;
+    case PerformancePadMode::Keyboard:return kKeyboardModeNote;
+    case PerformancePadMode::PadFx2:  return kPadFx2ModeNote;
+    case PerformancePadMode::BeatLoop:return kBeatLoopModeNote;
+    case PerformancePadMode::KeyShift:return kKeyShiftModeNote;
+    case PerformancePadMode::SavedLoop:return 0;
+    case PerformancePadMode::Count:   return 0;
+    }
+    return 0;
+}
+
+std::uint8_t padNoteBase(PerformancePadMode mode) noexcept
+{
+    switch (mode) {
+    case PerformancePadMode::HotCue:  return 0x00;
+    case PerformancePadMode::PadFx1:  return 0x10;
+    case PerformancePadMode::BeatJump:return 0x20;
+    case PerformancePadMode::Sampler: return 0x30;
+    case PerformancePadMode::Keyboard:return 0x40;
+    case PerformancePadMode::PadFx2:  return 0x50;
+    case PerformancePadMode::BeatLoop:return 0x60;
+    case PerformancePadMode::KeyShift:return 0x70;
+    case PerformancePadMode::SavedLoop:return 0;
+    case PerformancePadMode::Count:   return 0;
+    }
+    return 0;
 }
 
 bool hotCueIndex(ControlId id, std::uint8_t& index) noexcept
@@ -99,13 +184,6 @@ bool hotCueIndex(ControlId id, std::uint8_t& index) noexcept
     }
     index = static_cast<std::uint8_t>(value - first);
     return true;
-}
-
-double beatJumpForPad(std::uint8_t pad) noexcept
-{
-    constexpr std::array<double, 8> kBeatJumps {
-        -1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -8.0, 8.0};
-    return kBeatJumps[static_cast<std::size_t>(pad)];
 }
 
 double normalizedFourteenBit(int value) noexcept
@@ -129,6 +207,19 @@ double tempoRatio(int value) noexcept
 }
 
 } // namespace
+
+ControlEvent Flx4Mapping::resolveLoopButtonAction(
+    ControlEvent event, bool loopActive) noexcept
+{
+    if (!loopActive)
+        return event;
+
+    if (event.id == ControlId::LoopIn)
+        event.id = ControlId::LoopHalve;
+    else if (event.id == ControlId::LoopOut)
+        event.id = ControlId::LoopDouble;
+    return event;
+}
 
 std::optional<ControlEvent> Flx4Mapping::parse(
     std::span<const unsigned char> message) noexcept
@@ -208,6 +299,13 @@ std::optional<ControlEvent> Flx4Mapping::parse(
             if (pressed)
                 return ControlEvent {deck, ControlId::TempoSync, 1.0};
             return std::nullopt;
+        case kQuantizeNote:
+            if (pressed)
+                return ControlEvent {deck, ControlId::Quantize, 1.0};
+            return std::nullopt;
+        case kJogTouchNote:
+            return ControlEvent {
+                deck, ControlId::PlatterTouch, pressed ? 1.0 : 0.0};
         case kLoopInNote:
             if (pressed)
                 return ControlEvent {deck, ControlId::LoopIn, 1.0};
@@ -227,17 +325,24 @@ std::optional<ControlEvent> Flx4Mapping::parse(
             if (pressed)
                 return ControlEvent {deck, ControlId::LoopExit, 1.0};
             return std::nullopt;
-        case kLoopHalveNote:
-        case kShiftLoopHalveNote:
+        case kCueLoopCallPreviousNote:
+        case kShiftLoopInNote:
             if (pressed)
                 return ControlEvent {deck, ControlId::LoopHalve, 1.0};
             return std::nullopt;
-        case kLoopDoubleNote:
-        case kShiftLoopDoubleNote:
+        case kCueLoopCallNextNote:
+        case kShiftLoopOutNote:
             if (pressed)
                 return ControlEvent {deck, ControlId::LoopDouble, 1.0};
             return std::nullopt;
         default:
+            if (pressed) {
+                if (const auto mode = padModeForButton(data1)) {
+                    return ControlEvent {
+                        deck, ControlId::PerformancePadMode,
+                        static_cast<double>(static_cast<int>(*mode))};
+                }
+            }
             return std::nullopt;
         }
     }
@@ -248,22 +353,48 @@ std::optional<ControlEvent> Flx4Mapping::parse(
         return std::nullopt;
     }
 
-    if ((channel == kDeck1HotCueChannel || channel == kDeck2HotCueChannel)
-        && data1 < 8) {
-        const DeckId deck = channel == kDeck1HotCueChannel ? 0 : 1;
-        return ControlEvent {
-            deck, hotCueId(data1), pressed ? 1.0 : 0.0};
+    // Browser and LOAD controls share MIDI channel 7 (zero-based channel 6)
+    // with the mixer controls, but LOAD remains deck-scoped in Gravitino.
+    if (channel == kMixerChannel) {
+        if (data1 == kBrowsePressNote) {
+            if (pressed)
+                return ControlEvent {
+                    kNoDeck, ControlId::BrowseSelect, 1.0};
+            return std::nullopt;
+        }
+        if (data1 == kLoadDeck1Note || data1 == kLoadDeck2Note) {
+            if (pressed) {
+                return ControlEvent {
+                    data1 == kLoadDeck1Note ? 0 : 1,
+                    ControlId::Load, 1.0};
+            }
+            return std::nullopt;
+        }
     }
 
-    if ((channel == kDeck1HotCueChannel || channel == kDeck2HotCueChannel)
-        && data1 >= kBeatJumpPadFirstNote &&
-        data1 <= kBeatJumpPadLastNote) {
-        if (!pressed)
+    const bool normalPadChannel =
+        channel == kDeck1HotCueChannel || channel == kDeck2HotCueChannel;
+    const bool shiftedPadChannel =
+        channel == kDeck1ShiftPadChannel || channel == kDeck2ShiftPadChannel;
+    if (normalPadChannel || shiftedPadChannel) {
+        const DeckId deck =
+            channel == kDeck1HotCueChannel ||
+                    channel == kDeck1ShiftPadChannel ? 0 : 1;
+        const auto mode = padModeForNote(data1);
+        const std::uint8_t pad = data1 & 0x0FU;
+        if (!mode || pad >= kPerformancePadCount)
             return std::nullopt;
-        const DeckId deck = channel == kDeck1HotCueChannel ? 0 : 1;
-        const auto pad = static_cast<std::uint8_t>(
-            data1 - kBeatJumpPadFirstNote);
-        return ControlEvent {deck, ControlId::BeatJump, beatJumpForPad(pad)};
+
+        // The note bank describes the FLX4's private hardware latch, not
+        // necessarily the layer selected in Gravitino. Preserve the reported
+        // bank for validation/debugging and the SHIFT channel as an offset;
+        // MidiEngine resolves the action from the host-selected layer.
+        const int encodedMode = static_cast<int>(*mode) + 1 +
+            (shiftedPadChannel ? kShiftedPadEncodingOffset : 0);
+        return ControlEvent {
+            deck, performancePadId(pad),
+            pressed ? static_cast<double>(encodedMode)
+                    : -static_cast<double>(encodedMode)};
     }
 
     return std::nullopt;
@@ -272,6 +403,21 @@ std::optional<ControlEvent> Flx4Mapping::parse(
 std::optional<ControlEvent> Flx4Mapping::parseControlChange(
     std::uint8_t channel, std::uint8_t controller, std::uint8_t value) noexcept
 {
+    if (channel == kMixerChannel && controller == kBrowseTurnController) {
+        // The encoder reports a signed difference count: clockwise starts at
+        // 0x01, counterclockwise starts at 0x7f. Zero is not movement.
+        if (value == 0)
+            return std::nullopt;
+        const int delta = value < 0x40
+            ? static_cast<int>(value)
+            : static_cast<int>(value) - 0x80;
+        if (delta == 0)
+            return std::nullopt;
+        return ControlEvent {
+            kNoDeck, ControlId::BrowseNavigate,
+            static_cast<double>(delta)};
+    }
+
     if (channel == kFxChannel1) {
         if (controller == kBeatFxWetMsb) {
             return finishFourteenBit(
@@ -288,14 +434,21 @@ std::optional<ControlEvent> Flx4Mapping::parseControlChange(
         const DeckId deck = static_cast<DeckId>(deckIndex);
 
         switch (controller) {
-        case kJogSide:
+        case kJogSide: {
+            const int ticks = static_cast<int>(value) - kRelativeCenter;
+            if (ticks == 0) {
+                return std::nullopt;
+            }
+            return ControlEvent {deck, ControlId::Jog, static_cast<double>(ticks)};
+        }
         case kJogPlatterVinylOn:
         case kJogPlatterVinylOff: {
             const int ticks = static_cast<int>(value) - kRelativeCenter;
             if (ticks == 0) {
                 return std::nullopt;
             }
-            return ControlEvent {deck, ControlId::Jog, static_cast<double>(ticks)};
+            return ControlEvent {
+                deck, ControlId::PlatterScratch, static_cast<double>(ticks)};
         }
         case kTempoMsb:
             return finishFourteenBit(
@@ -415,6 +568,8 @@ std::optional<std::array<unsigned char, 3>> Flx4Mapping::ledMessage(
         note = kCueNote;
     } else if (id == ControlId::HeadphoneCue) {
         note = kHeadphoneCueNote;
+    } else if (id == ControlId::Quantize) {
+        note = kQuantizeNote;
     } else if (id == ControlId::LoopIn) {
         note = kLoopInNote;
     } else if (id == ControlId::LoopOut) {
@@ -422,9 +577,9 @@ std::optional<std::array<unsigned char, 3>> Flx4Mapping::ledMessage(
     } else if (id == ControlId::LoopExit) {
         note = kFourBeatExitNote;
     } else if (id == ControlId::LoopHalve) {
-        note = kShiftLoopHalveNote;
+        note = kShiftLoopInNote;
     } else if (id == ControlId::LoopDouble) {
-        note = kShiftLoopDoubleNote;
+        note = kShiftLoopOutNote;
     } else if (id == ControlId::LoopAuto) {
         note = kShiftFourBeatExitNote;
     } else if (id == ControlId::FxOn) {
@@ -443,6 +598,41 @@ std::optional<std::array<unsigned char, 3>> Flx4Mapping::ledMessage(
 
     return std::array<unsigned char, 3> {
         status, note, static_cast<unsigned char>(on ? 0x7F : 0x00)};
+}
+
+std::optional<std::array<unsigned char, 3>>
+Flx4Mapping::padModeLedMessage(DeckId deck, int mode, bool on) noexcept
+{
+    if (deck < 0 || deck > 1 || mode < 0 ||
+        mode >= static_cast<int>(PerformancePadMode::SavedLoop)) {
+        return std::nullopt;
+    }
+    const auto typedMode = static_cast<PerformancePadMode>(mode);
+    return std::array<unsigned char, 3> {
+        static_cast<unsigned char>(kNoteOn + deck),
+        modeButtonNote(typedMode),
+        static_cast<unsigned char>(on ? 0x7F : 0x00)};
+}
+
+std::optional<std::array<unsigned char, 3>>
+Flx4Mapping::performancePadLedMessage(
+    DeckId deck, int mode, int pad, bool shifted,
+    unsigned char velocity) noexcept
+{
+    if (deck < 0 || deck > 1 || mode < 0 ||
+        mode >= static_cast<int>(PerformancePadMode::SavedLoop) ||
+        pad < 0 || pad >= kPerformancePadCount) {
+        return std::nullopt;
+    }
+
+    const auto typedMode = static_cast<PerformancePadMode>(mode);
+    const unsigned char status = static_cast<unsigned char>(
+        shifted ? (deck == 0 ? 0x98 : 0x9A)
+                : (deck == 0 ? 0x97 : 0x99));
+    return std::array<unsigned char, 3> {
+        status,
+        static_cast<unsigned char>(padNoteBase(typedMode) + pad),
+        static_cast<unsigned char>(velocity & 0x7FU)};
 }
 
 } // namespace gvt

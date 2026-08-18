@@ -35,6 +35,8 @@ public slots:
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent*) override;
     void wheelEvent(QWheelEvent*) override;
     void resizeEvent(QResizeEvent*) override;
 
@@ -49,11 +51,20 @@ private:
     QList<double> transitionCueSecs_[2];
     QStringList transitionCueLabels_[2];
     double lastPaintPos_[2] = {-1.0, -1.0};
+    double lastTempoRatio_[2] = {-1.0, -1.0};
     const void* lastTrack_[2] = {nullptr, nullptr};
     // Last-painted loop state, so loop edits repaint even while paused.
     double lastLoopStart_[2] = {-2.0, -2.0};
     double lastLoopEnd_[2] = {-2.0, -2.0};
     bool lastLoopActive_[2] = {false, false};
+    // Mouse scratch state. The waveform is treated like a strip being grabbed:
+    // dragging it right moves the playhead earlier, and left moves it later.
+    int scratchDeck_ = -1;
+    double scratchPressX_ = 0.0;
+    double scratchAnchorSec_ = 0.0;
+    double scratchLastSec_ = 0.0;
+    bool scratchMoved_ = false;
+    const void* scratchTrack_ = nullptr;
     QTimer* timer_ = nullptr;
     QToolButton* zoomInBtn_ = nullptr;
     QToolButton* zoomOutBtn_ = nullptr;

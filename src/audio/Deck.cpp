@@ -17,12 +17,16 @@ namespace {
 
 constexpr double kJogRatioPerTick = 0.004;
 constexpr double kMaximumJogRatio = 0.25;
+// FLX4 platter packets are relative rotation counts. Ten milliseconds per
+// count keeps a slow turn controllable while making a deliberate spin an
+// audible coarse scrub, distinctly stronger than the rim's tempo bend.
+constexpr double kPlatterScratchSecondsPerTick = 0.01;
+constexpr double kMaximumScratchFramesPerOutputFrame = 12.0;
 constexpr double kCuePreviewToleranceSec = 0.05;
 // Reaches 0.1% of the initial bend after approximately 200 ms at 48 kHz.
 constexpr double kJogDecayPerFrame = 0.999280701;
 constexpr double kMinimumLoopBeats = 0.125;
 constexpr double kMaximumLoopBeats = 64.0;
-constexpr double kManualLoopSubdivisions = 8.0;
 
 float clampUnit(float value, float fallback) noexcept
 {
@@ -58,13 +62,33 @@ double clampTrackSec(const TrackData& track, double sec) noexcept
     return std::clamp(sec, 0.0, trackDurationSec(track));
 }
 
-double snapToBeatSubdivision(const TrackData& track, double sec) noexcept
+double snapToPlayableBeat(const TrackDataPtr& track, double sec) noexcept
 {
-    const double beat = track.beatAtSec(sec);
-    const double snappedBeat =
-        std::round(beat * kManualLoopSubdivisions) /
-        kManualLoopSubdivisions;
-    return clampTrackSec(track, track.secAtBeat(snappedBeat));
+    if (!hasUsableBeatGrid(track) || !std::isfinite(sec))
+        return sec;
+
+    const double duration = trackDurationSec(*track);
+    if (!(duration > 0.0))
+        return sec;
+
+    // Quantized hot cues must remain playable. In particular, avoid snapping
+    // a point near EOF to the first grid line after the track, which would
+    // make PLAY's normal end-of-track restart rule jump back to zero.
+    const double finalPlayableSec = std::nextafter(duration, 0.0);
+    const double firstPlayableBeat = std::ceil(track->beatAtSec(0.0));
+    const double lastPlayableBeat =
+        std::floor(track->beatAtSec(finalPlayableSec));
+    if (!std::isfinite(firstPlayableBeat) ||
+        !std::isfinite(lastPlayableBeat) ||
+        firstPlayableBeat > lastPlayableBeat) {
+        return std::clamp(sec, 0.0, finalPlayableSec);
+    }
+
+    const double nearestBeat = std::clamp(
+        std::round(track->beatAtSec(sec)),
+        firstPlayableBeat, lastPlayableBeat);
+    return std::clamp(track->secAtBeat(nearestBeat),
+                      0.0, finalPlayableSec);
 }
 
 } // namespace
@@ -81,6 +105,9 @@ struct Deck::Impl {
     std::atomic<StemSet*> audioStems { nullptr };// audio-thread view
     std::atomic<unsigned int> activeRenders { 0 };
     std::atomic<double> pendingJogRatio { 0.0 };
+    std::atomic<bool> scratchActive { false };
+    std::atomic<bool> scratchResumePlaying { false };
+    std::atomic<double> pendingScratchFrames { 0.0 };
     std::atomic<bool> cuePreviewing { false };
     std::atomic<int> hotCuePreviewIndex { -1 };
     std::atomic<double> hotCuePreviewSec { -1.0 };
@@ -126,6 +153,9 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->ownedTrack = std::move(track);
     impl_->positionFrames.store(0.0, std::memory_order_release);
     impl_->pendingJogRatio.store(0.0, std::memory_order_release);
+    impl_->scratchActive.store(false, std::memory_order_release);
+    impl_->scratchResumePlaying.store(false, std::memory_order_release);
+    impl_->pendingScratchFrames.store(0.0, std::memory_order_release);
     impl_->cuePreviewing.store(false, std::memory_order_release);
     impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
     impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
@@ -218,7 +248,14 @@ void Deck::startPlayback(bool latchPreview)
     if (impl_->positionFrames.load(std::memory_order_acquire) >=
         (double)frames - 1.0)
         impl_->positionFrames.store(0.0, std::memory_order_release);
-    playing.store(true, std::memory_order_release);
+    if (impl_->scratchActive.load(std::memory_order_acquire)) {
+        // PLAY while the platter is held means "continue when released";
+        // ordinary forward transport must remain suspended during scratching.
+        impl_->scratchResumePlaying.store(true, std::memory_order_release);
+        playing.store(false, std::memory_order_release);
+    } else {
+        playing.store(true, std::memory_order_release);
+    }
 }
 
 bool Deck::previewActive() const
@@ -229,6 +266,7 @@ bool Deck::previewActive() const
 
 void Deck::stop()
 {
+    impl_->scratchResumePlaying.store(false, std::memory_order_release);
     playing.store(false, std::memory_order_release);
 }
 
@@ -304,13 +342,16 @@ void Deck::handleHotCue(int index, bool pressed)
         return;
     }
 
-    const double cueSec = currentTrack->hotCues[index];
-    if (!std::isfinite(cueSec) || cueSec < 0.0) {
+    const double storedCueSec = currentTrack->hotCues[index];
+    if (!std::isfinite(storedCueSec) || storedCueSec < 0.0) {
         impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
         impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
         setHotCue(index);
         return;
     }
+    const double cueSec = quantizeHotCues.load(std::memory_order_acquire)
+        ? snapToPlayableBeat(currentTrack, storedCueSec)
+        : storedCueSec;
 
     impl_->hotCuePreviewSec.store(cueSec, std::memory_order_release);
     impl_->hotCuePreviewIndex.store(index, std::memory_order_release);
@@ -324,8 +365,13 @@ void Deck::setHotCue(int index)
         return;
 
     const TrackDataPtr currentTrack = track();
-    if (currentTrack)
-        currentTrack->hotCues[index] = positionSec();
+    if (currentTrack) {
+        const double currentSec = positionSec();
+        currentTrack->hotCues[index] =
+            quantizeHotCues.load(std::memory_order_acquire)
+            ? snapToPlayableBeat(currentTrack, currentSec)
+            : currentSec;
+    }
 }
 
 void Deck::jumpHotCue(int index)
@@ -334,8 +380,12 @@ void Deck::jumpHotCue(int index)
         return;
 
     const TrackDataPtr currentTrack = track();
-    if (currentTrack && currentTrack->hotCues[index] >= 0.0)
-        seekSec(currentTrack->hotCues[index]);
+    if (currentTrack && currentTrack->hotCues[index] >= 0.0) {
+        const double storedCueSec = currentTrack->hotCues[index];
+        seekSec(quantizeHotCues.load(std::memory_order_acquire)
+                    ? snapToPlayableBeat(currentTrack, storedCueSec)
+                    : storedCueSec);
+    }
 }
 
 void Deck::nudge(double ticks)
@@ -351,6 +401,107 @@ void Deck::nudge(double ticks)
                              -kMaximumJogRatio, kMaximumJogRatio);
     } while (!impl_->pendingJogRatio.compare_exchange_weak(
         pending, desired, std::memory_order_release, std::memory_order_relaxed));
+}
+
+void Deck::scratch(double ticks)
+{
+    if (!std::isfinite(ticks) || ticks == 0.0)
+        return;
+
+    const int64_t trackFrames =
+        impl_->trackFrameCount.load(std::memory_order_acquire);
+    if (trackFrames <= 0)
+        return;
+
+    const double deltaFrames = ticks * kPlatterScratchSecondsPerTick *
+                               static_cast<double>(kSampleRate);
+    if (impl_->scratchActive.load(std::memory_order_acquire)) {
+        double pending = impl_->pendingScratchFrames.load(
+            std::memory_order_relaxed);
+        while (!impl_->pendingScratchFrames.compare_exchange_weak(
+            pending, pending + deltaFrames, std::memory_order_release,
+            std::memory_order_relaxed)) {
+        }
+        return;
+    }
+
+    // Keep the direct positional fallback for synthetic/UI callers that do
+    // not have a separate touch gesture. The FLX4 path always brackets wheel
+    // movement with beginScratch()/endScratch() and therefore renders audio.
+    const double trackEndFrame = static_cast<double>(trackFrames);
+    double lowerFrame = 0.0;
+    double upperFrame = std::nextafter(trackEndFrame, 0.0);
+
+    // Unlike an ordinary seek, scratching across a loop edge must not disable
+    // the loop. Keep the platter position inside the active half-open bounds.
+    if (loopActive.load(std::memory_order_acquire)) {
+        const double startSec = loopStartSec.load(std::memory_order_acquire);
+        const double endSec = loopEndSec.load(std::memory_order_acquire);
+        const double startFrame = startSec * static_cast<double>(kSampleRate);
+        const double endFrame = endSec * static_cast<double>(kSampleRate);
+        if (std::isfinite(startFrame) && std::isfinite(endFrame) &&
+            endFrame > startFrame) {
+            const double boundedStart =
+                std::clamp(startFrame, 0.0, upperFrame);
+            const double boundedEnd =
+                std::clamp(endFrame, 0.0, trackEndFrame);
+            if (boundedEnd > boundedStart) {
+                lowerFrame = boundedStart;
+                upperFrame = std::nextafter(boundedEnd, boundedStart);
+            }
+        }
+    }
+
+    double current = impl_->positionFrames.load(std::memory_order_acquire);
+    double desired = lowerFrame;
+    do {
+        if (!std::isfinite(current))
+            current = lowerFrame;
+        desired = std::clamp(current + deltaFrames, lowerFrame, upperFrame);
+    } while (!impl_->positionFrames.compare_exchange_weak(
+        current, desired, std::memory_order_release, std::memory_order_acquire));
+}
+
+void Deck::beginScratch()
+{
+    if (impl_->audioTrack.load(std::memory_order_acquire) == nullptr)
+        return;
+    if (impl_->scratchActive.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    impl_->pendingScratchFrames.store(0.0, std::memory_order_release);
+    const bool resume = playing.exchange(false, std::memory_order_acq_rel);
+    impl_->scratchResumePlaying.store(resume, std::memory_order_release);
+}
+
+void Deck::endScratch()
+{
+    if (!impl_->scratchActive.exchange(false, std::memory_order_acq_rel))
+        return;
+
+    impl_->pendingScratchFrames.store(0.0, std::memory_order_release);
+    const bool resume = impl_->scratchResumePlaying.exchange(
+        false, std::memory_order_acq_rel);
+    if (resume && impl_->audioTrack.load(std::memory_order_acquire) != nullptr)
+        playing.store(true, std::memory_order_release);
+}
+
+void Deck::updateBeatGrid(double bpm, double firstBeatSec)
+{
+    if (!std::isfinite(bpm) || bpm <= 0.0 ||
+        !std::isfinite(firstBeatSec)) {
+        return;
+    }
+
+    // Beat-based GUI actions read TrackData, while realtime timing/sync/FX
+    // read the copied atomics. Publish both halves of the live grid together
+    // so a manual correction takes effect without unloading the track.
+    if (impl_->ownedTrack) {
+        impl_->ownedTrack->bpm = bpm;
+        impl_->ownedTrack->firstBeatSec = firstBeatSec;
+    }
+    impl_->trackBpm.store(bpm, std::memory_order_release);
+    impl_->firstBeatSec.store(firstBeatSec, std::memory_order_release);
 }
 
 void Deck::loopAuto(double beats)
@@ -385,10 +536,12 @@ void Deck::loopAuto(double beats)
 void Deck::loopIn()
 {
     const TrackDataPtr currentTrack = track();
-    if (!hasUsableBeatGrid(currentTrack))
+    if (!currentTrack || currentTrack->frameCount() <= 0)
         return;
 
-    const double start = snapToBeatSubdivision(*currentTrack, positionSec());
+    const double current = clampTrackSec(*currentTrack, positionSec());
+    const double start = quantizeHotCues.load(std::memory_order_acquire)
+        ? snapToPlayableBeat(currentTrack, current) : current;
     loopActive.store(false, std::memory_order_release);
     loopStartSec.store(start, std::memory_order_release);
     loopEndSec.store(-1.0, std::memory_order_release);
@@ -399,7 +552,8 @@ void Deck::loopIn()
 void Deck::loopOut()
 {
     const TrackDataPtr currentTrack = track();
-    if (!hasUsableBeatGrid(currentTrack) || !impl_->hasPendingLoopIn)
+    if (!currentTrack || currentTrack->frameCount() <= 0 ||
+        !impl_->hasPendingLoopIn)
         return;
 
     const double current = positionSec();
@@ -407,10 +561,23 @@ void Deck::loopOut()
     if (!std::isfinite(current) || !(current > start))
         return;
 
-    double end = snapToBeatSubdivision(*currentTrack, current);
-    const double minimumEnd =
-        start + kMinimumLoopBeats * 60.0 / currentTrack->bpm;
-    end = clampTrackSec(*currentTrack, std::max(end, minimumEnd));
+    const bool quantized = quantizeHotCues.load(std::memory_order_acquire) &&
+                           hasUsableBeatGrid(currentTrack);
+    double end = quantized
+        ? snapToPlayableBeat(currentTrack, current)
+        : clampTrackSec(*currentTrack, current);
+    if (quantized && !(end > start)) {
+        // IN is itself on a whole beat, so the shortest quantized manual loop
+        // is the following whole beat. Never manufacture an off-grid OUT.
+        end = clampTrackSec(
+            *currentTrack,
+            currentTrack->secAtBeat(
+                std::floor(currentTrack->beatAtSec(start) + 1.0e-7) + 1.0));
+    } else if (!quantized && hasUsableBeatGrid(currentTrack)) {
+        const double minimumEnd =
+            start + kMinimumLoopBeats * 60.0 / currentTrack->bpm;
+        end = clampTrackSec(*currentTrack, std::max(end, minimumEnd));
+    }
     if (!(end > start))
         return;
 
@@ -476,6 +643,46 @@ void Deck::loopDouble()
     loopEndSec.store(newEnd, std::memory_order_release);
 }
 
+bool Deck::activateSavedLoop(double startSec, double endSec)
+{
+    const TrackDataPtr currentTrack = track();
+    if (!currentTrack || !std::isfinite(startSec) ||
+        !std::isfinite(endSec)) {
+        return false;
+    }
+
+    const double duration = trackDurationSec(*currentTrack);
+    startSec = std::clamp(startSec, 0.0, duration);
+    endSec = std::clamp(endSec, 0.0, duration);
+    if (!(endSec > startSec))
+        return false;
+
+    loopActive.store(false, std::memory_order_release);
+    loopStartSec.store(startSec, std::memory_order_release);
+    loopEndSec.store(endSec, std::memory_order_release);
+    impl_->pendingLoopInSec = -1.0;
+    impl_->hasPendingLoopIn = false;
+
+    const double position = positionSec();
+    if (position < startSec || position >= endSec)
+        seekSec(startSec);
+    loopActive.store(true, std::memory_order_release);
+    return true;
+}
+
+bool Deck::retriggerSavedLoop(double startSec, double endSec)
+{
+    if (!activateSavedLoop(startSec, endSec))
+        return false;
+
+    // Saved-loop pads behave like one-shot hot cues: every press returns to
+    // the authored IN point and leaves transport running. Loop EXIT remains
+    // the explicit way to disengage the loop.
+    seekSec(loopStartSec.load(std::memory_order_acquire));
+    play();
+    return true;
+}
+
 void Deck::beatJump(double beats)
 {
     const TrackDataPtr currentTrack = track();
@@ -509,8 +716,11 @@ void Deck::render(float* out, int frames, float* preFaderOut)
     // A stopped deck normally costs nothing, except while an effect has stored
     // energy to release. Tail-only renders use zero input and never advance the
     // track position.
+    const bool scratchRequested =
+        impl_->scratchActive.load(std::memory_order_acquire);
     if (!impl_->renderGate.load(std::memory_order_acquire) ||
-        (!playing.load(std::memory_order_acquire) && !impl_->fx.hasTail())) {
+        (!playing.load(std::memory_order_acquire) && !scratchRequested &&
+         !impl_->fx.hasTail())) {
         return;
     }
 
@@ -526,7 +736,9 @@ void Deck::render(float* out, int frames, float* preFaderOut)
     if (!impl_->renderGate.load(std::memory_order_acquire))
         return;
 
-    bool renderTrack = playing.load(std::memory_order_acquire);
+    const bool scratching =
+        impl_->scratchActive.load(std::memory_order_acquire);
+    bool renderTrack = scratching || playing.load(std::memory_order_acquire);
     TrackData* currentTrack = renderTrack
         ? impl_->audioTrack.load(std::memory_order_acquire)
         : nullptr;
@@ -551,10 +763,32 @@ void Deck::render(float* out, int frames, float* preFaderOut)
     bool reachedEnd = false;
 
     if (renderTrack) {
-        impl_->jogRatio = std::clamp(
-            impl_->jogRatio + impl_->pendingJogRatio.exchange(
-                0.0, std::memory_order_acq_rel),
-            -kMaximumJogRatio, kMaximumJogRatio);
+        double scratchAdvance = 0.0;
+        bool scratchHasMotion = false;
+        if (scratching) {
+            const double requested = impl_->pendingScratchFrames.exchange(
+                0.0, std::memory_order_acq_rel);
+            const double maximum =
+                static_cast<double>(frames) *
+                kMaximumScratchFramesPerOutputFrame;
+            const double movement = std::clamp(requested, -maximum, maximum);
+            const double remainder = requested - movement;
+            if (std::abs(remainder) > 1.0e-9) {
+                double pending = impl_->pendingScratchFrames.load(
+                    std::memory_order_relaxed);
+                while (!impl_->pendingScratchFrames.compare_exchange_weak(
+                    pending, pending + remainder, std::memory_order_release,
+                    std::memory_order_relaxed)) {
+                }
+            }
+            scratchAdvance = movement / static_cast<double>(frames);
+            scratchHasMotion = std::abs(scratchAdvance) > 1.0e-9;
+        } else {
+            impl_->jogRatio = std::clamp(
+                impl_->jogRatio + impl_->pendingJogRatio.exchange(
+                    0.0, std::memory_order_acq_rel),
+                -kMaximumJogRatio, kMaximumJogRatio);
+        }
 
         const int64_t trackFrames = currentTrack->frameCount();
         const double inputGain = trimGain(
@@ -599,8 +833,21 @@ void Deck::render(float* out, int frames, float* preFaderOut)
             }
         };
 
+        const auto clampScratchPosition = [&] {
+            const double lower = loopEnabled ? loopStartFrame : 0.0;
+            const double exclusiveEnd = loopEnabled
+                ? loopEndFrame : static_cast<double>(trackFrames);
+            const double upper = std::nextafter(exclusiveEnd, lower);
+            position = std::clamp(position, lower, upper);
+        };
+
         for (int frame = 0; frame < frames; ++frame) {
-            wrapLoopPosition();
+            if (scratching)
+                clampScratchPosition();
+            else
+                wrapLoopPosition();
+            if (scratching && !scratchHasMotion)
+                break;
             if (position >= static_cast<double>(trackFrames)) {
                 position = static_cast<double>(trackFrames);
                 reachedEnd = true;
@@ -646,16 +893,23 @@ void Deck::render(float* out, int frames, float* preFaderOut)
                 }
             }
 
-            const double playbackRatio =
-                std::clamp(ratio + impl_->jogRatio, 0.01, 4.0);
-            position += playbackRatio;
-            wrapLoopPosition();
-            impl_->jogRatio *= kJogDecayPerFrame;
-            if (std::abs(impl_->jogRatio) < 1.0e-8)
-                impl_->jogRatio = 0.0;
+            if (scratching) {
+                position += scratchAdvance;
+                clampScratchPosition();
+            } else {
+                const double playbackRatio =
+                    std::clamp(ratio + impl_->jogRatio, 0.01, 4.0);
+                position += playbackRatio;
+                wrapLoopPosition();
+                impl_->jogRatio *= kJogDecayPerFrame;
+                if (std::abs(impl_->jogRatio) < 1.0e-8)
+                    impl_->jogRatio = 0.0;
+            }
         }
 
-        if (position >= static_cast<double>(trackFrames)) {
+        if (scratching) {
+            clampScratchPosition();
+        } else if (position >= static_cast<double>(trackFrames)) {
             position = static_cast<double>(trackFrames);
             reachedEnd = true;
         }

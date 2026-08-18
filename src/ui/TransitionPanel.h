@@ -8,7 +8,9 @@
 #include "../library/TrackLibrary.h"
 #include "../transitions/Transition.h"
 #include "../transitions/TransitionEngine.h"
+#include "../transitions/TransitionTolerance.h"
 
+class QCheckBox;
 class QLabel;
 class QListWidget;
 class QProgressBar;
@@ -41,9 +43,12 @@ signals:
     // seconds for each physical deck's beatgrid.
     void cueMarkersChanged(int deck, const QList<double>& seconds,
                            const QStringList& labels);
+    void hardwareTakeoverTrackingStarted();
+    void hardwareTakeoverTrackingFinished();
 
 public slots:
     void refreshMatches();  // call on trackLoaded / store changed
+    void observeTutorialHardwareControl(const gvt::ControlEvent& event);
 
 private slots:
     void onRec();
@@ -56,6 +61,7 @@ private slots:
     void onDelete();
     void onLabelCue();
     void onApplySetup();
+    void onEditSetupTolerance();
     void onProgress(double beatsIn, double beatsTotal);
     void onFinished(bool completed);
     void onEventCaptured(int count);
@@ -78,7 +84,8 @@ private:
     void applyInitialSetup(const Match& match, bool announce,
                            bool prepareFromTransport = false,
                            bool prepareToTransport = false);
-    bool setupMatches(const Match& match, QStringList* differences = nullptr) const;
+    bool setupMatches(const Match& match, QStringList* differences = nullptr,
+                      bool honorCloseEnough = true) const;
     QStringList primeReadinessIssues(const Match& match) const;
     double expectedTempoRatio(const Match& match, bool fromRole) const;
     QString automaticCueLabel(const GvtEvent& event) const;
@@ -116,6 +123,8 @@ private:
     QPushButton* deleteBtn_ = nullptr;
     QPushButton* labelCueBtn_ = nullptr;
     QPushButton* applySetupBtn_ = nullptr;
+    QCheckBox* closeEnoughCheck_ = nullptr;
+    QPushButton* toleranceBtn_ = nullptr;
     QProgressBar* progress_ = nullptr;
     QLabel* recIndicator_ = nullptr;
     QLabel* setupLabel_ = nullptr;
@@ -129,6 +138,8 @@ private:
     int tutorialFromDeck_ = 0;
     double tutorialBeatsIn_ = 0.0;
     bool tutorialActive_ = false;
+    bool takeoverTrackingActive_ = false;
+    TransitionSetupTolerances setupTolerances_;
 };
 
 } // namespace gvt

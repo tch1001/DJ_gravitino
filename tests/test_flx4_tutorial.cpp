@@ -40,6 +40,7 @@ int main()
     CHECK(flx4TutorialMapping(ControlId::Stop, 1.0)->surface ==
           Flx4SurfaceControl::PlayPause);
     CHECK(flx4TutorialMapping(ControlId::FxOn, 1.0)->needsFxAssignment);
+    CHECK(!flx4TutorialMapping(ControlId::Quantize, 1.0)->needsFxAssignment);
     CHECK(!flx4TutorialMapping(ControlId::StemVocals, 0.0));
 
     if (failures) return 1;
