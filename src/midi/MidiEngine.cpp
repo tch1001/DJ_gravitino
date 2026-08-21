@@ -1035,6 +1035,16 @@ struct MidiEngine::Impl {
         emit owner->softTakeoverChanged();
     }
 
+    void cancelTakeoverTracking()
+    {
+        takeoverTracking = false;
+        takeoverTouched.clear();
+        takeoverStartValues.clear();
+        takeover.clear();
+        takeoverFrozen.store(false, std::memory_order_release);
+        emit owner->softTakeoverChanged();
+    }
+
     MidiEngine* owner = nullptr;
     ControlBus* bus = nullptr;
     AudioEngine* engine = nullptr;
@@ -1103,6 +1113,11 @@ void MidiEngine::beginTransitionTakeoverTracking()
 void MidiEngine::finishTransitionTakeoverTracking()
 {
     impl_->finishTakeoverTracking();
+}
+
+void MidiEngine::cancelTransitionTakeoverTracking()
+{
+    impl_->cancelTakeoverTracking();
 }
 
 std::vector<SoftTakeoverState> MidiEngine::pendingTakeovers() const

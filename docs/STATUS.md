@@ -6,6 +6,18 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-22 (codex): **PRIME reachability and takeover lifecycle fix.** A
+  future outgoing loop no longer blocks PRIME merely because the transition
+  entry lies before LOOP IN; readiness now asks whether the live transport can
+  actually reach the entry. This fixes the saved Titanium → Don't You Worry
+  Child topology (current beat before entry, loop at beats 448–464). Failed or
+  aborted PRIME/PERFORM attempts now cancel provisional FLX4 tracking instead
+  of falsely entering `FLX4 INPUT FROZEN`; pickup is finalized only after a
+  genuinely completed transition. PRIME failures also remain visible as a
+  persistent, actionable `PRIME not armed` reason instead of silently
+  disappearing. Verified: clean build, ctest 21/21, full `--selftest`, and
+  `git diff --check`.
+
 - 2026-08-22 (codex): **Focused beat grid and synchronized overview cursor.**
   Stacked/detail waveforms now draw ordinary beat lines at substantially
   higher opacity and distinguish every four-beat downbeat with a brighter

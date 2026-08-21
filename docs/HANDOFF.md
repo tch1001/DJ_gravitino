@@ -1,14 +1,13 @@
 # Gravitino Agent Handoff
 
-Updated: 2026-08-21 (Asia/Singapore)
+Updated: 2026-08-22 (Asia/Singapore)
 
 ## Current state
 
-All prior DJ-controller follow-ups through reliable transition identity and
-controller integration were committed and pushed at `05df27f` (`Fix transition
-replay and controller integration`). The manual PRIME BPM gate, armed CUSTOM
-loops, and per-deck key lock described below are the current working-tree
-change set.
+The focused beat-grid and overview-cursor checkpoint was committed and pushed
+at `685f5b6` (`Improve transition setup and deck controls`). The subsequent
+PRIME reachability/takeover lifecycle fix is described first below; consult
+`git log -1` for its final checkpoint hash.
 
 The user explicitly permits stopping a running Gravitino process when a
 restart is needed. Always resolve the process narrowly with
@@ -20,6 +19,16 @@ The Git remote is `git@github.com:tch1001/DJ_gravitino.git`; `main` tracks
 
 ## Implemented in this working tree
 
+- **Reliable PRIME reachability and FLX4 lifecycle:** active-loop readiness now
+  distinguishes a future loop from one already containing the playhead. A
+  transition entry before LOOP IN is reachable and may be armed; an entry
+  beyond a future loop's OUT or outside the loop currently trapping playback
+  remains blocked. This directly covers the user's Titanium → Don't You Worry
+  Child transition, whose entry is beat 433.77 while the recorded outgoing
+  loop starts at beat 448. A failed/aborted arm now cancels provisional
+  hardware tracking, so it cannot create a false `FLX4 INPUT FROZEN` state;
+  only the player's successful completion finalizes post-transition pickup.
+  PRIME arm failures persist in the setup panel with the exact reason.
 - **Focused beat grid and live overview cursor:** the stacked/detail view uses
   higher-opacity lines for every beat and a brighter, thicker line every four
   beats. Compact overview waveforms contain no beat lines, and their playheads

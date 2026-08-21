@@ -75,6 +75,15 @@ int main()
     CHECK(!takeover.acceptHardware({0, ControlId::EqLow, 0.61}, &changed));
     CHECK(changed && !takeover.active());
 
+    // Cancelling a provisional transition must release the controller without
+    // converting setup changes into a post-transition pickup freeze.
+    takeover.rememberHardware({0, ControlId::EqLow, 0.2});
+    takeover.arm({{0, ControlId::EqLow, 0.8}});
+    CHECK(takeover.active());
+    takeover.clear();
+    CHECK(!takeover.active());
+    CHECK(takeover.acceptHardware({0, ControlId::Play, 1.0}));
+
     if (failures) return 1;
     std::printf("test_soft_takeover: pickup gating passed\n");
     return 0;

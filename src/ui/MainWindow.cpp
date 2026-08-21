@@ -237,6 +237,9 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             &TransitionPanel::hardwareTakeoverTrackingFinished, midi_,
             &MidiEngine::finishTransitionTakeoverTracking);
     connect(transitionPanel_,
+            &TransitionPanel::hardwareTakeoverTrackingCancelled, midi_,
+            &MidiEngine::cancelTransitionTakeoverTracking);
+    connect(transitionPanel_,
             &TransitionPanel::setupMismatchControlsChanged, this,
             &MainWindow::refreshSetupMismatchUi);
     connect(midi_, &MidiEngine::hardwareControlObserved, transitionPanel_,

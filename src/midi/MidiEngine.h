@@ -25,6 +25,7 @@ public:
                                 unsigned int pressedMask);
     void beginTransitionTakeoverTracking();
     void finishTransitionTakeoverTracking();
+    void cancelTransitionTakeoverTracking();
     std::vector<SoftTakeoverState> pendingTakeovers() const;
 signals:
     void connectionChanged(bool connected, const QString& name);

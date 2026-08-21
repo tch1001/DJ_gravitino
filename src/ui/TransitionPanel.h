@@ -50,6 +50,9 @@ signals:
                            const QStringList& labels);
     void hardwareTakeoverTrackingStarted();
     void hardwareTakeoverTrackingFinished();
+    // Drop a provisional tracking session without creating a pickup gate.
+    // Used when Prime/Perform never armed or was explicitly aborted.
+    void hardwareTakeoverTrackingCancelled();
     void tutorialPerformancePadRequested(int deck, int mode, int pad,
                                          bool pressed);
     // Exact visible controls currently outside the selected transition's
@@ -99,12 +102,14 @@ private:
         Armed,
         Running,
         Done,
+        Blocked,
     };
     void showBanner(const QString& text, const QColor& color, int timeoutMs);
     int selectedMatch() const;     // index into matches_, -1 if none
     bool replayLifecycleMatches(const Match& match) const;
     QString replayDirectionText(const Match& match) const;
     void clearReplayLifecycle();
+    void setReplayBlocked(const Match& match, const QString& reason);
     void announceEntryMarker();    // emit entryMarkerChanged for selection
     void updatePreview();
     void updateControls();
@@ -183,6 +188,7 @@ private:
     ReplayLifecycle replayLifecycle_ = ReplayLifecycle::None;
     QString replayPath_;
     int replayFromDeck_ = -1;
+    QString replayLifecycleDetail_;
     std::array<int, 2> tutorialPadMode_ {};
     std::array<unsigned int, 2> tutorialPadEnabledMask_ {};
     std::array<unsigned int, 2> tutorialPadPressedMask_ {};

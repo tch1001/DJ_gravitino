@@ -2,6 +2,7 @@
 #include "FitButton.h"
 #include "Flx4TutorialWidget.h"
 #include "../performance/PerformancePads.h"
+#include "../transitions/TransitionPrime.h"
 #include "../transitions/TransitionPlayerExt.h"
 #include "Theme.h"
 
@@ -487,6 +488,17 @@ void TransitionPanel::clearReplayLifecycle()
     replayLifecycle_ = ReplayLifecycle::None;
     replayPath_.clear();
     replayFromDeck_ = -1;
+    replayLifecycleDetail_.clear();
+}
+
+void TransitionPanel::setReplayBlocked(const Match& match,
+                                       const QString& reason)
+{
+    replayPath_ = match.file ? match.file->filePath : QString();
+    replayFromDeck_ = match.fromDeck;
+    replayLifecycleDetail_ = reason;
+    replayLifecycle_ = ReplayLifecycle::Blocked;
+    updateSetupStatus();
 }
 
 void TransitionPanel::onRec()
@@ -911,8 +923,8 @@ QStringList TransitionPanel::primeReadinessIssues(const Match& match) const
         if (track) {
             const double start = track->beatAtSec(outgoing.loopStartSec.load());
             const double end = track->beatAtSec(outgoing.loopEndSec.load());
-            if (match.file->anchorFromBeat < start ||
-                match.file->anchorFromBeat >= end)
+            if (!activeLoopCanReachTransitionEntry(
+                    currentBeat, match.file->anchorFromBeat, start, end))
                 issues.append(tr("outgoing loop cannot reach the entry beat"));
         }
     }
@@ -960,6 +972,11 @@ void TransitionPanel::updateSetupStatus()
             setupLabel_->setText(
                 tr("Transition armed — %1").arg(replayDirectionText(match)));
             setupLabel_->setStyleSheet("color:#67c8ff; font-weight:600;");
+            return;
+        case ReplayLifecycle::Blocked:
+            setupLabel_->setText(
+                tr("PRIME not armed — %1").arg(replayLifecycleDetail_));
+            setupLabel_->setStyleSheet("color:#e8a835; font-weight:600;");
             return;
         case ReplayLifecycle::None:
             break;
@@ -1369,10 +1386,14 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         });
     if (mode == PlayerMode::Perform && !incomingInitiallyPlaying &&
         !hasIncomingStartEvent) {
+        const QString reason =
+            tr("the recording has no incoming PLAY, hot-cue, or CUSTOM-loop "
+               "event; re-record it with the current controls");
+        if (prime) setReplayBlocked(m, reason);
         emit statusMessage(
-            tr("Can't perform “%1” accurately: the recording has no incoming "
-               "PLAY, hot-cue, or CUSTOM-loop event. Re-record it with the current controls.")
-                .arg(m.file->name),
+            tr("Can't %1 “%2” accurately: %3")
+                .arg(prime ? tr("prime") : tr("perform"), m.file->name,
+                     reason),
             9000);
         return;
     }
@@ -1394,6 +1415,32 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
     transitionPlayerSetMode(player_, mode);
     transitionPlayerPreserveOutgoingSetupTempo(player_, prime);
 
+    if (prime) {
+        // Reject a live-master BPM mismatch before mutating either deck or
+        // starting provisional hardware tracking. A failed Prime must not
+        // masquerade as a completed transition pickup session.
+        const Deck& outgoing = engine_->deck(m.fromDeck);
+        const TrackDataPtr outgoingTrack = outgoing.track();
+        const double wantedBpm = outgoingTrack
+            ? outgoingTrack->bpm * expectedTempoRatio(m, true) : 0.0;
+        const double bpmTolerance = transitionSetupTolerance(
+            SetupToleranceField::Bpm, 0.05, setupTolerances_);
+        if (outgoingTrack && !transitionSetupValueMatches(
+                outgoing.effectiveBpm(), wantedBpm,
+                SetupToleranceField::Bpm, 0.05, setupTolerances_)) {
+            const QString reason =
+                tr("adjust Deck %1 BPM to %2 (±%3 accepted), then press Prime again")
+                    .arg(m.fromDeck == 0 ? QStringLiteral("A")
+                                         : QStringLiteral("B"))
+                    .arg(wantedBpm, 0, 'f', 2)
+                    .arg(bpmTolerance, 0, 'f', 2);
+            setReplayBlocked(m, reason);
+            emit statusMessage(reason, 9000);
+            updateControls();
+            return;
+        }
+    }
+
     if (mode == PlayerMode::Perform) {
         takeoverTrackingActive_ = true;
         emit hardwareTakeoverTrackingStarted();
@@ -1406,38 +1453,16 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         applyInitialSetup(m, false, /*prepareFromTransport=*/false,
                           /*prepareToTransport=*/true,
                           /*applyFromTempo=*/false);
-        const Deck& outgoing = engine_->deck(m.fromDeck);
-        const TrackDataPtr outgoingTrack = outgoing.track();
-        const double wantedBpm = outgoingTrack
-            ? outgoingTrack->bpm * expectedTempoRatio(m, true) : 0.0;
-        const double bpmTolerance = transitionSetupTolerance(
-            SetupToleranceField::Bpm, 0.05, setupTolerances_);
-        if (outgoingTrack && !transitionSetupValueMatches(
-                outgoing.effectiveBpm(), wantedBpm,
-                SetupToleranceField::Bpm, 0.05, setupTolerances_)) {
-            if (takeoverTrackingActive_) {
-                takeoverTrackingActive_ = false;
-                emit hardwareTakeoverTrackingFinished();
-            }
-            emit statusMessage(
-                tr("Adjust Deck %1 BPM to %2 (±%3 accepted), then press Prime again")
-                    .arg(m.fromDeck == 0 ? QStringLiteral("A")
-                                         : QStringLiteral("B"))
-                    .arg(wantedBpm, 0, 'f', 2)
-                    .arg(bpmTolerance, 0, 'f', 2),
-                9000);
-            updateControls();
-            return;
-        }
         const QStringList issues = primeReadinessIssues(m);
         if (!issues.isEmpty()) {
             if (takeoverTrackingActive_) {
                 takeoverTrackingActive_ = false;
-                emit hardwareTakeoverTrackingFinished();
+                emit hardwareTakeoverTrackingCancelled();
             }
-            emit statusMessage(tr("Can't prime: %1")
-                                   .arg(issues.mid(0, 4).join(QStringLiteral(", "))),
-                               7000);
+            const QString reason =
+                issues.mid(0, 4).join(QStringLiteral(", "));
+            setReplayBlocked(m, reason);
+            emit statusMessage(tr("Can't prime: %1").arg(reason), 9000);
             updateControls();
             return;
         }
@@ -1464,8 +1489,9 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
     if (!player_->arm(*m.file, m.fromDeck, /*startNow=*/false, &error)) {
         if (takeoverTrackingActive_) {
             takeoverTrackingActive_ = false;
-            emit hardwareTakeoverTrackingFinished();
+            emit hardwareTakeoverTrackingCancelled();
         }
+        if (prime) setReplayBlocked(m, error);
         emit statusMessage(tr("Can't start: %1").arg(error), 6000);
         return;
     }
@@ -1559,14 +1585,6 @@ void TransitionPanel::onProgress(double beatsIn, double beatsTotal)
         showNextTutorialPrompt();
         refreshTutorialGuideLabel();
     }
-    if (takeoverTrackingActive_ && beatsTotal > 0.0 &&
-        beatsIn >= beatsTotal) {
-        // Arm pickup as soon as the final automatic event lands. Waiting for
-        // the player's one-beat completion grace would leave a short window
-        // where a mismatched hardware control could overwrite replay state.
-        takeoverTrackingActive_ = false;
-        emit hardwareTakeoverTrackingFinished();
-    }
     if (beatsTotal <= 0.0) { progress_->setValue(0); return; }
     progress_->setValue(
         (int)std::lround(std::clamp(beatsIn / beatsTotal, 0.0, 1.0) * 1000.0));
@@ -1576,7 +1594,10 @@ void TransitionPanel::onFinished(bool completed)
 {
     if (takeoverTrackingActive_) {
         takeoverTrackingActive_ = false;
-        emit hardwareTakeoverTrackingFinished();
+        if (completed)
+            emit hardwareTakeoverTrackingFinished();
+        else
+            emit hardwareTakeoverTrackingCancelled();
     }
     progress_->setValue(completed ? 1000 : 0);
     if (banner_) banner_->hide();

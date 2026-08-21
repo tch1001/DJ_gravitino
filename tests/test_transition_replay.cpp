@@ -1,6 +1,7 @@
 #include "audio/AudioEngine.h"
 #include "control/ControlBus.h"
 #include "transitions/TransitionEngine.h"
+#include "transitions/TransitionPrime.h"
 #include "transitions/TransitionPlayerExt.h"
 
 #include <QCoreApplication>
@@ -44,6 +45,18 @@ int main(int argc, char** argv)
 {
     using namespace gvt;
     QCoreApplication app(argc, argv);
+
+    // A future loop does not block a transition entry that occurs before LOOP
+    // IN. This is the exact Titanium -> Don't You Worry Child PRIME layout:
+    // entry 433.77, then a loop at 448..464.
+    CHECK(activeLoopCanReachTransitionEntry(
+        430.0, 433.769651, 448.0, 464.0));
+    CHECK(activeLoopCanReachTransitionEntry(
+        450.0, 460.0, 448.0, 464.0));
+    CHECK(!activeLoopCanReachTransitionEntry(
+        450.0, 470.0, 448.0, 464.0));
+    CHECK(!activeLoopCanReachTransitionEntry(
+        430.0, 470.0, 448.0, 464.0));
     ControlBus bus;
     AudioEngine engine(&bus);
     engine.deck(0).loadTrack(makeTrack());
