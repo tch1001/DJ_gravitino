@@ -51,4 +51,43 @@ private:
     bool pulse_ = false;
 };
 
+// Amber pulse used before a transition to identify the software controls that
+// are outside the recorded setup tolerance. Unlike pickup fuzz, it does not
+// imply that controller input is frozen.
+class SetupMismatchOverlay final : public QWidget {
+public:
+    explicit SetupMismatchOverlay(QWidget* target)
+        : QWidget(target)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setGeometry(target->rect());
+        raise();
+        show();
+    }
+
+    void setPulse(bool pulse)
+    {
+        if (pulse_ == pulse) return;
+        pulse_ = pulse;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QColor amber(232, 168, 53, pulse_ ? 92 : 48);
+        painter.fillRect(rect(), amber);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(255, 196, 76), pulse_ ? 3.0 : 1.8,
+                            Qt::DashLine));
+        painter.drawRoundedRect(rect().adjusted(1, 1, -1, -1), 4, 4);
+    }
+
+private:
+    bool pulse_ = false;
+};
+
 } // namespace gvt

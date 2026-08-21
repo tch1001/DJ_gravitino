@@ -130,6 +130,19 @@ int main()
                    std::array<unsigned char, 3> {0x90, 0x58, 0x7F}),
                0, ControlId::TempoSync);
 
+    // The FLX4 reports SHIFT + BEAT SYNC as its dedicated tempo-range note.
+    // The host cycles the deck through Serato's 8/16/50% choices.
+    event = mapping.parse(
+        std::array<unsigned char, 3> {0x91, 0x60, 0x7F});
+    CHECK(event.has_value());
+    if (event) {
+        CHECK(event->deck == 1);
+        CHECK(event->id == ControlId::TempoRange);
+        CHECK(event->value == 0.0);
+    }
+    CHECK(!mapping.parse(
+        std::array<unsigned char, 3> {0x91, 0x60, 0x00}));
+
     // The jog rim remains a fine transient tempo nudge. Top/platter rotation
     // is a separate coarse position scrub in either vinyl mode.
     event = mapping.parse(

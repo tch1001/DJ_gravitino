@@ -173,11 +173,30 @@ int main()
     CHECK(std::fabs(negativeCueRecorded.fromHotCueBeats[0] + 3.0) < 1e-6);
     track->firstBeatSec = 0.0;
 
-    // A combined CUSTOM/saved-loop pad has the same hold/PLAY-latch contract
-    // as a hot cue, and its release-aware event is transition-recordable.
+    // On an already-running deck, a future CUSTOM loop arms in place instead
+    // of jumping. Playback enters the region naturally and then wraps at OUT;
+    // releasing the pad cannot cancel the armed loop.
     incoming->savedLoops[0].startSec = 0.5;
     incoming->savedLoops[0].endSec = 1.5;
     incoming->savedLoops[0].label = QStringLiteral("Intro loop");
+    engine.deck(1).loopExit();
+    engine.deck(1).seekSec(0.1);
+    engine.deck(1).play();
+    bus.dispatch({1, ControlId::SavedLoop1, 1.0}, Origin::Ui);
+    CHECK(engine.deck(1).playing.load());
+    CHECK(engine.deck(1).loopActive.load());
+    CHECK(std::fabs(engine.deck(1).positionSec() - 0.1) < 1e-6);
+    bus.dispatch({1, ControlId::SavedLoop1, 0.0}, Origin::Ui);
+    CHECK(engine.deck(1).playing.load());
+    CHECK(engine.deck(1).loopActive.load());
+    engine.deck(1).seekSec(1.49);
+    float loopScratch[960 * 2] {};
+    engine.renderOffline(loopScratch, 960);
+    CHECK(engine.deck(1).positionSec() >= 0.5);
+    CHECK(engine.deck(1).positionSec() < 0.55);
+
+    // A combined CUSTOM/saved-loop pad has the same hold/PLAY-latch contract
+    // as a hot cue, and its release-aware event is transition-recordable.
     engine.deck(1).stop();
     engine.deck(1).loopExit();
     recorder.start(0);

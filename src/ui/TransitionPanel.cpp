@@ -22,6 +22,7 @@
 #include <QSettings>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QScopedValueRollback>
 #include <QSplitter>
 #include <QLineEdit>
 #include <QTableWidget>
@@ -304,6 +305,10 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     connect(list_, &QListWidget::currentRowChanged, this,
             [this](int) {
                 const int idx = selectedMatch();
+                if (!refreshingMatches_ && replayLifecycle_ != ReplayLifecycle::None &&
+                    (idx < 0 || !replayLifecycleMatches(
+                                    matches_[(size_t)idx])))
+                    clearReplayLifecycle();
                 selectedPath_ = idx >= 0 ? matches_[(size_t)idx].file->filePath
                                          : QString();
                 updatePreview();
@@ -372,6 +377,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
 
 void TransitionPanel::refreshMatches()
 {
+    QScopedValueRollback<bool> refreshing(refreshingMatches_, true);
     const QString restorePath = selectedPath_;
     matches_.clear();
     list_->clear();
@@ -452,6 +458,37 @@ int TransitionPanel::selectedMatch() const
     return row;
 }
 
+bool TransitionPanel::replayLifecycleMatches(const Match& match) const
+{
+    return replayLifecycle_ != ReplayLifecycle::None && match.file &&
+           match.file->filePath == replayPath_ &&
+           match.fromDeck == replayFromDeck_;
+}
+
+QString TransitionPanel::replayDirectionText(const Match& match) const
+{
+    const auto trackName = [this](const GvtTrackRef& track,
+                                  const QString& fallback) {
+        if (!track.title.trimmed().isEmpty()) return track.title.trimmed();
+        if (!track.artist.trimmed().isEmpty()) return track.artist.trimmed();
+        return fallback;
+    };
+    const QString fromDeck = match.fromDeck == 0 ? QStringLiteral("A")
+                                                  : QStringLiteral("B");
+    const QString toDeck = match.fromDeck == 0 ? QStringLiteral("B")
+                                                : QStringLiteral("A");
+    return tr("FROM “%1” on Deck %2 → TO “%3” on Deck %4")
+        .arg(trackName(match.file->from, tr("outgoing track")), fromDeck,
+             trackName(match.file->to, tr("incoming track")), toDeck);
+}
+
+void TransitionPanel::clearReplayLifecycle()
+{
+    replayLifecycle_ = ReplayLifecycle::None;
+    replayPath_.clear();
+    replayFromDeck_ = -1;
+}
+
 void TransitionPanel::onRec()
 {
     if (recorder_->isRecording()) {
@@ -470,6 +507,7 @@ void TransitionPanel::onRec()
         return;
     }
     int fromDeck = aPlaying ? 0 : 1;
+    clearReplayLifecycle();
     recorder_->start(fromDeck);
     capturedCount_ = 0;
     recIndicator_->setText(tr("REC ● 0 events (from deck %1)")
@@ -710,25 +748,32 @@ void TransitionPanel::updatePreview()
 
 bool TransitionPanel::setupMatches(const Match& match,
                                    QStringList* differences,
-                                   bool honorCloseEnough) const
+                                   bool honorCloseEnough,
+                                   QList<ControlEvent>* mismatchControls) const
 {
     QStringList local;
+    if (mismatchControls) mismatchControls->clear();
     const bool complete = match.file->initialComplete;
     TransitionSetupTolerances tolerance = setupTolerances_;
     if (!honorCloseEnough)
         tolerance.closeEnough = false;
-    const auto compare = [&local, this, &tolerance](
+    const auto compare = [&local, this, &tolerance, mismatchControls](
                              const QString& name, double actual,
-                             double wanted,
+                             double wanted, int physicalDeck,
+                             ControlId control,
                              SetupToleranceField field =
                                  SetupToleranceField::Other,
                              double strictTolerance = 0.015) {
         if (!transitionSetupValueMatches(
-                actual, wanted, field, strictTolerance, tolerance))
+                actual, wanted, field, strictTolerance, tolerance)) {
             local.append(tr("%1 %2 → %3")
                              .arg(name)
                              .arg(actual, 0, 'f', 2)
                              .arg(wanted, 0, 'f', 2));
+            if (mismatchControls && control != ControlId::Count)
+                mismatchControls->append(
+                    ControlEvent {physicalDeck, control, wanted});
+        }
     };
     const auto compareDeck = [&](bool fromRole) {
         const int physical = fromRole ? match.fromDeck : 1 - match.fromDeck;
@@ -745,56 +790,79 @@ bool TransitionPanel::setupMatches(const Match& match,
         if (!expected.captured) {
             if (fromRole && match.file->masterBpm > 0.0)
                 compare(tr("%1 BPM").arg(deckName), deck.effectiveBpm(),
-                        match.file->masterBpm, SetupToleranceField::Bpm, 0.05);
+                        match.file->masterBpm, physical, ControlId::Tempo,
+                        SetupToleranceField::Bpm, 0.05);
             return;
         }
 
         const double wantedRatio = expectedTempoRatio(match, fromRole);
         compare(tr("%1 BPM").arg(deckName), deck.effectiveBpm(),
-                track->bpm * wantedRatio, SetupToleranceField::Bpm, 0.05);
+                track->bpm * wantedRatio, physical, ControlId::Tempo,
+                SetupToleranceField::Bpm, 0.05);
         compare(tr("%1 fader").arg(deckName), deck.fader.load(), expected.fader,
-                SetupToleranceField::Volume);
+                physical, ControlId::Fader, SetupToleranceField::Volume);
         compare(tr("%1 low").arg(deckName), deck.eqLow.load(), expected.eqLow,
-                SetupToleranceField::Eq);
+                physical, ControlId::EqLow, SetupToleranceField::Eq);
         compare(tr("%1 mid").arg(deckName), deck.eqMid.load(), expected.eqMid,
-                SetupToleranceField::Eq);
+                physical, ControlId::EqMid, SetupToleranceField::Eq);
         compare(tr("%1 high").arg(deckName), deck.eqHigh.load(), expected.eqHigh,
-                SetupToleranceField::Eq);
-        compare(tr("%1 filter").arg(deckName), deck.filter.load(), expected.filter);
+                physical, ControlId::EqHigh, SetupToleranceField::Eq);
+        compare(tr("%1 filter").arg(deckName), deck.filter.load(), expected.filter,
+                physical, ControlId::Filter);
         if (!complete) return;
 
         if (expected.quantizeCaptured &&
-            deck.quantizeHotCues.load() != expected.quantize)
+            deck.quantizeHotCues.load() != expected.quantize) {
             local.append(tr("%1 Quantize on/off").arg(deckName));
+            if (mismatchControls)
+                mismatchControls->append(
+                    {physical, ControlId::Quantize,
+                     expected.quantize ? 1.0 : 0.0});
+        }
 
-        if (deck.fxType.load() != expected.fxType)
+        if (deck.fxType.load() != expected.fxType) {
             local.append(tr("%1 FX type").arg(deckName));
-        if (deck.fxOn.load() != expected.fxOn)
+            if (mismatchControls)
+                mismatchControls->append(
+                    {physical, ControlId::FxType,
+                     static_cast<double>(expected.fxType)});
+        }
+        if (deck.fxOn.load() != expected.fxOn) {
             local.append(tr("%1 FX on/off").arg(deckName));
-        compare(tr("%1 FX wet").arg(deckName), deck.fxWet.load(), expected.fxWet);
+            if (mismatchControls)
+                mismatchControls->append(
+                    {physical, ControlId::FxOn,
+                     expected.fxOn ? 1.0 : 0.0});
+        }
+        compare(tr("%1 FX wet").arg(deckName), deck.fxWet.load(), expected.fxWet,
+                physical, ControlId::FxWet);
         compare(tr("%1 FX beats").arg(deckName), deck.fxBeats.load(),
-                expected.fxBeats, SetupToleranceField::Other, 0.01);
+                expected.fxBeats, physical, ControlId::Count,
+                SetupToleranceField::Other, 0.01);
         compare(tr("%1 vocals").arg(deckName), deck.stemVocals.load(),
-                expected.stemVocals);
+                expected.stemVocals, physical, ControlId::StemVocals);
         compare(tr("%1 melody").arg(deckName), deck.stemMelody.load(),
-                expected.stemMelody);
+                expected.stemMelody, physical, ControlId::StemMelody);
         compare(tr("%1 bass").arg(deckName), deck.stemBass.load(),
-                expected.stemBass);
+                expected.stemBass, physical, ControlId::StemBass);
         compare(tr("%1 drums").arg(deckName), deck.stemDrums.load(),
-                expected.stemDrums);
+                expected.stemDrums, physical, ControlId::StemDrums);
         if (deck.loopActive.load() != expected.loopActive)
             local.append(tr("%1 loop on/off").arg(deckName));
         if (expected.loopActive) {
             compare(tr("%1 loop start").arg(deckName),
                     track->beatAtSec(deck.loopStartSec.load()),
-                    expected.loopStartBeat, SetupToleranceField::Other, 0.02);
+                    expected.loopStartBeat, physical, ControlId::Count,
+                    SetupToleranceField::Other, 0.02);
             compare(tr("%1 loop end").arg(deckName),
                     track->beatAtSec(deck.loopEndSec.load()),
-                    expected.loopEndBeat, SetupToleranceField::Other, 0.02);
+                    expected.loopEndBeat, physical, ControlId::Count,
+                    SetupToleranceField::Other, 0.02);
         }
         compare(tr("%1 cue").arg(deckName),
                 track->beatAtSec(deck.cuePointSec.load()),
-                expected.cueBeat, SetupToleranceField::Other, 0.02);
+                expected.cueBeat, physical, ControlId::Count,
+                SetupToleranceField::Other, 0.02);
     };
 
     compareDeck(true);
@@ -804,6 +872,7 @@ bool TransitionPanel::setupMatches(const Match& match,
                                   ? match.file->initialCrossfader
                                   : 1.0 - match.file->initialCrossfader;
         compare(tr("crossfader"), engine_->crossfader.load(), wanted,
+                kNoDeck, ControlId::Crossfader,
                 SetupToleranceField::Volume);
     }
     if (differences) *differences = local;
@@ -865,6 +934,7 @@ void TransitionPanel::updateSetupStatus()
 {
     const int idx = selectedMatch();
     if (idx < 0) {
+        emit setupMismatchControlsChanged({});
         setupLabel_->setText(tr("Select a transition to inspect its setup"));
         setupLabel_->setStyleSheet(
             QStringLiteral("color:%1;").arg(themeDimText().name()));
@@ -872,8 +942,36 @@ void TransitionPanel::updateSetupStatus()
     }
 
     const Match& match = matches_[(size_t)idx];
+    if (replayLifecycleMatches(match)) {
+        emit setupMismatchControlsChanged({});
+        switch (replayLifecycle_) {
+        case ReplayLifecycle::Done:
+            setupLabel_->setText(
+                tr("Transition done — %1").arg(replayDirectionText(match)));
+            setupLabel_->setStyleSheet("color:#4cd964; font-weight:600;");
+            return;
+        case ReplayLifecycle::Running:
+            setupLabel_->setText(
+                tr("Transition in progress — %1")
+                    .arg(replayDirectionText(match)));
+            setupLabel_->setStyleSheet("color:#67c8ff; font-weight:600;");
+            return;
+        case ReplayLifecycle::Armed:
+            setupLabel_->setText(
+                tr("Transition armed — %1").arg(replayDirectionText(match)));
+            setupLabel_->setStyleSheet("color:#67c8ff; font-weight:600;");
+            return;
+        case ReplayLifecycle::None:
+            break;
+        }
+    }
     QStringList differences;
-    const bool ready = setupMatches(match, &differences);
+    QList<ControlEvent> mismatchControls;
+    const bool ready = setupMatches(
+        match, &differences, true, &mismatchControls);
+    if (player_->isActive() || recorder_->isRecording())
+        mismatchControls.clear();
+    emit setupMismatchControlsChanged(mismatchControls);
     const bool strictlyReady = ready && setupTolerances_.closeEnough
         ? setupMatches(match, nullptr, false) : ready;
     const QString acceptedSuffix = ready && !strictlyReady
@@ -895,14 +993,17 @@ void TransitionPanel::updateSetupStatus()
     QString summary = differences.mid(0, 4).join(QStringLiteral(", "));
     if (differences.size() > 4)
         summary += tr(", +%1 more").arg(differences.size() - 4);
-    setupLabel_->setText(
+    QString setupText =
         ready ? (match.file->initialComplete
                      ? tr("Full pre-transition state: ready%1").arg(acceptedSuffix)
                      : tr("Outgoing setup: ready%1 (legacy partial snapshot)")
                            .arg(acceptedSuffix))
               : (match.file->initialComplete
                      ? tr("Pre-transition state: %1").arg(summary)
-                     : tr("Outgoing setup: %1").arg(summary)));
+                     : tr("Outgoing setup: %1").arg(summary));
+    if (!ready && !mismatchControls.isEmpty())
+        setupText += tr(" — adjust the amber-highlighted controls");
+    setupLabel_->setText(setupText);
     setupLabel_->setStyleSheet(ready ? "color:#4cd964;" : "color:#e8a835;");
 }
 
@@ -974,7 +1075,8 @@ void TransitionPanel::updateControls()
 
 void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
                                         bool prepareFromTransport,
-                                        bool prepareToTransport)
+                                        bool prepareToTransport,
+                                        bool applyFromTempo)
 {
     const auto applyDeck = [&](bool fromRole, bool prepareTransport) {
         const int deckIndex = fromRole ? match.fromDeck : 1 - match.fromDeck;
@@ -984,8 +1086,11 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
         if (!setup.captured) return;
         if (prepareTransport)
             bus_->dispatch({deckIndex, ControlId::Stop, 1.0}, Origin::System);
+        if (!fromRole || applyFromTempo)
+            bus_->dispatch({deckIndex, ControlId::Tempo,
+                            expectedTempoRatio(match, fromRole)},
+                           Origin::System);
         const std::pair<ControlId, double> values[] = {
-            {ControlId::Tempo, expectedTempoRatio(match, fromRole)},
             {ControlId::Fader, setup.fader},
             {ControlId::EqLow, setup.eqLow},
             {ControlId::EqMid, setup.eqMid},
@@ -1038,7 +1143,7 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
                                     : 1.0 - match.file->initialCrossfader;
         bus_->dispatch({kNoDeck, ControlId::Crossfader, physical},
                        Origin::System);
-    } else if (!match.file->initialFrom.captured) {
+    } else if (applyFromTempo && !match.file->initialFrom.captured) {
         const int outgoing = match.fromDeck;
         if (TrackDataPtr track = engine_->deck(outgoing).track();
             track && track->bpm > 0.0 && match.file->masterBpm > 0.0)
@@ -1058,7 +1163,10 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
 void TransitionPanel::onApplySetup()
 {
     const int idx = selectedMatch();
-    if (idx >= 0) applyInitialSetup(matches_[(size_t)idx], true);
+    if (idx >= 0) {
+        clearReplayLifecycle();
+        applyInitialSetup(matches_[(size_t)idx], true);
+    }
 }
 
 void TransitionPanel::onEditSetupTolerance()
@@ -1242,6 +1350,10 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         return;
     }
     const Match& m = matches_[(size_t)idx];
+    // A new Prime/Perform request explicitly begins another pass through this
+    // edge. Until it arms successfully, resume showing preflight readiness.
+    clearReplayLifecycle();
+    updateSetupStatus();
     const bool incomingInitiallyPlaying =
         m.file->initialComplete && m.file->initialTo.captured &&
         m.file->initialTo.playing;
@@ -1280,6 +1392,7 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         }
     }
     transitionPlayerSetMode(player_, mode);
+    transitionPlayerPreserveOutgoingSetupTempo(player_, prime);
 
     if (mode == PlayerMode::Perform) {
         takeoverTrackingActive_ = true;
@@ -1291,7 +1404,31 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         // every recorded audible parameter and fully prepares the incoming
         // deck's transport before validating the result.
         applyInitialSetup(m, false, /*prepareFromTransport=*/false,
-                          /*prepareToTransport=*/true);
+                          /*prepareToTransport=*/true,
+                          /*applyFromTempo=*/false);
+        const Deck& outgoing = engine_->deck(m.fromDeck);
+        const TrackDataPtr outgoingTrack = outgoing.track();
+        const double wantedBpm = outgoingTrack
+            ? outgoingTrack->bpm * expectedTempoRatio(m, true) : 0.0;
+        const double bpmTolerance = transitionSetupTolerance(
+            SetupToleranceField::Bpm, 0.05, setupTolerances_);
+        if (outgoingTrack && !transitionSetupValueMatches(
+                outgoing.effectiveBpm(), wantedBpm,
+                SetupToleranceField::Bpm, 0.05, setupTolerances_)) {
+            if (takeoverTrackingActive_) {
+                takeoverTrackingActive_ = false;
+                emit hardwareTakeoverTrackingFinished();
+            }
+            emit statusMessage(
+                tr("Adjust Deck %1 BPM to %2 (±%3 accepted), then press Prime again")
+                    .arg(m.fromDeck == 0 ? QStringLiteral("A")
+                                         : QStringLiteral("B"))
+                    .arg(wantedBpm, 0, 'f', 2)
+                    .arg(bpmTolerance, 0, 'f', 2),
+                9000);
+            updateControls();
+            return;
+        }
         const QStringList issues = primeReadinessIssues(m);
         if (!issues.isEmpty()) {
             if (takeoverTrackingActive_) {
@@ -1332,6 +1469,10 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         emit statusMessage(tr("Can't start: %1").arg(error), 6000);
         return;
     }
+    replayPath_ = m.file->filePath;
+    replayFromDeck_ = m.fromDeck;
+    replayLifecycle_ = prime ? ReplayLifecycle::Armed
+                             : ReplayLifecycle::Running;
     tutorialActive_ = mode == PlayerMode::Tutorial;
     tutorialFromDeck_ = m.fromDeck;
     tutorialBeatsIn_ = 0.0;
@@ -1371,6 +1512,7 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
     }
     if (!prime)
         bus_->dispatch({m.fromDeck, ControlId::Play, 1.0}, Origin::System);
+    updateSetupStatus();
     updateControls();
     if (prime)
         emit statusMessage(
@@ -1409,6 +1551,10 @@ void TransitionPanel::onAbort()
 void TransitionPanel::onProgress(double beatsIn, double beatsTotal)
 {
     tutorialBeatsIn_ = beatsIn;
+    if (replayLifecycle_ == ReplayLifecycle::Armed && beatsIn >= 0.0) {
+        replayLifecycle_ = ReplayLifecycle::Running;
+        updateSetupStatus();
+    }
     if (tutorialActive_) {
         showNextTutorialPrompt();
         refreshTutorialGuideLabel();
@@ -1435,10 +1581,19 @@ void TransitionPanel::onFinished(bool completed)
     progress_->setValue(completed ? 1000 : 0);
     if (banner_) banner_->hide();
     finishTutorialRun();
+    if (completed && replayLifecycle_ != ReplayLifecycle::None)
+        replayLifecycle_ = ReplayLifecycle::Done;
+    else if (!completed)
+        clearReplayLifecycle();
+    updateSetupStatus();
     updateControls();
-    emit statusMessage(completed ? tr("Transition complete")
-                                 : tr("Transition stopped"),
-                       3000);
+    const int idx = selectedMatch();
+    emit statusMessage(
+        completed && idx >= 0 && replayLifecycleMatches(matches_[(size_t)idx])
+            ? tr("Transition done — %1")
+                  .arg(replayDirectionText(matches_[(size_t)idx]))
+            : (completed ? tr("Transition done") : tr("Transition stopped")),
+        completed ? 6000 : 3000);
 }
 
 void TransitionPanel::observeTutorialHardwareControl(
@@ -1781,6 +1936,7 @@ QString TransitionPanel::tutorialInstruction(
     case ControlId::PerformancePad3: case ControlId::PerformancePad4:
     case ControlId::PerformancePad5: case ControlId::PerformancePad6:
     case ControlId::PerformancePad7: case ControlId::PerformancePad8:
+    case ControlId::TempoRange:
     case ControlId::Count:
         break;
     }

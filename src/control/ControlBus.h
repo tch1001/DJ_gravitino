@@ -19,7 +19,7 @@ enum class ControlId : uint8_t {
     LoopExit,          // exit active loop (RELOOP re-enters via LoopIn history)
     LoopHalve, LoopDouble,
     // Continuous, normalized 0..1 unless noted
-    Tempo,        // playback ratio, 1.0 = native speed (range ~0.84..1.16)
+    Tempo,        // playback ratio, 1.0 = native (selected range up to ±50%)
     Fader,        // channel fader
     Trim,         // gain knob
     EqLow, EqMid, EqHigh,   // 0.5 = flat, 0.0 = kill
@@ -51,6 +51,7 @@ enum class ControlId : uint8_t {
     // hold previews the stored loop; PLAY while held latches transport.
     SavedLoop1, SavedLoop2, SavedLoop3, SavedLoop4,
     SavedLoop5, SavedLoop6, SavedLoop7, SavedLoop8,
+    TempoRange, // per-deck selected fader range; 0 cycles 8% -> 16% -> 50%
     Count
 };
 

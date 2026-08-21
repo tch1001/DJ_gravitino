@@ -109,6 +109,7 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
             e.id == ControlId::BrowseNavigate ||
             e.id == ControlId::BrowseSelect ||
             e.id == ControlId::PerformancePadMode ||
+            e.id == ControlId::TempoRange ||
             (e.id >= ControlId::PerformancePad1 &&
              e.id <= ControlId::PerformancePad8) ||
             e.id == ControlId::HeadphoneCue ||

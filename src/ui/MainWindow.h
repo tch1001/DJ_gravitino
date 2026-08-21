@@ -25,6 +25,7 @@ class MixerWidget;
 class LibraryWidget;
 class TransitionPanel;
 class PickupFuzzOverlay;
+class SetupMismatchOverlay;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -60,6 +61,8 @@ private slots:
     void rebuildAudioOutputMenu();
     void selectAudioOutput(const QString& preferredName);
     void refreshSoftTakeoverUi();
+    void refreshSetupMismatchUi(
+        const QList<gvt::ControlEvent>& controls);
 
 private:
     ControlBus* bus_;
@@ -88,6 +91,10 @@ private:
     QTimer* pickupTimer_ = nullptr;
     QList<PickupFuzzOverlay*> pickupOverlays_;
     bool pickupPulse_ = false;
+    QTimer* setupMismatchTimer_ = nullptr;
+    QList<SetupMismatchOverlay*> setupMismatchOverlays_;
+    QList<ControlEvent> setupMismatchControls_;
+    bool setupMismatchPulse_ = false;
 
     // Stem separation (null stems_ = STEMS button stays inert).
     // Results are matched to decks by track fingerprint: a deck whose track

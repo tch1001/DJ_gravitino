@@ -2,6 +2,7 @@
 
 #include "MidiEngine.h"
 #include "../audio/AudioEngine.h"
+#include "../audio/TempoRange.h"
 #include "Flx4Mapping.h"
 #include "SoftTakeover.h"
 #include "../performance/PerformancePads.h"
@@ -483,6 +484,18 @@ struct MidiEngine::Impl {
             event.value = engine->deck(event.deck).quantizeHotCues.load(
                               std::memory_order_relaxed)
                 ? 0.0 : 1.0;
+        }
+
+        if (event.deck >= 0 && event.deck < 2 &&
+            event.id == ControlId::Tempo && engine != nullptr) {
+            // Flx4Mapping returns a canonical ±8% ratio so it remains a pure
+            // device parser. Expand the same physical fader position using
+            // the deck's currently selected Serato range.
+            const double position = tempoFaderPositionFromRatio(
+                event.value, kSeratoTempoRanges.front());
+            event.value = tempoRatioFromFaderPosition(
+                position, engine->deck(event.deck).tempoRange.load(
+                              std::memory_order_relaxed));
         }
 
         if (event.deck >= 0 && event.deck < 2 && engine != nullptr) {

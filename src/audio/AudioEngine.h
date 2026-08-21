@@ -51,6 +51,7 @@ public:
     void loopOut();                          // set end + activate (after loopIn)
     void loopExit();                         // deactivate, keep stored bounds
     void loopHalve(); void loopDouble();     // resize active loop (min 1/8 beat)
+    bool armSavedLoop(double startSec, double endSec); // no seek; loop on arrival
     bool activateSavedLoop(double startSec, double endSec);
     bool retriggerSavedLoop(double startSec, double endSec); // jump to IN + play
     void beatJump(double beats);             // signed, beat-aligned jump
@@ -78,6 +79,10 @@ public:
                        stemBass   { 1.0f }, stemDrums  { 1.0f };
 
     std::atomic<double> tempoRatio { 1.0 };  // 1.0 = native
+    std::atomic<double> tempoRange { 0.08 }; // Serato-style ±8/16/50%
+    // Key lock: time-stretch at tempoRatio while retaining the source pitch.
+    // Scratching remains direct/vinyl-like regardless of this preference.
+    std::atomic<bool>   preservePitch { false };
     std::atomic<float>  fader      { 1.0f };
     std::atomic<float>  trim       { 0.5f };
     std::atomic<float>  eqLow      { 0.5f }, eqMid { 0.5f }, eqHigh { 0.5f };

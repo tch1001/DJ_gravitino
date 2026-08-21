@@ -52,6 +52,10 @@ signals:
     void hardwareTakeoverTrackingFinished();
     void tutorialPerformancePadRequested(int deck, int mode, int pad,
                                          bool pressed);
+    // Exact visible controls currently outside the selected transition's
+    // accepted pre-state tolerance. Empty clears all highlights.
+    void setupMismatchControlsChanged(
+        const QList<gvt::ControlEvent>& controls);
 
 public slots:
     void refreshMatches();  // call on trackLoaded / store changed
@@ -90,17 +94,28 @@ private:
         int fromDeck = 0;          // physical deck holding the [from] track
         MatchQuality quality = MatchQuality::None;
     };
+    enum class ReplayLifecycle {
+        None,
+        Armed,
+        Running,
+        Done,
+    };
     void showBanner(const QString& text, const QColor& color, int timeoutMs);
     int selectedMatch() const;     // index into matches_, -1 if none
+    bool replayLifecycleMatches(const Match& match) const;
+    QString replayDirectionText(const Match& match) const;
+    void clearReplayLifecycle();
     void announceEntryMarker();    // emit entryMarkerChanged for selection
     void updatePreview();
     void updateControls();
     void updateSetupStatus();
     void applyInitialSetup(const Match& match, bool announce,
                            bool prepareFromTransport = false,
-                           bool prepareToTransport = false);
+                           bool prepareToTransport = false,
+                           bool applyFromTempo = true);
     bool setupMatches(const Match& match, QStringList* differences = nullptr,
-                      bool honorCloseEnough = true) const;
+                      bool honorCloseEnough = true,
+                      QList<ControlEvent>* mismatchControls = nullptr) const;
     QStringList primeReadinessIssues(const Match& match) const;
     double expectedTempoRatio(const Match& match, bool fromRole) const;
     QString automaticCueLabel(const GvtEvent& event) const;
@@ -164,6 +179,10 @@ private:
     bool tutorialActive_ = false;
     bool tutorialViewOpen_ = false;
     bool takeoverTrackingActive_ = false;
+    bool refreshingMatches_ = false;
+    ReplayLifecycle replayLifecycle_ = ReplayLifecycle::None;
+    QString replayPath_;
+    int replayFromDeck_ = -1;
     std::array<int, 2> tutorialPadMode_ {};
     std::array<unsigned int, 2> tutorialPadEnabledMask_ {};
     std::array<unsigned int, 2> tutorialPadPressedMask_ {};

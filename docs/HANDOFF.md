@@ -1,15 +1,14 @@
 # Gravitino Agent Handoff
 
-Updated: 2026-08-19 (Asia/Singapore)
+Updated: 2026-08-21 (Asia/Singapore)
 
 ## Current state
 
-All prior DJ-controller follow-ups through the compact mixer and transition
-tutorial were committed and pushed at `18b70c6` (`Refine transition tutorial
-and compact mixer layout`). The hold-preview CUSTOM loops, transition TRIM
-exclusion, FLX4 channel meters, live full-board tutor, and selective persistent
-post-transition pickup described below are intentionally uncommitted pending
-the user's next checkpoint request.
+All prior DJ-controller follow-ups through reliable transition identity and
+controller integration were committed and pushed at `05df27f` (`Fix transition
+replay and controller integration`). The manual PRIME BPM gate, armed CUSTOM
+loops, and per-deck key lock described below are the current working-tree
+change set.
 
 The user explicitly permits stopping a running Gravitino process when a
 restart is needed. Always resolve the process narrowly with
@@ -20,6 +19,51 @@ The Git remote is `git@github.com:tch1001/DJ_gravitino.git`; `main` tracks
 `origin/main`. Do not commit or push this working tree until the user asks.
 
 ## Implemented in this working tree
+
+- **Focused beat grid and live overview cursor:** the stacked/detail view uses
+  higher-opacity lines for every beat and a brighter, thicker line every four
+  beats. Compact overview waveforms contain no beat lines, and their playheads
+  now follow paused Beat Jump and detailed-waveform drag/scratch navigation at
+  the normal 30 Hz UI cadence.
+- **Direction-aware transition completion:** TransitionPanel now preserves a
+  replay lifecycle keyed by both the selected `.gvt` path and the physical
+  FROM deck. Its live setup line says armed, in progress, or `Transition done`
+  and names the role/deck handoff (`FROM … Deck A → TO … Deck B`, or the
+  reverse), instead of immediately comparing the post-transition result to the
+  old pre-state. Completion clears amber preflight highlights. Abort or an
+  explicit new selection/setup/replay returns the panel to preflight.
+- **Serato-style tempo ranges:** each deck's tempo column now offers persisted
+  ±8%, ±16%, and ±50% choices, matching Serato DJ Pro's standard virtual-deck
+  options. Changing range remaps the fader without changing the current tempo
+  ratio or audible BPM. The FLX4's documented SHIFT + BEAT SYNC note (`90/91
+  60`) cycles the same per-deck range, and subsequent physical fader packets are
+  expanded using that selection.
+- **Visual pre-transition mismatch guidance:** while a transition is selected
+  and idle, every visible tempo, channel-fader, EQ, filter, crossfader, FX,
+  Quantize, or stem control outside the accepted setup tolerance receives a
+  pulsing amber overlay. The 100 ms readiness poll removes a highlight as soon
+  as the control is correct and restores it if the control drifts or overshoots.
+  Highlights clear during Record/Perform/Prime so they cannot be mistaken for
+  the separate white post-transition hardware-pickup freeze.
+
+- **PRIME never changes the live master BPM:** PRIME still prepares the stopped
+  incoming deck and other recorded setup, but leaves the playing/outgoing
+  deck's tempo untouched. If that effective BPM is outside the strict or
+  configured CLOSE ENOUGH tolerance, the status bar gives the exact target and
+  accepted margin and asks the DJ to adjust it before pressing PRIME again.
+  The replay scheduler also suppresses its synthetic outgoing beat-zero tempo
+  restore for a primed transition, while retaining genuine later tempo events.
+- **Armed CUSTOM loops during playback:** pressing a populated CUSTOM loop on
+  a normally playing deck does not seek. It arms the stored region, lets the
+  current song enter it naturally, and wraps at OUT. A region already behind
+  the playhead is not allowed to jump the live deck backward. On a paused deck,
+  the prior hold-preview and PLAY-latch behavior remains intact.
+- **Per-deck KEY LOCK:** each deck has a persisted KEY LOCK checkbox beside its
+  transport controls. Signalsmith Stretch performs realtime stereo time
+  stretching so tempo changes retain musical pitch; the ordinary path retains
+  vinyl-style pitch change, and coarse scratching always bypasses key lock.
+  The vendored DSP and dependency retain their MIT licenses and upstream commit
+  provenance under `third_party/signalsmith-stretch/`.
 
 - **Reliable transition identity and exact held-cue replay:** duration-only
   similarity remains available as a weak diagnostic tier but can no longer
@@ -42,10 +86,11 @@ The Git remote is `git@github.com:tch1001/DJ_gravitino.git`; `main` tracks
   Output > Test FLX4 headphones` (quiet two-second phones-only tone). The live
   probe reached the controller callback at 0.12 peak and the user confirmed
   hearing it; System Default/MacBook master output was then restored.
-- **Hold-preview CUSTOM loops:** populated saved-loop pads now use the same
-  momentary transport contract as hot cues. Press jumps to the stored loop and
-  previews it, release stops and returns to the loop start, and pressing PLAY
-  while the pad remains held latches playback so release no longer stops it.
+- **Hold-preview CUSTOM loops:** on paused decks, populated saved-loop pads use
+  the same momentary transport contract as hot cues. Press jumps to the stored
+  loop and previews it, release stops and returns to the loop start, and
+  pressing PLAY while the pad remains held latches playback so release no
+  longer stops it. Normally playing decks use the armed behavior above.
   The UI and `.gvt` event stream retain both press and release through explicit
   `saved_loop_1..8` controls, while empty pads still capture the active loop.
 - **TRIM is outside transition semantics:** new recordings omit both initial
@@ -149,9 +194,9 @@ The Git remote is `git@github.com:tch1001/DJ_gravitino.git`; `main` tracks
   FLX4 sampler bank and is now presented simply as CUSTOM; old mode selections
   migrate automatically. Each pad can retain an audio-file assignment while
   its per-track captured loop takes operational/visual priority.
-  An empty pad captures the active loop. A filled pad jumps to the stored start
-  and previews only while held; PLAY during the hold latches transport, exactly
-  like the hot-cue/CUE takeover contract. Pressing it again retriggers the loop.
+  An empty pad captures the active loop. On a paused deck, a filled pad jumps to
+  the stored start and previews only while held; PLAY during the hold latches
+  transport. On a playing deck it arms the upcoming region without seeking.
   LOOP EXIT remains the explicit way to leave the saved loop itself.
   Right-click exposes loop replace/rename/clear and sampler assign/clear
   together, and the combined occupancy is reflected in the physical pad LEDs.
@@ -242,8 +287,9 @@ The Git remote is `git@github.com:tch1001/DJ_gravitino.git`; `main` tracks
 
 - PAD FX1/PAD FX2, BEAT JUMP, BEAT LOOP, and HOT CUE execute audio/control
   actions now. SAMPLER file slots, KEYBOARD notes, and KEY SHIFT values can be
-  programmed and retained, but sample playback and pitch-shift DSP do not yet
-  exist; the UI says so instead of silently pretending they ran.
+  programmed and retained, but sample playback and pad-controlled KEYBOARD /
+  KEY SHIFT DSP do not yet exist; the UI says so instead of silently pretending
+  they ran. Tempo key lock is implemented independently.
 - Scratch audio now renders forward and reverse PCM, but platter sensitivity
   and perceived vinyl feel still need a physical/audio check.
 - The FLX4 pad/mode protocol follows the controller's standard note layout.

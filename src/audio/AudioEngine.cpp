@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "TempoRange.h"
 
 #include "../../third_party/miniaudio.h"
 #include "../audio/MasterRecorder.h"
@@ -789,6 +790,17 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
                                     std::memory_order_relaxed);
         }
         break;
+    case ControlId::TempoRange: {
+        const double current = target.tempoRange.load(
+            std::memory_order_relaxed);
+        const double selected = event.value > 0.0
+            ? closestSeratoTempoRange(event.value)
+            : nextSeratoTempoRange(current);
+        // Range selection remaps the fader only; it must never alter an
+        // already-playing deck's current effective BPM.
+        target.tempoRange.store(selected, std::memory_order_relaxed);
+        break;
+    }
     case ControlId::Fader:
         if (std::isfinite(event.value))
             target.fader.store(normalizedValue(event.value),

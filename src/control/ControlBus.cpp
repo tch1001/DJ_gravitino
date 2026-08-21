@@ -50,6 +50,7 @@ constexpr NameEntry kNames[] = {
     {ControlId::SavedLoop6, "saved_loop_6"},
     {ControlId::SavedLoop7, "saved_loop_7"},
     {ControlId::SavedLoop8, "saved_loop_8"},
+    {ControlId::TempoRange, "tempo_range"},
 };
 } // namespace
 

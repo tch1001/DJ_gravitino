@@ -1,7 +1,9 @@
 #include "DeckWidget.h"
 #include "FitButton.h"
 #include "Theme.h"
+#include "../audio/TempoRange.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDial>
 #include <QFileDialog>
@@ -26,18 +28,19 @@
 
 namespace gvt {
 
-// Tempo slider: integer -800..800 <-> ratio 0.92..1.08 (+/-8%).
+// Tempo slider position stays -800..800 while its selected Serato-style
+// range expands from ±8% to ±16% or ±50%.
 static constexpr int kTempoSteps = 800;
-static constexpr double kTempoRange = 0.08;
 
-static int ratioToSlider(double ratio)
+static int ratioToSlider(double ratio, double range)
 {
-    double frac = (ratio - 1.0) / kTempoRange; // -1..1
-    return (int)std::lround(std::clamp(frac, -1.0, 1.0) * kTempoSteps);
+    return static_cast<int>(std::lround(
+        tempoFaderPositionFromRatio(ratio, range) * kTempoSteps));
 }
-static double sliderToRatio(int v)
+static double sliderToRatio(int value, double range)
 {
-    return 1.0 + (double)v / kTempoSteps * kTempoRange;
+    return tempoRatioFromFaderPosition(
+        static_cast<double>(value) / kTempoSteps, range);
 }
 
 // Base style for the compact loop/beat-jump buttons; the "lit" highlight
@@ -108,16 +111,6 @@ void WaveformView::paintEvent(QPaintEvent*)
     const double posFrac =
         std::clamp(deck_->positionSec() / t->durationSec, 0.0, 1.0);
     const int playedX = (int)(posFrac * w);
-
-    // Beatgrid ticks every 4 beats (faint, behind the peaks).
-    if (t->bpm > 0.0) {
-        p.setPen(QColor(255, 255, 255, 22));
-        const double secPer4Beats = 4.0 * 60.0 / t->bpm;
-        for (double s = t->firstBeatSec; s < t->durationSec; s += secPer4Beats) {
-            int x = (int)(s / t->durationSec * w);
-            p.drawLine(x, 0, x, h);
-        }
-    }
 
     // Vertical peak bars: max of the bins covered by each pixel column.
     // Band-colored (low/mid/high, same palette as DetailWaveformView) when
@@ -306,6 +299,16 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
             QStringLiteral("decks/%1/quantizeHotCues").arg(deckIndex_), true)
             .toBool(),
         std::memory_order_release);
+    engine_->deck(deckIndex_).preservePitch.store(
+        QSettings().value(
+            QStringLiteral("decks/%1/preservePitch").arg(deckIndex_), false)
+            .toBool(),
+        std::memory_order_release);
+    engine_->deck(deckIndex_).tempoRange.store(
+        closestSeratoTempoRange(QSettings().value(
+            QStringLiteral("decks/%1/tempoRange").arg(deckIndex_), 0.08)
+                                    .toDouble()),
+        std::memory_order_release);
 
     // The main column (waveform/info/transport/pads) sits next to a narrow
     // vertical tempo slider on the OUTER edge: left for deck A, right for
@@ -352,6 +355,11 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     syncBtn_->setToolTip(
         tr("Align this deck to the other deck's beat phase once (does not change BPM)"));
     quantizeBtn_ = new FitPushButton(tr("QUANT"));
+    preservePitchCheck_ = new QCheckBox(tr("KEY LOCK"));
+    preservePitchCheck_->setChecked(
+        engine_->deck(deckIndex_).preservePitch.load());
+    preservePitchCheck_->setToolTip(
+        tr("Preserve the song's musical pitch when the BPM changes"));
     gridBtn_ = new FitToolButton(this);
     gridBtn_->setText(tr("GRID ▾"));
     gridBtn_->setPopupMode(QToolButton::InstantPopup);
@@ -430,6 +438,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     transport->addWidget(syncBtn_);
     transport->addWidget(quantizeBtn_);
     transport->addWidget(gridBtn_);
+    transport->addWidget(preservePitchCheck_);
     mainCol->addLayout(transport);
 
     // Eight FLX4-style performance pads. The normal mode keys remain visible
@@ -739,7 +748,6 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     tempoSlider_->setValue(0);
     tempoSlider_->setTickPosition(QSlider::TicksBothSides);
     tempoSlider_->setTickInterval(kTempoSteps / 4);
-    tempoSlider_->setToolTip(tr("Tempo ±8%"));
     tempoCol->addWidget(tempoLabel_);
     tempoCol->addWidget(tempoSlider_, 1, Qt::AlignHCenter);
     auto* tempoCaption = new QLabel(tr("TEMPO"));
@@ -747,6 +755,24 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     tempoCaption->setStyleSheet(
         QStringLiteral("color:%1; font-size:10px;").arg(themeDimText().name()));
     tempoCol->addWidget(tempoCaption);
+    tempoRangeBtn_ = new FitToolButton(this);
+    tempoRangeBtn_->setPopupMode(QToolButton::InstantPopup);
+    tempoRangeBtn_->setFixedWidth(54);
+    tempoRangeBtn_->setToolTip(
+        tr("Choose the tempo-fader range; SHIFT + SYNC cycles it on the FLX4"));
+    auto* tempoRangeMenu = new QMenu(tempoRangeBtn_);
+    for (const double range : kSeratoTempoRanges) {
+        QAction* action = tempoRangeMenu->addAction(
+            tr("±%1%").arg(range * 100.0, 0, 'f', 0));
+        action->setCheckable(true);
+        action->setData(range);
+        connect(action, &QAction::triggered, this, [this, range] {
+            dispatch(ControlId::TempoRange, range);
+        });
+    }
+    tempoRangeBtn_->setMenu(tempoRangeMenu);
+    tempoCol->addWidget(tempoRangeBtn_, 0, Qt::AlignHCenter);
+    updateTempoRangeUi();
 
     // Mirror: tempo on the outer edge.
     if (deckIndex_ == 0) {
@@ -784,6 +810,14 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     connect(quantizeBtn_, &QPushButton::toggled, this, [this](bool enabled) {
         dispatch(ControlId::Quantize, enabled ? 1.0 : 0.0);
     });
+    connect(preservePitchCheck_, &QCheckBox::toggled, this,
+            [this](bool enabled) {
+        engine_->deck(deckIndex_).preservePitch.store(
+            enabled, std::memory_order_release);
+        QSettings().setValue(
+            QStringLiteral("decks/%1/preservePitch").arg(deckIndex_),
+            enabled);
+    });
     connect(tempoSlider_, &QSlider::valueChanged, this,
             &DeckWidget::onTempoSlider);
     connect(tempoSlider_, &QSlider::sliderReleased, this, [this] {
@@ -816,7 +850,18 @@ void DeckWidget::setTransitionCues(const QList<double>& seconds,
 
 QWidget* DeckWidget::controlWidget(ControlId control) const
 {
-    return control == ControlId::Tempo ? tempoSlider_ : nullptr;
+    switch (control) {
+    case ControlId::Tempo:       return tempoSlider_;
+    case ControlId::Quantize:    return quantizeBtn_;
+    case ControlId::FxType:      return fxTypeCombo_;
+    case ControlId::FxOn:        return fxOnBtn_;
+    case ControlId::FxWet:       return fxWetDial_;
+    case ControlId::StemVocals:  return stemPads_[0];
+    case ControlId::StemMelody:  return stemPads_[1];
+    case ControlId::StemBass:    return stemPads_[2];
+    case ControlId::StemDrums:   return stemPads_[3];
+    default:                     return nullptr;
+    }
 }
 
 void DeckWidget::loadPerformancePadSettings()
@@ -1279,18 +1324,32 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
             emit trackPerformanceMetadataChanged(deckIndex_);
             showPadFeedback(tr("Saved active loop to %1").arg(slot.label));
         } else {
-            // Saved-loop pads are release-aware transition events. The deck
-            // previews while held and PLAY takes ownership exactly like a hot
-            // cue, so releasing after PLAY cannot stop or rewind transport.
+            const bool wasPlaying = deck.playing.load() &&
+                                    !deck.previewActive();
+            const double positionBefore = deck.positionSec();
             dispatchPerformancePadGesture(padMode_, pad);
             const auto id = static_cast<ControlId>(
                 static_cast<int>(ControlId::SavedLoop1) + pad);
             dispatch(id, 1.0);
-            padReleasePending_[pad] = true;
-            showPadFeedback(tr("Hold %1 to preview · press PLAY to continue")
-                                .arg(slot.label.isEmpty()
-                                         ? tr("captured loop %1").arg(pad + 1)
-                                         : slot.label));
+            const QString loopName = slot.label.isEmpty()
+                ? tr("captured loop %1").arg(pad + 1) : slot.label;
+            if (wasPlaying) {
+                // This press is a one-shot arm event. Releasing the physical
+                // pad must not cancel it or emit a misleading replay event.
+                padReleasePending_[pad] = false;
+                if (positionBefore < slot.endSec && deck.loopActive.load())
+                    showPadFeedback(tr("Armed %1 — it will loop when playback reaches it")
+                                        .arg(loopName));
+                else
+                    showPadFeedback(tr("%1 is behind the playhead — pause to jump there")
+                                        .arg(loopName));
+            } else {
+                // Paused decks retain the hot-cue-style hold preview; PLAY
+                // takes ownership and release then leaves transport running.
+                padReleasePending_[pad] = true;
+                showPadFeedback(tr("Hold %1 to preview · press PLAY to continue")
+                                    .arg(loopName));
+            }
         }
         waveform_->update();
         break;
@@ -1662,12 +1721,36 @@ void DeckWidget::dispatch(ControlId id, double value)
 
 void DeckWidget::onTempoSlider(int value)
 {
-    double ratio = sliderToRatio(value);
+    const double range = engine_->deck(deckIndex_).tempoRange.load(
+        std::memory_order_acquire);
+    const double ratio = sliderToRatio(value, range);
     tempoLabel_->setText(
         QString::asprintf("%+.1f%%", (ratio - 1.0) * 100.0));
     if (!tempoSlider_->signalsBlocked())
         dispatch(ControlId::Tempo, ratio);
     // Effective BPM label refreshes on the timer tick.
+}
+
+void DeckWidget::updateTempoRangeUi()
+{
+    if (!tempoRangeBtn_ || !tempoSlider_) return;
+    const Deck& deck = engine_->deck(deckIndex_);
+    const double range = closestSeratoTempoRange(
+        deck.tempoRange.load(std::memory_order_acquire));
+    tempoRangeBtn_->setText(
+        tr("±%1%").arg(range * 100.0, 0, 'f', 0));
+    tempoSlider_->setToolTip(
+        tr("Tempo ±%1%").arg(range * 100.0, 0, 'f', 0));
+    if (tempoRangeBtn_->menu()) {
+        for (QAction* action : tempoRangeBtn_->menu()->actions())
+            action->setChecked(
+                std::fabs(action->data().toDouble() - range) < 1.0e-9);
+    }
+    const double ratio = deck.tempoRatio.load(std::memory_order_acquire);
+    QSignalBlocker block(tempoSlider_);
+    tempoSlider_->setValue(ratioToSlider(ratio, range));
+    tempoLabel_->setText(
+        QString::asprintf("%+.1f%%", (ratio - 1.0) * 100.0));
 }
 
 void DeckWidget::syncHotCueButtons()
@@ -1818,6 +1901,7 @@ void DeckWidget::syncStemPads()
 void DeckWidget::trackChanged()
 {
     TrackDataPtr t = engine_->deck(deckIndex_).track();
+    lastWaveformPos_ = -1.0;
     if (gridBtn_)
         gridBtn_->setEnabled(t != nullptr);
     if (t) {
@@ -1848,11 +1932,20 @@ void DeckWidget::onBusEvent(const ControlEvent& e, Origin origin)
     switch (e.id) {
     case ControlId::Tempo: {
         QSignalBlocker block(tempoSlider_);
-        tempoSlider_->setValue(ratioToSlider(e.value));
+        tempoSlider_->setValue(ratioToSlider(
+            e.value, engine_->deck(deckIndex_).tempoRange.load(
+                         std::memory_order_acquire)));
         tempoLabel_->setText(
             QString::asprintf("%+.1f%%", (e.value - 1.0) * 100.0));
         break;
     }
+    case ControlId::TempoRange:
+        QSettings().setValue(
+            QStringLiteral("decks/%1/tempoRange").arg(deckIndex_),
+            engine_->deck(deckIndex_).tempoRange.load(
+                std::memory_order_acquire));
+        updateTempoRangeUi();
+        break;
     case ControlId::HotCue1: case ControlId::HotCue2:
     case ControlId::HotCue3: case ControlId::HotCue4:
     case ControlId::HotCue5: case ControlId::HotCue6:
@@ -1867,6 +1960,11 @@ void DeckWidget::onBusEvent(const ControlEvent& e, Origin origin)
         // the deck atomics contain the new loop state.  Repaint immediately
         // so MIDI and on-screen loop controls feel equally responsive.
         syncLoopButtons();
+        waveform_->update();
+        break;
+    case ControlId::BeatJump:
+        // Beat Jump can move a paused deck. Reflect it in the compact
+        // whole-track cursor immediately instead of waiting for playback.
         waveform_->update();
         break;
     case ControlId::Quantize: {
@@ -1903,6 +2001,13 @@ void DeckWidget::refresh()
         quantizeBtn_->setChecked(quantize);
     }
 
+    const bool preservePitch =
+        deck.preservePitch.load(std::memory_order_acquire);
+    if (preservePitchCheck_->isChecked() != preservePitch) {
+        QSignalBlocker block(preservePitchCheck_);
+        preservePitchCheck_->setChecked(preservePitch);
+    }
+
     if (t && t->durationSec > 0.0) {
         double pos = deck.positionSec();
         timeLabel_->setText(formatTime(pos) + " / -" +
@@ -1917,7 +2022,9 @@ void DeckWidget::refresh()
             key + QString::asprintf("BPM %.2f → %.2f", t->bpm, eff));
         // Mirror the engine's tempo ratio when we're not dragging.
         if (!tempoSlider_->isSliderDown()) {
-            int sv = ratioToSlider(deck.tempoRatio.load());
+            const int sv = ratioToSlider(
+                deck.tempoRatio.load(), deck.tempoRange.load(
+                    std::memory_order_acquire));
             if (sv != tempoSlider_->value()) {
                 QSignalBlocker block(tempoSlider_);
                 tempoSlider_->setValue(sv);
@@ -1925,9 +2032,15 @@ void DeckWidget::refresh()
                     "%+.1f%%", (deck.tempoRatio.load() - 1.0) * 100.0));
             }
         }
-        if (playing)
-            waveform_->update(); // ~30 Hz repaint while playing
+        // Position can change while paused through Beat Jump, an overview
+        // seek, or dragging/scratching the detailed waveform. Keep the summary
+        // cursor following all of those paths at the same ~30 Hz UI cadence.
+        if (playing || pos != lastWaveformPos_) {
+            lastWaveformPos_ = pos;
+            waveform_->update();
+        }
     } else {
+        lastWaveformPos_ = -1.0;
         timeLabel_->setText(tr("0:00.0 / -0:00.0"));
     }
     syncLoopButtons();

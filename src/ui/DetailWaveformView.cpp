@@ -421,7 +421,8 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
         }
     }
 
-    // Beatgrid: one tick per beat, stronger every 4 (downbeat).
+    // Beatgrid: ordinary beats are now clearly visible over dense colored
+    // audio, while four-beat downbeats use a brighter, thicker phrase line.
     if (t->bpm > 0.0) {
         const double rightSec =
             std::min(leftSec + sourceWindowSec, t->durationSec);
@@ -431,7 +432,10 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
             const double sec = t->secAtBeat(b);
             if (sec > rightSec) break;
             const bool strong = std::fmod(b, 4.0) < 0.5;
-            p.setPen(QColor(255, 255, 255, strong ? 70 : 28));
+            QColor grid(255, 255, 255, strong ? 185 : 82);
+            QPen gridPen(grid);
+            gridPen.setWidthF(strong ? 1.8 : 1.0);
+            p.setPen(gridPen);
             const int x = xForSec(sec);
             p.drawLine(x, r.top(), x, r.bottom());
         }

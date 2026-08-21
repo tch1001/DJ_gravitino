@@ -25,15 +25,21 @@ std::map<const TransitionPlayer*, PlayerMode>& modeTable() {
     return t;
 }
 
+std::map<const TransitionPlayer*, bool>& preserveOutgoingTempoTable() {
+    static std::map<const TransitionPlayer*, bool> t;
+    return t;
+}
+
 void prependInitialState(std::vector<GvtEvent>& events,
                          const GvtInitialState& state, Role role,
-                         bool complete) {
+                         bool complete, bool includeTempo = true) {
     if (!state.captured) return;
     std::vector<GvtEvent> setup;
     const auto add = [&setup, role](ControlId id, double value) {
         setup.push_back(GvtEvent {0.0, role, id, value, Curve::Step});
     };
-    add(ControlId::Tempo, state.tempoRatio);
+    if (includeTempo)
+        add(ControlId::Tempo, state.tempoRatio);
     add(ControlId::Fader, state.fader);
     add(ControlId::EqLow, state.eqLow);
     add(ControlId::EqMid, state.eqMid);
@@ -181,6 +187,7 @@ TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
 
 TransitionPlayer::~TransitionPlayer() {
     modeTable().erase(this); // a heap-reused address must not inherit our mode
+    preserveOutgoingTempoTable().erase(this);
 }
 
 bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
@@ -205,6 +212,10 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
 
     auto it = modeTable().find(this);
     im.mode = (it != modeTable().end()) ? it->second : PlayerMode::Perform;
+    const auto preserveIt = preserveOutgoingTempoTable().find(this);
+    const bool preserveOutgoingSetupTempo =
+        preserveIt != preserveOutgoingTempoTable().end() &&
+        preserveIt->second;
 
     std::vector<GvtEvent> events;
     events.reserve(f.events.size());
@@ -234,7 +245,8 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
         fromSetup.tempoRatio = replayTempoRatio(
             fromSetup, f.from, im.engine->deck(fromDeck).track(), f.masterBpm);
         prependInitialState(events, fromSetup, Role::FromDeck,
-                            f.initialComplete);
+                            f.initialComplete,
+                            !preserveOutgoingSetupTempo);
         if (f.initialComplete) {
             GvtInitialState toSetup = f.initialTo;
             toSetup.tempoRatio = replayTempoRatio(
@@ -298,6 +310,11 @@ bool TransitionPlayer::isActive() const { return impl_->active; }
 
 void transitionPlayerSetMode(TransitionPlayer* player, PlayerMode mode) {
     modeTable()[player] = mode;
+}
+
+void transitionPlayerPreserveOutgoingSetupTempo(TransitionPlayer* player,
+                                                bool preserve) {
+    preserveOutgoingTempoTable()[player] = preserve;
 }
 
 } // namespace gvt

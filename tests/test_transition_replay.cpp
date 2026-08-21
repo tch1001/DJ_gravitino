@@ -151,6 +151,30 @@ int main(int argc, char** argv)
     CHECK(!engine.deck(1).quantizeHotCues.load());
     player.abort();
 
+    // PRIME must never snap the live/outgoing master deck back to an exact
+    // recorded BPM. The DJ has already brought it within tolerance. Incoming
+    // setup still restores normally, and later explicit tempo moves remain
+    // replayable.
+    GvtFile primed = file;
+    primed.events.clear();
+    primed.masterBpm = 120.0;
+    primed.initialFrom.tempoRatio = 1.0;
+    primed.initialTo.tempoRatio = 0.9;
+    engine.deck(0).tempoRatio.store(1.0025);
+    engine.deck(1).tempoRatio.store(1.0);
+    transitionPlayerSetMode(&player, PlayerMode::Perform);
+    transitionPlayerPreserveOutgoingSetupTempo(&player, true);
+    CHECK(player.arm(primed, 0, true, &error));
+    spinEvents();
+    CHECK(std::fabs(engine.deck(0).tempoRatio.load() - 1.0025) < 1.0e-9);
+    const double primedIncomingRatio =
+        primed.to.bpm * primed.initialTo.tempoRatio /
+        engine.deck(1).track()->bpm;
+    CHECK(std::fabs(engine.deck(1).tempoRatio.load() - primedIncomingRatio) <
+          1.0e-9);
+    player.abort();
+    transitionPlayerPreserveOutgoingSetupTempo(&player, false);
+
     // A recorded CUSTOM loop follows the same press -> PLAY -> release order
     // as the live pad. PLAY takes ownership of the momentary preview, so the
     // recorded release cannot stop or rewind the incoming deck.
@@ -189,6 +213,7 @@ int main(int argc, char** argv)
     constexpr double capturedRatio = 0.985643;
     bus.dispatch({0, ControlId::Tempo, capturedRatio}, Origin::Ui);
     bus.dispatch({0, ControlId::Trim, 0.91}, Origin::Ui);
+    bus.dispatch({0, ControlId::TempoRange, 0.50}, Origin::Ui);
     const GvtFile recorded = recorder.finish();
     CHECK(std::fabs(recorded.from.bpm - 127.987654) < 1.0e-9);
     CHECK(std::fabs(recorded.initialFrom.tempoRatio - 1.000027) < 1.0e-9);
@@ -206,6 +231,10 @@ int main(int argc, char** argv)
     CHECK(std::none_of(recorded.events.begin(), recorded.events.end(),
                        [](const GvtEvent& event) {
                            return event.control == ControlId::Trim;
+                       }));
+    CHECK(std::none_of(recorded.events.begin(), recorded.events.end(),
+                       [](const GvtEvent& event) {
+                           return event.control == ControlId::TempoRange;
                        }));
 
     // A host performance-pad event is retained as the physical gesture for the

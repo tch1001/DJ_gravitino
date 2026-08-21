@@ -10,4 +10,10 @@ namespace gvt {
 
 void transitionPlayerSetMode(TransitionPlayer* player, PlayerMode mode);
 
+// PRIME deliberately leaves the already-playing/outgoing deck's tempo under
+// the DJ's control.  Suppress only the captured beat-zero tempo restore for
+// that deck; later recorded tempo moves still replay normally.
+void transitionPlayerPreserveOutgoingSetupTempo(TransitionPlayer* player,
+                                                bool preserve);
+
 } // namespace gvt

@@ -213,6 +213,13 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
         for (PickupFuzzOverlay* overlay : pickupOverlays_)
             if (overlay) overlay->setPulse(pickupPulse_);
     });
+    setupMismatchTimer_ = new QTimer(this);
+    setupMismatchTimer_->setInterval(420);
+    connect(setupMismatchTimer_, &QTimer::timeout, this, [this] {
+        setupMismatchPulse_ = !setupMismatchPulse_;
+        for (SetupMismatchOverlay* overlay : setupMismatchOverlays_)
+            if (overlay) overlay->setPulse(setupMismatchPulse_);
+    });
     midiLabel_ = new QLabel;
     rateLabel_ = new QLabel;
     updateAudioOutputLabel();
@@ -229,6 +236,9 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     connect(transitionPanel_,
             &TransitionPanel::hardwareTakeoverTrackingFinished, midi_,
             &MidiEngine::finishTransitionTakeoverTracking);
+    connect(transitionPanel_,
+            &TransitionPanel::setupMismatchControlsChanged, this,
+            &MainWindow::refreshSetupMismatchUi);
     connect(midi_, &MidiEngine::hardwareControlObserved, transitionPanel_,
             &TransitionPanel::observeTutorialHardwareControl);
     connect(midi_, &MidiEngine::connectionChanged, this,
@@ -612,6 +622,46 @@ void MainWindow::refreshSoftTakeoverUi()
     pickupLabel_->show();
     pickupPulse_ = false;
     pickupTimer_->start();
+}
+
+void MainWindow::refreshSetupMismatchUi(
+    const QList<ControlEvent>& controls)
+{
+    const auto sameControls = [&] {
+        if (controls.size() != setupMismatchControls_.size()) return false;
+        for (qsizetype index = 0; index < controls.size(); ++index) {
+            if (controls[index].deck != setupMismatchControls_[index].deck ||
+                controls[index].id != setupMismatchControls_[index].id)
+                return false;
+        }
+        return true;
+    };
+    if (sameControls()) return;
+
+    for (SetupMismatchOverlay* overlay : setupMismatchOverlays_)
+        if (overlay) overlay->deleteLater();
+    setupMismatchOverlays_.clear();
+    setupMismatchControls_ = controls;
+
+    if (controls.isEmpty()) {
+        setupMismatchTimer_->stop();
+        setupMismatchPulse_ = false;
+        return;
+    }
+
+    for (const ControlEvent& mismatch : controls) {
+        QWidget* target = nullptr;
+        if (mismatch.deck == 0 || mismatch.deck == 1)
+            target = deckWidget(mismatch.deck)->controlWidget(mismatch.id);
+        if (!target)
+            target = mixer_->controlWidget(mismatch.deck, mismatch.id);
+        if (!target) continue;
+        auto* overlay = new SetupMismatchOverlay(target);
+        overlay->setPulse(setupMismatchPulse_);
+        setupMismatchOverlays_.append(overlay);
+    }
+    if (!setupMismatchOverlays_.isEmpty())
+        setupMismatchTimer_->start();
 }
 
 void MainWindow::updateAudioOutputLabel()

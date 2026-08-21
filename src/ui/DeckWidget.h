@@ -8,6 +8,7 @@
 #include "../performance/PerformancePads.h"
 
 class QComboBox;
+class QCheckBox;
 class QDial;
 class QLabel;
 class QPoint;
@@ -27,8 +28,9 @@ enum class BeatGridCommand : int {
 };
 
 // Compact whole-track overview waveform (~44 px): peak bars, played tint,
-// playhead, beatgrid ticks, numbered hotcue flags in slot colors, cue point
-// and transition-entry markers. Click to seek.
+// playhead, numbered hotcue flags in slot colors, cue point and
+// transition-entry markers. The beat grid belongs to the detailed waveform;
+// click this overview to seek.
 class WaveformView : public QWidget {
     Q_OBJECT
 public:
@@ -120,6 +122,7 @@ private:
     void beginPadFx(int pad, const PerformancePadAssignment& assignment);
     void endPadFx(int pad);
     void showPadFeedback(const QString& text);
+    void updateTempoRangeUi();
 
     int deckIndex_;
     ControlBus* bus_;
@@ -135,7 +138,9 @@ private:
     QPushButton* cueBtn_ = nullptr;
     QPushButton* syncBtn_ = nullptr;
     QPushButton* quantizeBtn_ = nullptr;
+    QCheckBox* preservePitchCheck_ = nullptr;
     QToolButton* gridBtn_ = nullptr;
+    QToolButton* tempoRangeBtn_ = nullptr;
     QSlider* tempoSlider_ = nullptr;
     QPushButton* hotcueBtns_[8] = {};
 
@@ -195,6 +200,7 @@ private:
     QLabel* stemsStatusLabel_ = nullptr;
 
     QTimer* timer_ = nullptr;
+    double lastWaveformPos_ = -1.0;
 };
 
 } // namespace gvt

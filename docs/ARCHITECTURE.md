@@ -72,8 +72,11 @@ Deck B PCM ─▶ tempo/trim/EQ/filter/FX ─┤─▶ channel fader ─┘
 
 - Tracks are fully decoded to memory (`TrackData`, mono-summed peaks for UI +
   stereo f32 PCM). MP3 decode via miniaudio's built-in dr_mp3.
-- Tempo: linear-interpolation resampler, ratio = targetBPM/trackBPM. (No keylock
-  in MVP; pitch shifts with tempo like turntables. Keylock is a documented TODO.)
+- Tempo: ratio = targetBPM/trackBPM. With KEY LOCK off, linear-interpolation
+  resampling changes pitch like a turntable. With it on, per-deck Signalsmith
+  Stretch time-stretching preserves musical pitch; scratch remains direct.
+  The pitch fader has persisted Serato-style ±8%, ±16%, and ±50% ranges;
+  selecting a different range never changes the current ratio by itself.
 - EQ: RBJ biquad low-shelf 250 Hz / peak 1 kHz / high-shelf 4 kHz, ±26 dB with
   full-kill at slider bottom.
 - Limiter: soft-clip tanh on master to avoid inter-deck clipping.

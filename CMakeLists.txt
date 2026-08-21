@@ -42,7 +42,8 @@ add_library(gvtcore STATIC
     src/midi/Flx4TutorialMap.cpp
     src/midi/SoftTakeover.cpp
 )
-target_include_directories(gvtcore PUBLIC src ${RTMIDI_INCLUDE} ${TAGLIB_INCLUDE})
+target_include_directories(gvtcore PUBLIC
+    src third_party/signalsmith-stretch ${RTMIDI_INCLUDE} ${TAGLIB_INCLUDE})
 target_link_libraries(gvtcore PUBLIC
     Qt6::Core Qt6::Gui Qt6::Concurrent miniaudio ${RTMIDI_LIB} ${TAGLIB_LIB}
     "-framework CoreAudio" "-framework CoreMIDI" "-framework CoreFoundation")

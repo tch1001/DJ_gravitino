@@ -3,14 +3,17 @@
 
 #include "Eq.h"
 #include "Fx.h"
+#include "signalsmith-stretch.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace gvt {
 namespace {
@@ -120,6 +123,30 @@ struct Deck::Impl {
     DjFilter djFilter;
     DeckFx fx;
 
+    // Per-deck stereo key-lock processor. Buffers are sized for the realtime
+    // callback up front; larger offline calls may grow them outside normal
+    // device operation. A fixed seed makes regression output deterministic.
+    signalsmith::stretch::SignalsmithStretch<float> keyLock {0x475654};
+    std::array<std::vector<float>, 2> keyInput;
+    std::array<std::vector<float>, 2> keyOutput;
+    std::array<std::vector<float>, 2> keySeek;
+    double keyInputRemainder = 0.0;
+    double keyExpectedPositionFrames = 0.0;
+    bool keyLockPrimed = false;
+
+    Impl()
+    {
+        // About 43 ms analysis with evenly split computation: short enough
+        // for DJ transport, while still retaining substantially better bass
+        // and transient quality than a tiny granular shifter.
+        keyLock.configure(2, 2048, 512, true);
+        for (int channel = 0; channel < 2; ++channel) {
+            keyInput[channel].resize(1025);
+            keyOutput[channel].resize(256);
+            keySeek[channel].resize(8192);
+        }
+    }
+
     void waitForRender() const noexcept
     {
         while (activeRenders.load(std::memory_order_acquire) != 0)
@@ -170,6 +197,10 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->eq.reset();
     impl_->djFilter.reset();
     impl_->fx.reset();
+    impl_->keyLock.reset();
+    impl_->keyInputRemainder = 0.0;
+    impl_->keyExpectedPositionFrames = 0.0;
+    impl_->keyLockPrimed = false;
     loopActive.store(false, std::memory_order_release);
     loopStartSec.store(-1.0, std::memory_order_release);
     loopEndSec.store(-1.0, std::memory_order_release);
@@ -392,6 +423,22 @@ void Deck::handleSavedLoop(int index, bool pressed)
     }
 
     const SavedLoopSlot& slot = currentTrack->savedLoops[index];
+    const bool alreadyPlaying =
+        playing.load(std::memory_order_acquire) && !previewActive();
+    if (alreadyPlaying) {
+        // A live deck must not jump just because the DJ selected a saved loop.
+        // Store/activate its region and let normal playback enter it; the
+        // render loop will wrap naturally at OUT.
+        impl_->cuePreviewing.store(false, std::memory_order_release);
+        impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
+        impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
+        impl_->savedLoopPreviewIndex.store(-1, std::memory_order_release);
+        impl_->savedLoopPreviewSec.store(-1.0, std::memory_order_release);
+        if (slot.isSet())
+            armSavedLoop(slot.startSec, slot.endSec);
+        return;
+    }
+
     if (!slot.isSet() || !activateSavedLoop(slot.startSec, slot.endSec)) {
         impl_->savedLoopPreviewIndex.store(-1, std::memory_order_release);
         impl_->savedLoopPreviewSec.store(-1.0, std::memory_order_release);
@@ -719,6 +766,37 @@ bool Deck::activateSavedLoop(double startSec, double endSec)
     return true;
 }
 
+bool Deck::armSavedLoop(double startSec, double endSec)
+{
+    const TrackDataPtr currentTrack = track();
+    if (!currentTrack || !std::isfinite(startSec) ||
+        !std::isfinite(endSec)) {
+        return false;
+    }
+
+    const double duration = trackDurationSec(*currentTrack);
+    startSec = std::clamp(startSec, 0.0, duration);
+    endSec = std::clamp(endSec, 0.0, duration);
+    if (!(endSec > startSec))
+        return false;
+
+    // Arming a region that has already passed must not make the next audio
+    // callback wrap backwards. Leave it inactive and let the UI explain that
+    // pausing is the way to jump to an earlier saved loop.
+    if (positionSec() >= endSec) {
+        loopActive.store(false, std::memory_order_release);
+        return false;
+    }
+
+    loopActive.store(false, std::memory_order_release);
+    loopStartSec.store(startSec, std::memory_order_release);
+    loopEndSec.store(endSec, std::memory_order_release);
+    impl_->pendingLoopInSec = -1.0;
+    impl_->hasPendingLoopIn = false;
+    loopActive.store(true, std::memory_order_release);
+    return true;
+}
+
 bool Deck::retriggerSavedLoop(double startSec, double endSec)
 {
     if (!activateSavedLoop(startSec, endSec))
@@ -891,69 +969,164 @@ void Deck::render(float* out, int frames, float* preFaderOut)
             position = std::clamp(position, lower, upper);
         };
 
-        for (int frame = 0; frame < frames; ++frame) {
-            if (scratching)
-                clampScratchPosition();
-            else
-                wrapLoopPosition();
-            if (scratching && !scratchHasMotion)
-                break;
-            if (position >= static_cast<double>(trackFrames)) {
-                position = static_cast<double>(trackFrames);
-                reachedEnd = true;
-                break;
-            }
-
-            const int64_t frame0 = static_cast<int64_t>(position);
+        const auto sourceSample = [&](double sourcePosition,
+                                      int channel) -> float {
+            sourcePosition = std::clamp(
+                sourcePosition, 0.0,
+                std::nextafter(static_cast<double>(trackFrames), 0.0));
+            const int64_t frame0 = static_cast<int64_t>(sourcePosition);
             const int64_t frame1 = std::min(frame0 + 1, trackFrames - 1);
-            const double fraction = position - static_cast<double>(frame0);
-            const std::size_t sample0 =
-                static_cast<std::size_t>(frame0) * 2U;
-            const std::size_t sample1 =
-                static_cast<std::size_t>(frame1) * 2U;
-            const int outputBase = frame * 2;
-
+            const double fraction =
+                sourcePosition - static_cast<double>(frame0);
             if (useStems) {
                 const int64_t sf0 = std::min(frame0, stemFrames - 1);
                 const int64_t sf1 = std::min(frame1, stemFrames - 1);
-                for (int channel = 0; channel < 2; ++channel) {
-                    const std::size_t a = (std::size_t)sf0 * 2U + (std::size_t)channel;
-                    const std::size_t b = (std::size_t)sf1 * 2U + (std::size_t)channel;
-                    constexpr double kInv = 1.0 / 32768.0;
-                    auto stemSample = [&](const std::vector<int16_t>& v, double g) {
-                        if (g <= 0.0 || v.empty()) return 0.0;
-                        const double s0 = v[a] * kInv, s1 = v[b] * kInv;
-                        return (s0 + (s1 - s0) * fraction) * g;
-                    };
-                    const double mixed = stemSample(stems->vocals, gV) +
-                                         stemSample(stems->melody, gM) +
-                                         stemSample(stems->bass, gB) +
-                                         stemSample(stems->drums, gD);
-                    out[outputBase + channel] =
-                        static_cast<float>(mixed * inputGain);
-                }
-            } else {
-                for (int channel = 0; channel < 2; ++channel) {
-                    const double first = currentTrack->pcm[
-                        sample0 + static_cast<std::size_t>(channel)];
-                    const double second = currentTrack->pcm[
-                        sample1 + static_cast<std::size_t>(channel)];
-                    out[outputBase + channel] = static_cast<float>(
-                        (first + (second - first) * fraction) * inputGain);
-                }
+                const std::size_t a = static_cast<std::size_t>(sf0) * 2U +
+                                      static_cast<std::size_t>(channel);
+                const std::size_t b = static_cast<std::size_t>(sf1) * 2U +
+                                      static_cast<std::size_t>(channel);
+                constexpr double kInv = 1.0 / 32768.0;
+                const auto stemSample = [&](const std::vector<int16_t>& samples,
+                                            double gain) {
+                    if (gain <= 0.0 || samples.empty()) return 0.0;
+                    const double first = samples[a] * kInv;
+                    const double second = samples[b] * kInv;
+                    return (first + (second - first) * fraction) * gain;
+                };
+                return static_cast<float>(
+                    stemSample(stems->vocals, gV) +
+                    stemSample(stems->melody, gM) +
+                    stemSample(stems->bass, gB) +
+                    stemSample(stems->drums, gD));
             }
 
-            if (scratching) {
-                position += scratchAdvance;
-                clampScratchPosition();
-            } else {
-                const double playbackRatio =
-                    std::clamp(ratio + impl_->jogRatio, 0.01, 4.0);
-                position += playbackRatio;
+            const std::size_t sample0 =
+                static_cast<std::size_t>(frame0) * 2U +
+                static_cast<std::size_t>(channel);
+            const std::size_t sample1 =
+                static_cast<std::size_t>(frame1) * 2U +
+                static_cast<std::size_t>(channel);
+            const double first = currentTrack->pcm[sample0];
+            const double second = currentTrack->pcm[sample1];
+            return static_cast<float>(first + (second - first) * fraction);
+        };
+
+        const bool keyLockEnabled =
+            preservePitch.load(std::memory_order_relaxed) && !scratching;
+        if (keyLockEnabled) {
+            const double playbackRatio =
+                std::clamp(ratio + impl_->jogRatio, 0.01, 4.0);
+            const bool positionDiscontinuity =
+                !impl_->keyLockPrimed ||
+                std::fabs(startPosition - impl_->keyExpectedPositionFrames) >
+                    1.1;
+
+            if (positionDiscontinuity) {
+                impl_->keyInputRemainder = 0.0;
+                const int seekFrames = std::max(
+                    1, static_cast<int>(std::ceil(
+                           impl_->keyLock.outputSeekLength(playbackRatio))));
+                for (int channel = 0; channel < 2; ++channel)
+                    impl_->keySeek[channel].resize(
+                        static_cast<std::size_t>(seekFrames));
+                const double seekStart = position - seekFrames;
+                for (int frame = 0; frame < seekFrames; ++frame) {
+                    const double sourcePosition = seekStart + frame;
+                    for (int channel = 0; channel < 2; ++channel) {
+                        impl_->keySeek[channel][static_cast<std::size_t>(frame)] =
+                            sourcePosition >= 0.0 &&
+                            sourcePosition < static_cast<double>(trackFrames)
+                                ? sourceSample(sourcePosition, channel)
+                                : 0.0f;
+                    }
+                }
+                std::array<float*, 2> seekPointers {
+                    impl_->keySeek[0].data(), impl_->keySeek[1].data()};
+                impl_->keyLock.outputSeek(seekPointers, seekFrames);
+                impl_->keyLockPrimed = true;
+            }
+
+            const double wantedInput =
+                static_cast<double>(frames) * playbackRatio +
+                impl_->keyInputRemainder;
+            const int inputFrames = std::max(
+                0, static_cast<int>(std::floor(wantedInput)));
+            impl_->keyInputRemainder = wantedInput - inputFrames;
+            for (int channel = 0; channel < 2; ++channel) {
+                impl_->keyInput[channel].resize(
+                    static_cast<std::size_t>(inputFrames));
+                impl_->keyOutput[channel].resize(
+                    static_cast<std::size_t>(frames));
+            }
+
+            for (int frame = 0; frame < inputFrames; ++frame) {
                 wrapLoopPosition();
-                impl_->jogRatio *= kJogDecayPerFrame;
-                if (std::abs(impl_->jogRatio) < 1.0e-8)
-                    impl_->jogRatio = 0.0;
+                if (position >= static_cast<double>(trackFrames)) {
+                    position = static_cast<double>(trackFrames);
+                    reachedEnd = true;
+                    for (int channel = 0; channel < 2; ++channel)
+                        impl_->keyInput[channel][static_cast<std::size_t>(frame)] =
+                            0.0f;
+                    continue;
+                }
+                for (int channel = 0; channel < 2; ++channel)
+                    impl_->keyInput[channel][static_cast<std::size_t>(frame)] =
+                        sourceSample(position, channel);
+                position += 1.0;
+                wrapLoopPosition();
+            }
+
+            std::array<float*, 2> inputPointers {
+                impl_->keyInput[0].data(), impl_->keyInput[1].data()};
+            std::array<float*, 2> outputPointers {
+                impl_->keyOutput[0].data(), impl_->keyOutput[1].data()};
+            impl_->keyLock.process(inputPointers, inputFrames,
+                                   outputPointers, frames);
+            for (int frame = 0; frame < frames; ++frame) {
+                const int outputBase = frame * 2;
+                for (int channel = 0; channel < 2; ++channel)
+                    out[outputBase + channel] =
+                        impl_->keyOutput[channel][static_cast<std::size_t>(frame)] *
+                        static_cast<float>(inputGain);
+            }
+            impl_->keyExpectedPositionFrames = position;
+            impl_->jogRatio *= std::pow(kJogDecayPerFrame, frames);
+            if (std::abs(impl_->jogRatio) < 1.0e-8)
+                impl_->jogRatio = 0.0;
+        } else {
+            impl_->keyLockPrimed = false;
+            impl_->keyInputRemainder = 0.0;
+            for (int frame = 0; frame < frames; ++frame) {
+                if (scratching)
+                    clampScratchPosition();
+                else
+                    wrapLoopPosition();
+                if (scratching && !scratchHasMotion)
+                    break;
+                if (position >= static_cast<double>(trackFrames)) {
+                    position = static_cast<double>(trackFrames);
+                    reachedEnd = true;
+                    break;
+                }
+
+                const int outputBase = frame * 2;
+                for (int channel = 0; channel < 2; ++channel)
+                    out[outputBase + channel] =
+                        sourceSample(position, channel) *
+                        static_cast<float>(inputGain);
+
+                if (scratching) {
+                    position += scratchAdvance;
+                    clampScratchPosition();
+                } else {
+                    const double playbackRatio =
+                        std::clamp(ratio + impl_->jogRatio, 0.01, 4.0);
+                    position += playbackRatio;
+                    wrapLoopPosition();
+                    impl_->jogRatio *= kJogDecayPerFrame;
+                    if (std::abs(impl_->jogRatio) < 1.0e-8)
+                        impl_->jogRatio = 0.0;
+                }
             }
         }
 

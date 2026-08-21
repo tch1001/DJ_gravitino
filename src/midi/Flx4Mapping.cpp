@@ -30,6 +30,7 @@ constexpr std::uint8_t kCueNote = 0x0C;
 constexpr std::uint8_t kHeadphoneCueNote = 0x54;
 constexpr std::uint8_t kMasterCueNote = 0x63;
 constexpr std::uint8_t kBeatSyncNote = 0x58;
+constexpr std::uint8_t kTempoRangeNote = 0x60; // SHIFT + BEAT SYNC
 constexpr std::uint8_t kQuantizeNote = 0x68;
 constexpr std::uint8_t kHotCueModeNote = 0x1B;
 constexpr std::uint8_t kPadFx1ModeNote = 0x1E;
@@ -90,7 +91,7 @@ constexpr int kRelativeCenter = 0x40;
 
 constexpr int kFourteenBitCenter = 0x2000;
 constexpr int kFourteenBitMaximum = 0x3FFF;
-constexpr double kTempoRange = 0.08;
+constexpr double kCanonicalTempoRange = 0.08;
 
 bool isDeckChannel(std::uint8_t channel) noexcept
 {
@@ -196,12 +197,12 @@ double tempoRatio(int value) noexcept
     // The physical center reports 0x2000. Use two linear halves so center and
     // both +/-8% endpoints remain exact despite the asymmetric integer range.
     if (value <= kFourteenBitCenter) {
-        return 1.0 - kTempoRange
-            + kTempoRange * static_cast<double>(value)
+        return 1.0 - kCanonicalTempoRange
+            + kCanonicalTempoRange * static_cast<double>(value)
                 / static_cast<double>(kFourteenBitCenter);
     }
 
-    return 1.0 + kTempoRange
+    return 1.0 + kCanonicalTempoRange
         * static_cast<double>(value - kFourteenBitCenter)
         / static_cast<double>(kFourteenBitMaximum - kFourteenBitCenter);
 }
@@ -298,6 +299,10 @@ std::optional<ControlEvent> Flx4Mapping::parse(
         case kBeatSyncNote:
             if (pressed)
                 return ControlEvent {deck, ControlId::TempoSync, 1.0};
+            return std::nullopt;
+        case kTempoRangeNote:
+            if (pressed)
+                return ControlEvent {deck, ControlId::TempoRange, 0.0};
             return std::nullopt;
         case kQuantizeNote:
             if (pressed)

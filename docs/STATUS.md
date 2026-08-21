@@ -6,6 +6,53 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-22 (codex): **Focused beat grid and synchronized overview cursor.**
+  Stacked/detail waveforms now draw ordinary beat lines at substantially
+  higher opacity and distinguish every four-beat downbeat with a brighter
+  1.8 px line. Compact overview waveforms intentionally contain no beat lines.
+  Their playhead now follows every position change at 30 Hz even while paused,
+  including Beat Jump and detailed-waveform drag/scratch navigation. Verified:
+  clean build, ctest 21/21, `git diff --check`, and restarted the app.
+
+- 2026-08-21 (codex): **Direction-aware transition lifecycle.** The selected
+  transition no longer falls back to pre-transition readiness after successful
+  replay. The panel retains the exact transition file plus its physical FROM
+  deck, reports armed/running/done phases, and finishes with an explicit
+  `FROM “track” on Deck X → TO “track” on Deck Y` handoff. Successful
+  completion clears pre-state mismatch highlights; abort, selecting another
+  edge, recording, Match Setup, or starting another replay returns to preflight
+  intentionally. Verified: clean build, ctest 21/21, full self-test, and
+  `git diff --check`.
+
+- 2026-08-21 (codex): **Serato tempo ranges and visual setup mismatch
+  guidance.** Replaced the fixed ±8% tempo mapping with persisted per-deck
+  ±8/±16/±50% choices, preserving the current effective BPM when changing
+  range. The on-screen tempo column provides all three choices and FLX4 SHIFT
+  + BEAT SYNC (`90/91 60`) cycles them; physical fader input uses the selected
+  range. Selected-transition readiness now emits exact mismatched controls and
+  overlays the corresponding tempo, fader, EQ/filter, crossfader, FX,
+  Quantize, and stem widgets in pulsing amber. Highlights follow CLOSE ENOUGH
+  tolerances live, clear when corrected, and reappear after overshoot. Verified:
+  clean full build, ctest 21/21, full audio/transition/loop/stem self-test,
+  `git diff --check`, visual inspection of both ±8% range buttons in the live
+  layout, and a single-process restart with the FLX4 connected.
+
+- 2026-08-21 (codex): **Manual PRIME BPM, armed CUSTOM loops, and per-deck key
+  lock.** Checkpointed and pushed all prior work as `05df27f`. PRIME now leaves
+  the playing/outgoing deck's effective BPM untouched and, when it is outside
+  strict or CLOSE ENOUGH tolerance, asks for the exact manual BPM target and
+  accepted margin. Its synthetic beat-zero outgoing tempo restore is also
+  suppressed after arming, without dropping genuine recorded tempo moves.
+  A populated CUSTOM loop pressed during normal playback now arms in place and
+  wraps only after transport reaches OUT; paused decks retain hold-preview and
+  PLAY-latch behavior. Added a persisted KEY LOCK checkbox per deck backed by
+  vendored MIT Signalsmith Stretch DSP; it preserves pitch under tempo change
+  while coarse scratch remains vinyl-like. Focused tests cover transition tempo
+  preservation, both CUSTOM paths, and a 440 Hz source at +8% measuring 475 Hz
+  unlocked versus 440 Hz locked. Verified: clean full build, ctest 20/20,
+  full audio/transition/loop/stem self-test, `git diff --check`, and one running
+  instance of the verified binary.
+
 - 2026-08-19 (codex): **Transition identity, negative hot-cue, and replay-latch
   fixes.** Operational transition matching now requires a fingerprint or
   title+artist match; duration within 1.5 seconds remains diagnostic only and
@@ -610,10 +657,9 @@ Beat FX LED messages.
 - Engine sample rate fixed at 48 kHz (`kSampleRate`); all decode resamples to it.
 - Audio track replacement uses a stop-and-drain swap; the callback uses only
   atomics, fixed 256-frame scratch buffers, and allocation-free DSP.
-- Deck DSP uses linear tempo/jog resampling, RBJ three-band EQ, a post-filter
-  per-deck FX insert, equal-power master crossfade, and a shared
-  realtime/offline `tanh` soft-clip mix path.
-- No keylock in MVP — tempo change shifts pitch (documented TODO).
+- Deck DSP uses selectable linear/vinyl tempo resampling or Signalsmith Stretch
+  key lock, RBJ three-band EQ, a post-filter per-deck FX insert, equal-power
+  master crossfade, and a shared realtime/offline `tanh` soft-clip mix path.
 - Beatgrid is fixed-tempo (bpm + firstBeatSec) — fine for the demo tracks.
 - ControlBus dispatch is synchronous, GUI thread only. MIDI thread must post
   via QMetaObject::invokeMethod(..., Qt::QueuedConnection).
@@ -711,5 +757,5 @@ detection/display, master recording, folder-crate sidebar, history panel.
 - Fill the deck dead space (below hot cues) with loop / FX / beat-jump
   sections as we chase Serato feature parity — the layout was deliberately
   densified (11px base font, compact pads/knobs) to leave room for this.
-- Keylock (signalsmith-stretch), variable beatgrids, WAV/FLAC/AAC, transition
+- Variable beatgrids, WAV/FLAC/AAC, transition
   marketplace/sharing UI, Windows/Linux builds, .app bundling + macdeployqt.
