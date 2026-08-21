@@ -31,6 +31,15 @@ int main()
 
     Flx4Mapping mapping;
 
+    // The five-segment channel meters are host-driven CC messages, not notes.
+    const auto meterA = Flx4Mapping::channelLevelMessage(0, 0x57);
+    const auto meterB = Flx4Mapping::channelLevelMessage(1, 0x7F);
+    CHECK(meterA && (*meterA ==
+        std::array<unsigned char, 3> {0xB0, 0x02, 0x57}));
+    CHECK(meterB && (*meterB ==
+        std::array<unsigned char, 3> {0xB1, 0x02, 0x7F}));
+    CHECK(!Flx4Mapping::channelLevelMessage(kNoDeck, 0x40));
+
     // The dual-purpose physical IN/1/2X and OUT/2X controls always report
     // their ordinary IN/OUT notes. MidiEngine decides whether these mean
     // LoopIn/LoopOut or LoopHalve/LoopDouble from the deck's active-loop state.

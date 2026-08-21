@@ -26,6 +26,16 @@ int main()
             CHECK(mapped->padMode == Flx4PadMode::HotCue);
             CHECK(mapped->pad == pad);
         }
+
+        const auto savedLoop = static_cast<ControlId>(
+            static_cast<int>(ControlId::SavedLoop1) + pad);
+        const auto savedMapped = flx4TutorialMapping(savedLoop, 1.0);
+        CHECK(savedMapped.has_value());
+        if (savedMapped) {
+            CHECK(savedMapped->surface == Flx4SurfaceControl::PerformancePad);
+            CHECK(savedMapped->padMode == Flx4PadMode::Custom);
+            CHECK(savedMapped->pad == pad);
+        }
     }
 
     const auto jumpBack8 = flx4TutorialMapping(ControlId::BeatJump, -8.0);

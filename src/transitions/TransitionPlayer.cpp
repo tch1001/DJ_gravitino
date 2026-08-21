@@ -35,7 +35,6 @@ void prependInitialState(std::vector<GvtEvent>& events,
     };
     add(ControlId::Tempo, state.tempoRatio);
     add(ControlId::Fader, state.fader);
-    add(ControlId::Trim, state.trim);
     add(ControlId::EqLow, state.eqLow);
     add(ControlId::EqMid, state.eqMid);
     add(ControlId::EqHigh, state.eqHigh);
@@ -207,7 +206,14 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     auto it = modeTable().find(this);
     im.mode = (it != modeTable().end()) ? it->second : PlayerMode::Perform;
 
-    std::vector<GvtEvent> events = f.events;
+    std::vector<GvtEvent> events;
+    events.reserve(f.events.size());
+    std::copy_if(f.events.begin(), f.events.end(),
+                 std::back_inserter(events), [](const GvtEvent& event) {
+                     // Old files remain readable, but gain staging is no
+                     // longer applied as part of a transition.
+                     return event.control != ControlId::Trim;
+                 });
     // A library re-scan or manual regrid can change the loaded track's native
     // BPM after recording. Preserve every recorded effective BPM, including
     // later tempo moves, rather than blindly replaying a now-wrong ratio.
@@ -273,6 +279,7 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
         im.timelineClock.start();
     }
     im.preStateTransportApplied = false;
+    im.incomingPreviewControl = ControlId::Count;
 
     im.active = true;
     im.timer.start();

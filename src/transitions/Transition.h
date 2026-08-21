@@ -2,6 +2,8 @@
 #pragma once
 #include <QString>
 #include <array>
+#include <cmath>
+#include <limits>
 #include <map>
 #include <vector>
 #include "../control/ControlBus.h"
@@ -41,6 +43,9 @@ struct GvtInitialState {
     double cueBeat = 0.0;
     double tempoRatio = 1.0;
     double fader = 1.0;
+    // Legacy files may carry TRIM. New recordings deliberately omit it:
+    // gain staging is local to the deck and is not a transition gesture.
+    bool trimCaptured = false;
     double trim = 0.5;
     double eqLow = 0.5, eqMid = 0.5, eqHigh = 0.5;
     double filter = 0.5;
@@ -65,6 +70,15 @@ struct GvtCue {
     QString label;
 };
 
+// Missing hot-cue mappings need a non-numeric sentinel because valid beat
+// grids can extend below zero when a track has audio before its first downbeat.
+inline constexpr double kUnmappedHotCueBeat =
+    std::numeric_limits<double>::quiet_NaN();
+inline bool hotCueBeatIsMapped(double beat) noexcept
+{
+    return std::isfinite(beat);
+}
+
 struct GvtFile {
     int version = 1;
     // [meta]
@@ -81,12 +95,16 @@ struct GvtFile {
     bool initialMixerCaptured = false;
     double initialCrossfader = 0.0; // role space: 0 = outgoing, 1 = incoming
     // Track-relative beat positions required by recorded hot-cue events.
-    // A negative entry means that the transition does not contain a verified
-    // mapping for that role/pad (legacy files naturally default to this).
+    // NaN means that the transition does not contain a verified mapping for
+    // that role/pad. Finite values, including negative beats, are valid.
     std::array<double, 8> fromHotCueBeats {
-        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat};
     std::array<double, 8> toHotCueBeats {
-        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat};
     // [cues], sorted by beat
     std::vector<GvtCue> cues;
     // [events], sorted by beat
@@ -106,5 +124,10 @@ bool gvtSaveFile(const GvtFile& f, const QString& path, QString* error);
 // Track matching tiers for offering transitions (see format doc).
 enum class MatchQuality { None, DurationOnly, TitleArtist, Fingerprint };
 MatchQuality matchTrack(const GvtTrackRef& ref, const struct TrackData& t);
+constexpr bool isReliableTrackMatch(MatchQuality quality) noexcept
+{
+    return quality == MatchQuality::Fingerprint ||
+           quality == MatchQuality::TitleArtist;
+}
 
 } // namespace gvt

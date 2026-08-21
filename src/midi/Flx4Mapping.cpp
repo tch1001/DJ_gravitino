@@ -601,6 +601,16 @@ std::optional<std::array<unsigned char, 3>> Flx4Mapping::ledMessage(
 }
 
 std::optional<std::array<unsigned char, 3>>
+Flx4Mapping::channelLevelMessage(DeckId deck, unsigned char value) noexcept
+{
+    if (deck < 0 || deck > 1)
+        return std::nullopt;
+    return std::array<unsigned char, 3> {
+        static_cast<unsigned char>(kControlChange + deck), 0x02,
+        static_cast<unsigned char>(std::min<unsigned int>(value, 0x7F))};
+}
+
+std::optional<std::array<unsigned char, 3>>
 Flx4Mapping::padModeLedMessage(DeckId deck, int mode, bool on) noexcept
 {
     if (deck < 0 || deck > 1 || mode < 0 ||

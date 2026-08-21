@@ -239,6 +239,25 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
                     engine_->outputDevicePreference(), &error);
                 updateAudioOutputLabel();
             });
+    // CoreMIDI can enumerate the controller a moment before CoreAudio exposes
+    // its four-channel endpoint. Keep retrying the non-destructive secondary
+    // cue stream so MacBook/Bluetooth master output does not require an app
+    // restart merely because that startup race occurred.
+    auto* headphoneRetryTimer = new QTimer(this);
+    headphoneRetryTimer->setInterval(2000);
+    connect(headphoneRetryTimer, &QTimer::timeout, this, [this] {
+        if (!midi_->controllerConnected() ||
+            engine_->headphoneOutputAvailable())
+            return;
+        QString error;
+        engine_->switchOutputDevice(engine_->outputDevicePreference(), &error);
+        if (engine_->headphoneOutputAvailable()) {
+            updateAudioOutputLabel();
+            statusBar()->showMessage(
+                tr("FLX4 headphone cue output connected"), 4000);
+        }
+    });
+    headphoneRetryTimer->start();
     connect(engine_, &AudioEngine::outputDeviceChanged, this,
             [this](const QString&, bool) { updateAudioOutputLabel(); });
 
@@ -307,12 +326,14 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
                     });
             };
             const bool fromDependency =
-                matchTrack(file.from, *track) != MatchQuality::None &&
-                (file.fromHotCueBeats[static_cast<std::size_t>(pad)] >= 0.0 ||
+                isReliableTrackMatch(matchTrack(file.from, *track)) &&
+                (hotCueBeatIsMapped(
+                     file.fromHotCueBeats[static_cast<std::size_t>(pad)]) ||
                  roleUsesCue(Role::FromDeck));
             const bool toDependency =
-                matchTrack(file.to, *track) != MatchQuality::None &&
-                (file.toHotCueBeats[static_cast<std::size_t>(pad)] >= 0.0 ||
+                isReliableTrackMatch(matchTrack(file.to, *track)) &&
+                (hotCueBeatIsMapped(
+                     file.toHotCueBeats[static_cast<std::size_t>(pad)]) ||
                  roleUsesCue(Role::ToDeck));
             if ((fromDependency || toDependency) &&
                 !dependentTransitions.contains(file.name)) {
@@ -347,11 +368,17 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     auto wirePadLeds = [this](DeckWidget* deck) {
         connect(deck, &DeckWidget::performancePadStateChanged, midi_,
                 &MidiEngine::setPerformancePadState);
+        connect(deck, &DeckWidget::performancePadStateChanged,
+                transitionPanel_,
+                &TransitionPanel::observePerformancePadState);
         const PerformancePadMode mode = deck->performancePadMode();
-        midi_->setPerformancePadState(
-            deck == deckA_ ? 0 : 1, static_cast<int>(mode),
-            deck->performancePadLedMask(mode),
-            deck->performancePadPressedMask());
+        const int deckIndex = deck == deckA_ ? 0 : 1;
+        const unsigned int enabled = deck->performancePadLedMask(mode);
+        const unsigned int pressed = deck->performancePadPressedMask();
+        midi_->setPerformancePadState(deckIndex, static_cast<int>(mode),
+                                      enabled, pressed);
+        transitionPanel_->observePerformancePadState(
+            deckIndex, static_cast<int>(mode), enabled, pressed);
     };
     wirePadLeds(deckA_);
     wirePadLeds(deckB_);
@@ -527,6 +554,7 @@ void MainWindow::refreshSoftTakeoverUi()
     pickupOverlays_.clear();
 
     const std::vector<SoftTakeoverState> pending = midi_->pendingTakeovers();
+    transitionPanel_->setHardwareTakeovers(pending);
     if (pending.empty()) {
         pickupTimer_->stop();
         pickupPulse_ = false;
@@ -653,6 +681,19 @@ void MainWindow::rebuildAudioOutputMenu()
         QAction* unavailable = audioOutputMenu_->addAction(error);
         unavailable->setEnabled(false);
     }
+
+    audioOutputMenu_->addSeparator();
+    QAction* testPhones = audioOutputMenu_->addAction(
+        tr("Test FLX4 headphones (2 seconds)"));
+    testPhones->setEnabled(engine_->headphoneOutputAvailable());
+    testPhones->setToolTip(
+        tr("Plays a quiet test tone only through FLX4 outputs 3/4"));
+    connect(testPhones, &QAction::triggered, this, [this] {
+        engine_->startHeadphoneTest();
+        statusBar()->showMessage(
+            tr("Playing FLX4 headphone test · raise HEADPHONES LEVEL"),
+            3000);
+    });
 }
 
 void MainWindow::selectAudioOutput(const QString& preferredName)

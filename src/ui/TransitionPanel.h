@@ -1,13 +1,16 @@
 #pragma once
+#include <QColor>
 #include <QList>
 #include <QStringList>
 #include <QWidget>
+#include <array>
 #include <optional>
 #include <vector>
 #include "../audio/AudioEngine.h"
 #include "../control/ControlBus.h"
 #include "../library/TrackLibrary.h"
 #include "../midi/Flx4TutorialMap.h"
+#include "../midi/SoftTakeover.h"
 #include "../transitions/Transition.h"
 #include "../transitions/TransitionEngine.h"
 #include "../transitions/TransitionTolerance.h"
@@ -53,6 +56,13 @@ signals:
 public slots:
     void refreshMatches();  // call on trackLoaded / store changed
     void observeTutorialHardwareControl(const gvt::ControlEvent& event);
+    void observePerformancePadState(int deck, int mode,
+                                    unsigned int enabledMask,
+                                    unsigned int pressedMask);
+
+public:
+    void setHardwareTakeovers(
+        const std::vector<gvt::SoftTakeoverState>& states);
 
 private slots:
     void onRec();
@@ -112,6 +122,8 @@ private:
     void finishTutorialRun();
     void showNextTutorialPrompt();
     void closeTutorialOverlay();
+    void refreshTutorialLiveState();
+    void refreshTutorialGuideLabel();
 
     ControlBus* bus_;
     AudioEngine* engine_;
@@ -137,6 +149,7 @@ private:
     QProgressBar* progress_ = nullptr;
     QLabel* recIndicator_ = nullptr;
     QLabel* setupLabel_ = nullptr;
+    QLabel* tutorialGuideLabel_ = nullptr;
     QLabel* banner_ = nullptr;     // translucent overlay on the main window
     QTimer* bannerTimer_ = nullptr;
     QTimer* stateTimer_ = nullptr;
@@ -151,6 +164,15 @@ private:
     bool tutorialActive_ = false;
     bool tutorialViewOpen_ = false;
     bool takeoverTrackingActive_ = false;
+    std::array<int, 2> tutorialPadMode_ {};
+    std::array<unsigned int, 2> tutorialPadEnabledMask_ {};
+    std::array<unsigned int, 2> tutorialPadPressedMask_ {};
+    std::vector<SoftTakeoverState> tutorialTakeovers_;
+    QString tutorialGuideInstruction_;
+    QString tutorialGuideDetail_;
+    QString tutorialGuideWarning_;
+    QString tutorialGuideFeedback_;
+    QColor tutorialGuideFeedbackColor_;
     TransitionSetupTolerances setupTolerances_;
 };
 

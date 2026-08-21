@@ -83,6 +83,10 @@ Deck B PCM ─▶ tempo/trim/EQ/filter/FX ─┤─▶ channel fader ─┘
   Selecting another master device opens a second four-channel FLX4 stream and
   feeds only its phones 3/4 from a bounded lock-free cue ring. This prevents a
   second audio callback from advancing/rendering either deck again.
+  Because CoreMIDI may enumerate slightly before the USB CoreAudio endpoint,
+  the UI retries that secondary phones stream while the controller is present
+  and reopens a stopped endpoint after hot-plug. The Audio Output menu includes
+  a low-volume phones-only test tone for end-to-end channel 3/4 diagnosis.
   Channel CUE monitors the post-EQ/filter/FX, pre-fader deck signal, unaffected
   by channel faders or the crossfader. HEADPHONES MIX balances that PFL bus
   against master CUE. Without a connected FLX4, master output stays stereo and
@@ -104,7 +108,8 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
 2. Recorder notes the *anchor*: beat position in A when recording starts, and
    the first beat position at which B is playing. It also captures a complete
    role-based pre-transition snapshot: both decks' transport/cue, tempo,
-   channel/EQ/filter, loop, FX and stem state, plus the mixer crossfader.
+   channel/EQ/filter, loop, FX and stem state, plus the mixer crossfader. TRIM
+   is deliberately excluded because input gain remains live DJ state.
 3. Every ControlEvent is logged with a timestamp in **beats relative to anchor**
    (master-deck beats). Beats, not seconds — so a transition recorded at 120 BPM
    replays correctly at 128. When a performance pad caused the audible event,
@@ -121,18 +126,23 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
 6. Perform records which FLX4 absolute controls were changed by setup/replay.
    At the final event, `SoftTakeover` compares their last known physical
    positions with engine truth. If any differ, all controller input is frozen
-   while only TEMPO/channel fader/TRIM/HIGH/MID/LOW/FILTER/crossfader pickup
-   moves are consumed. Crossing the target releases that control; the final
-   pickup re-enables the controller without ever applying a discontinuous
-   hardware value to audio.
+   while only TEMPO/channel fader/HIGH/MID/LOW/FILTER/crossfader pickup moves
+   are consumed. Only controls whose virtual value actually changed are armed.
+   Originally mismatched targets stay monitored until every one is
+   simultaneously inside tolerance, so an aligned knob that is overshot lights
+   up again. The final pickup re-enables the controller without ever applying a
+   discontinuous hardware value to audio.
 
 The top workspace is `Deck A | compact FLX4 mixer | Deck B`; the centered mixer
 starts below the overview-waveform baseline, and the transition panel owns the
 full lower width. TUTOR VIEW is persistent UI state, not a replay command:
 opening it creates a compact overlay over the transition list/event sequence
-and the library below while leaving Perform/Prime visible. Perform gives the
-guided run up to eight beats of pre-anchor countdown; Prime arms the same
-guidance against the live outgoing deck.
+and the library below while leaving Perform/Prime visible. The overlay is a
+large, full virtual FLX4 that mirrors live controls, pad state, LEDs, and
+channel meters; prose/countdown/reset guidance lives in the right control
+panel above CLOSE ENOUGH. Perform gives the guided run up to eight beats of
+pre-anchor countdown; Prime arms the same guidance against the live outgoing
+deck.
 
 ## Testing
 
@@ -151,6 +161,8 @@ Appears as MIDI device "DDJ-FLX4". Mapping constants in
 `src/midi/Flx4Mapping.h` (derived from the public MIDI spec / Mixxx mapping).
 Channels: deck1 = ch0, deck2 = ch1, mixer = ch6. Jog: CC with relative ticks;
 platter touch = note. LEDs: send the same note/CC back with velocity 0/127.
+The two five-segment channel meters use the documented `B0/B1 02` output and
+receive dB-scaled post-EQ/filter/FX, pre-fader peaks every 40 ms.
 Hot-plug: MidiEngine polls port list every 2 s; connect/disconnect anytime.
 Controller disconnect clears any pending soft-takeover gate. Tutorial mode
 does not arm takeover: its FLX4 diagram instead animates continuous controls

@@ -33,7 +33,7 @@ GvtInitialState captureDeckState(const Deck& deck) {
                         : state.positionBeat;
     state.tempoRatio = deck.tempoRatio.load();
     state.fader = deck.fader.load();
-    state.trim = deck.trim.load();
+    state.trimCaptured = false;
     state.eqLow = deck.eqLow.load();
     state.eqMid = deck.eqMid.load();
     state.eqHigh = deck.eqHigh.load();
@@ -113,7 +113,8 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
              e.id <= ControlId::PerformancePad8) ||
             e.id == ControlId::HeadphoneCue ||
             e.id == ControlId::MasterCue ||
-            e.id == ControlId::HeadphoneMix)
+            e.id == ControlId::HeadphoneMix ||
+            e.id == ControlId::Trim)
             return;
 
         if (e.deck >= 0 && e.deck < kNumDecks &&
@@ -128,7 +129,8 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
                 // Preserve the assignment at the first recorded use. A pad
                 // edited later in the same take must not rewrite what the
                 // earlier gesture actually meant.
-                if (mappings[static_cast<std::size_t>(pad)] < 0.0)
+                if (!hotCueBeatIsMapped(
+                        mappings[static_cast<std::size_t>(pad)]))
                     mappings[static_cast<std::size_t>(pad)] =
                         track->beatAtSec(track->hotCues[pad]);
             }
@@ -209,8 +211,8 @@ void TransitionRecorder::start(int fromDeck) {
     im.haveDeckTrackBeat = true;
     im.timelineClock.start();
     im.lastTimelineNs = 0;
-    im.fromHotCueBeats.fill(-1.0);
-    im.toHotCueBeats.fill(-1.0);
+    im.fromHotCueBeats.fill(kUnmappedHotCueBeat);
+    im.toHotCueBeats.fill(kUnmappedHotCueBeat);
     im.events.clear();
     im.gesturePending = false;
     im.gestureDeck = kNoDeck;
@@ -339,7 +341,7 @@ GvtFile TransitionRecorder::finish() {
         if (!std::isfinite(sec) || sec < 0.0) continue;
         auto& mappings = event.role == Role::FromDeck
                              ? f.fromHotCueBeats : f.toHotCueBeats;
-        if (mappings[static_cast<std::size_t>(pad)] < 0.0)
+        if (!hotCueBeatIsMapped(mappings[static_cast<std::size_t>(pad)]))
             mappings[static_cast<std::size_t>(pad)] = track->beatAtSec(sec);
     }
 
@@ -381,7 +383,7 @@ GvtFile TransitionRecorder::finish() {
     f.initialCrossfader = q(f.initialCrossfader, 0.001);
     for (auto* mappings : {&f.fromHotCueBeats, &f.toHotCueBeats})
         for (double& beat : *mappings)
-            if (std::isfinite(beat) && beat >= 0.0) beat = q(beat, kPrecise);
+            if (hotCueBeatIsMapped(beat)) beat = q(beat, kPrecise);
     for (GvtEvent& e : f.events) {
         e.beat = q(e.beat, kPrecise);
         e.value = q(e.value,

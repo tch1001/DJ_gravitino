@@ -63,6 +63,20 @@ std::optional<Flx4TutorialMapping> flx4TutorialMapping(
                                     pad, Flx4PadMode::HotCue, false};
     }
 
+    case ControlId::SavedLoop1:
+    case ControlId::SavedLoop2:
+    case ControlId::SavedLoop3:
+    case ControlId::SavedLoop4:
+    case ControlId::SavedLoop5:
+    case ControlId::SavedLoop6:
+    case ControlId::SavedLoop7:
+    case ControlId::SavedLoop8: {
+        const int pad = static_cast<int>(id) -
+                        static_cast<int>(ControlId::SavedLoop1);
+        return Flx4TutorialMapping {Flx4SurfaceControl::PerformancePad,
+                                    pad, Flx4PadMode::Custom, false};
+    }
+
     case ControlId::LoopAuto:
         // The mapped FLX4 button is specifically 4 BEAT/EXIT. Other auto-loop
         // lengths exist in Gravitino's screen UI but have no single mapped

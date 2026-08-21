@@ -121,7 +121,8 @@ bool roleFromLetter(const QString& s, Role& out) {
 
 bool triggerNeedsValue(ControlId id) {
     return id == ControlId::Cue ||
-           (id >= ControlId::HotCue1 && id <= ControlId::HotCue8);
+           (id >= ControlId::HotCue1 && id <= ControlId::HotCue8) ||
+           (id >= ControlId::SavedLoop1 && id <= ControlId::SavedLoop8);
 }
 
 const char* curveName(Curve c) {
@@ -199,7 +200,10 @@ void storeKnownKv(GvtFile& out, Section sec, const QString& secName,
         else if (deckKey == QLatin1String("cue_beat"))        state.cueBeat = asDouble();
         else if (deckKey == QLatin1String("tempo_ratio"))     state.tempoRatio = asDouble();
         else if (deckKey == QLatin1String("fader"))           state.fader = asDouble();
-        else if (deckKey == QLatin1String("trim"))            state.trim = asDouble();
+        else if (deckKey == QLatin1String("trim")) {
+            state.trim = asDouble();
+            state.trimCaptured = true;
+        }
         else if (deckKey == QLatin1String("eq_low"))          state.eqLow = asDouble();
         else if (deckKey == QLatin1String("eq_mid"))          state.eqMid = asDouble();
         else if (deckKey == QLatin1String("eq_high"))         state.eqHigh = asDouble();
@@ -490,7 +494,8 @@ QString gvtSerialize(const GvtFile& f) {
             };
             s += kvLine(key("tempo_ratio"), fmtNum(state.tempoRatio, 3, 6));
             s += kvLine(key("fader"), fmtNum(state.fader, 3, 6));
-            s += kvLine(key("trim"), fmtNum(state.trim, 3, 6));
+            if (state.trimCaptured)
+                s += kvLine(key("trim"), fmtNum(state.trim, 3, 6));
             s += kvLine(key("eq_low"), fmtNum(state.eqLow, 3, 6));
             s += kvLine(key("eq_mid"), fmtNum(state.eqMid, 3, 6));
             s += kvLine(key("eq_high"), fmtNum(state.eqHigh, 3, 6));
@@ -529,7 +534,9 @@ QString gvtSerialize(const GvtFile& f) {
 
     const auto hasHotCueMappings = [](const std::array<double, 8>& mappings) {
         return std::any_of(mappings.begin(), mappings.end(),
-                           [](double beat) { return beat >= 0.0; });
+                           [](double beat) {
+                               return hotCueBeatIsMapped(beat);
+                           });
     };
     if (hasHotCueMappings(f.fromHotCueBeats) ||
         hasHotCueMappings(f.toHotCueBeats) || !hotCuesX.empty()) {
@@ -538,8 +545,8 @@ QString gvtSerialize(const GvtFile& f) {
         const auto writeMappings = [&s](char role,
                                         const std::array<double, 8>& mappings) {
             for (int pad = 0; pad < static_cast<int>(mappings.size()); ++pad) {
-                if (!std::isfinite(mappings[static_cast<std::size_t>(pad)]) ||
-                    mappings[static_cast<std::size_t>(pad)] < 0.0)
+                if (!hotCueBeatIsMapped(
+                        mappings[static_cast<std::size_t>(pad)]))
                     continue;
                 s += kvLine(
                     QStringLiteral("%1%2").arg(QLatin1Char(role)).arg(pad + 1),

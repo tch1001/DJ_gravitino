@@ -295,6 +295,7 @@ struct MidiEngine::Impl {
             takeover.clearHardware();
             takeoverTracking = false;
             takeoverTouched.clear();
+            takeoverStartValues.clear();
             takeoverFrozen.store(false, std::memory_order_release);
             emit owner->softTakeoverChanged();
         }
@@ -867,8 +868,38 @@ struct MidiEngine::Impl {
         }
     }
 
+    void reconcileChannelMeters() noexcept
+    {
+        if (engine == nullptr || !connected)
+            return;
+        for (DeckId deck = 0; deck < 2; ++deck) {
+            const float peak = std::clamp(
+                engine->deck(deck).channelLevel.load(
+                    std::memory_order_relaxed),
+                0.0f, 1.0f);
+            unsigned char value = 0;
+            if (peak > 0.0001f) {
+                // Map -48 dBFS..0 dBFS onto the FLX4's documented 0..127
+                // meter value. Its firmware converts this into two green,
+                // two orange, and one red segment.
+                const double db = 20.0 * std::log10(
+                    static_cast<double>(peak));
+                const double normalized = std::clamp(
+                    (db + 48.0) / 48.0, 0.0, 1.0);
+                value = static_cast<unsigned char>(
+                    std::lround(normalized * 127.0));
+            }
+            const auto index = static_cast<std::size_t>(deck);
+            if (channelMeter[index] == value)
+                continue;
+            channelMeter[index] = value;
+            sendRaw(Flx4Mapping::channelLevelMessage(deck, value));
+        }
+    }
+
     void syncLedState() noexcept
     {
+        channelMeter.fill(0xFF);
         for (DeckId deck = 0; deck < 2; ++deck) {
             const auto index = static_cast<std::size_t>(deck);
             if (engine != nullptr) {
@@ -911,6 +942,7 @@ struct MidiEngine::Impl {
             }
             sendPerformancePadState(deck);
         }
+        reconcileChannelMeters();
     }
 
     double engineValue(DeckId deck, ControlId id) const noexcept
@@ -936,6 +968,21 @@ struct MidiEngine::Impl {
     {
         takeover.clear();
         takeoverTouched.clear();
+        takeoverStartValues.clear();
+        if (engine != nullptr) {
+            static constexpr ControlId deckControls[] = {
+                ControlId::Tempo, ControlId::Fader,
+                ControlId::EqHigh, ControlId::EqMid, ControlId::EqLow,
+                ControlId::Filter};
+            for (DeckId deck = 0; deck < 2; ++deck)
+                for (ControlId control : deckControls)
+                    takeoverStartValues[{deck,
+                        static_cast<unsigned int>(control)}] =
+                            engineValue(deck, control);
+            takeoverStartValues[{kNoDeck,
+                static_cast<unsigned int>(ControlId::Crossfader)}] =
+                    engineValue(kNoDeck, ControlId::Crossfader);
+        }
         takeoverTracking = true;
         takeoverFrozen.store(false, std::memory_order_release);
         emit owner->softTakeoverChanged();
@@ -947,6 +994,7 @@ struct MidiEngine::Impl {
         if (!connected || takeoverTouched.empty()) {
             takeover.clear();
             takeoverTouched.clear();
+            takeoverStartValues.clear();
             takeoverFrozen.store(false, std::memory_order_release);
             emit owner->softTakeoverChanged();
             return;
@@ -956,10 +1004,19 @@ struct MidiEngine::Impl {
         targets.reserve(takeoverTouched.size());
         for (const auto& [deck, rawControl] : takeoverTouched) {
             const ControlId control = static_cast<ControlId>(rawControl);
-            targets.push_back(
-                ControlEvent {deck, control, engineValue(deck, control)});
+            const double finalValue = engineValue(deck, control);
+            const auto start = takeoverStartValues.find({deck, rawControl});
+            // Only require pickup for a control whose authoritative virtual
+            // value actually changed during this replay. Setup dispatches of
+            // already-correct state must not make an untouched FLX4 control
+            // look invalid.
+            if (start != takeoverStartValues.end() &&
+                std::fabs(start->second - finalValue) <= 1.0e-6)
+                continue;
+            targets.push_back(ControlEvent {deck, control, finalValue});
         }
         takeoverTouched.clear();
+        takeoverStartValues.clear();
         takeover.arm(targets);
         takeoverFrozen.store(takeover.active(), std::memory_order_release);
         emit owner->softTakeoverChanged();
@@ -982,6 +1039,7 @@ struct MidiEngine::Impl {
     std::array<bool, 2> headphoneCue {};
     std::array<bool, 2> quantize {true, true};
     std::array<std::array<bool, 8>, 2> hotCue {};
+    std::array<unsigned char, 2> channelMeter {0xFF, 0xFF};
     std::array<int, 2> padMode {
         static_cast<int>(PerformancePadMode::HotCue),
         static_cast<int>(PerformancePadMode::HotCue)};
@@ -996,6 +1054,7 @@ struct MidiEngine::Impl {
     SoftTakeover takeover;
     bool takeoverTracking = false;
     std::set<std::pair<DeckId, unsigned int>> takeoverTouched;
+    std::map<std::pair<DeckId, unsigned int>, double> takeoverStartValues;
     std::atomic_bool takeoverFrozen {false};
 };
 
@@ -1009,6 +1068,11 @@ MidiEngine::MidiEngine(
     connect(ledTimer, &QTimer::timeout, this,
             [this] { impl_->reconcileTransportLeds(); });
     ledTimer->start();
+    auto* meterTimer = new QTimer(this);
+    meterTimer->setInterval(40);
+    connect(meterTimer, &QTimer::timeout, this,
+            [this] { impl_->reconcileChannelMeters(); });
+    meterTimer->start();
 }
 
 MidiEngine::~MidiEngine() = default;

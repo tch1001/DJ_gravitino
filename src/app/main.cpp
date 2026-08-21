@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDir>
+#include <QDebug>
 #include <QLockFile>
 #include <QMessageBox>
 #include <QSettings>
@@ -83,6 +84,16 @@ int main(int argc, char** argv)
     gvt::MainWindow win(bus, engine, library, store, recorder, player, midi,
                         masterRec, stems);
     win.show();
+
+    if (args.contains(QStringLiteral("--cue-test"))) {
+        QTimer::singleShot(1500, &win, [engine] {
+            engine->startHeadphoneTest(4000);
+        });
+        QTimer::singleShot(2200, &win, [engine] {
+            qInfo().noquote() << "FLX4 headphone diagnostic signal peak:"
+                              << engine->headphoneSignalLevel();
+        });
+    }
 
     if (!savedOutputWarning.isEmpty()) {
         QTimer::singleShot(0, &win, [&win, savedOutputWarning] {

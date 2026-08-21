@@ -161,26 +161,55 @@ int main()
     const GvtFile recorded = recorder.finish();
     CHECK(std::fabs(recorded.fromHotCueBeats[0] - 2.0) < 1e-6);
 
-    // A combined sampler/saved-loop pad retriggers audio directly, then
-    // publishes PLAY so a transition retains the incoming start gesture and
-    // captures the loop IN point as its replay anchor.
-    CHECK(engine.deck(1).activateSavedLoop(0.5, 1.5));
-    engine.deck(1).stop();
+    // Audio before the detected first downbeat has a negative but fully valid
+    // grid position. Recording must retain it instead of treating it as an
+    // unset hot-cue mapping.
+    track->firstBeatSec = 2.0;
+    track->hotCues[0] = 0.5;
     recorder.start(0);
-    CHECK(engine.deck(1).retriggerSavedLoop(0.5, 1.5));
-    bus.dispatch({1, ControlId::Play, 1.0}, Origin::Ui);
+    bus.dispatch({0, ControlId::HotCue1, 1.0}, Origin::Ui);
+    bus.dispatch({0, ControlId::HotCue1, 0.0}, Origin::Ui);
+    const GvtFile negativeCueRecorded = recorder.finish();
+    CHECK(std::fabs(negativeCueRecorded.fromHotCueBeats[0] + 3.0) < 1e-6);
+    track->firstBeatSec = 0.0;
+
+    // A combined CUSTOM/saved-loop pad has the same hold/PLAY-latch contract
+    // as a hot cue, and its release-aware event is transition-recordable.
+    incoming->savedLoops[0].startSec = 0.5;
+    incoming->savedLoops[0].endSec = 1.5;
+    incoming->savedLoops[0].label = QStringLiteral("Intro loop");
+    engine.deck(1).stop();
+    engine.deck(1).loopExit();
+    recorder.start(0);
+    bus.dispatch({1, ControlId::SavedLoop1, 1.0}, Origin::Ui);
+    CHECK(engine.deck(1).previewActive());
+    CHECK(engine.deck(1).playing.load());
+    CHECK(std::fabs(engine.deck(1).positionSec() - 0.5) < 1e-6);
+    engine.renderOffline(scratch, 480);
+    bus.dispatch({1, ControlId::SavedLoop1, 0.0}, Origin::Ui);
+    CHECK(!engine.deck(1).previewActive());
+    CHECK(!engine.deck(1).playing.load());
+    CHECK(std::fabs(engine.deck(1).positionSec() - 0.5) < 1e-6);
     const GvtFile loopRecorded = recorder.finish();
-    bool foundIncomingPlay = false;
+    bool foundLoopPress = false;
+    bool foundLoopRelease = false;
     for (const GvtEvent& event : loopRecorded.events) {
         if (event.role == Role::ToDeck &&
-            event.control == ControlId::Play) {
-            foundIncomingPlay = true;
-            break;
-        }
+            event.control == ControlId::SavedLoop1)
+            event.value >= 0.5 ? foundLoopPress = true
+                               : foundLoopRelease = true;
     }
-    CHECK(foundIncomingPlay);
+    CHECK(foundLoopPress && foundLoopRelease);
     CHECK(std::fabs(loopRecorded.anchorToBeat - 1.0) < 1e-6);
-    CHECK(loopRecorded.initialTo.loopActive);
+
+    bus.dispatch({1, ControlId::SavedLoop1, 1.0}, Origin::Ui);
+    engine.renderOffline(scratch, 480);
+    bus.dispatch({1, ControlId::Play, 1.0}, Origin::Ui);
+    CHECK(!engine.deck(1).previewActive());
+    const double savedLoopLatchedSec = engine.deck(1).positionSec();
+    bus.dispatch({1, ControlId::SavedLoop1, 0.0}, Origin::Ui);
+    CHECK(engine.deck(1).playing.load());
+    CHECK(engine.deck(1).positionSec() >= savedLoopLatchedSec);
 
     if (failures) return 1;
     std::printf("test_hotcue: quantize, hold-preview, and release-return passed\n");

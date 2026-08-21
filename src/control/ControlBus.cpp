@@ -42,6 +42,14 @@ constexpr NameEntry kNames[] = {
     {ControlId::PerformancePad7, "performance_pad_7"},
     {ControlId::PerformancePad8, "performance_pad_8"},
     {ControlId::PlatterTouch, "platter_touch"},
+    {ControlId::SavedLoop1, "saved_loop_1"},
+    {ControlId::SavedLoop2, "saved_loop_2"},
+    {ControlId::SavedLoop3, "saved_loop_3"},
+    {ControlId::SavedLoop4, "saved_loop_4"},
+    {ControlId::SavedLoop5, "saved_loop_5"},
+    {ControlId::SavedLoop6, "saved_loop_6"},
+    {ControlId::SavedLoop7, "saved_loop_7"},
+    {ControlId::SavedLoop8, "saved_loop_8"},
 };
 } // namespace
 
@@ -62,6 +70,10 @@ bool controlIsTrigger(ControlId id) {
         case ControlId::PerformancePad5: case ControlId::PerformancePad6:
         case ControlId::PerformancePad7: case ControlId::PerformancePad8:
         case ControlId::PlatterTouch:
+        case ControlId::SavedLoop1: case ControlId::SavedLoop2:
+        case ControlId::SavedLoop3: case ControlId::SavedLoop4:
+        case ControlId::SavedLoop5: case ControlId::SavedLoop6:
+        case ControlId::SavedLoop7: case ControlId::SavedLoop8:
             return true;
         // LoopAuto/BeatJump carry a beats value; Filter is continuous.
         default:

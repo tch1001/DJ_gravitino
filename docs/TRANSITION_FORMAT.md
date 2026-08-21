@@ -52,7 +52,6 @@ position_beat = 224.000
 cue_beat    = 224.000
 tempo_ratio = 1.000
 fader       = 1.000
-trim        = 0.500
 eq_low      = 0.500
 eq_mid      = 0.500
 eq_high     = 0.500
@@ -74,7 +73,6 @@ to_position_beat = 32.000
 to_cue_beat = 32.000
 to_tempo_ratio = 1.000
 to_fader    = 0.000
-to_trim     = 0.500
 to_eq_low   = 0.500
 to_eq_mid   = 0.500
 to_eq_high  = 0.500
@@ -125,10 +123,13 @@ b1          = 32.000
   recordings set `complete = 1` and snapshot both role-based decks plus the
   mixer crossfader. Unprefixed keys are the outgoing deck; `to_*` keys are the
   incoming deck. The snapshot covers transport/cue position, tempo, channel
-  level, trim, EQ, filter, Quantize, loops, FX, and stem levels. Perform
+  level, EQ, filter, Quantize, loops, FX, and stem levels. TRIM is intentionally
+  not part of new transition state: it is input gain and must remain under the
+  DJ's current control. Perform
   reconstructs it before rolling; Prime prepares it immediately and reasserts
   transport state at the entry boundary. Older partial sections containing
-  only the outgoing tempo/gain/EQ/filter keys remain supported.
+  only the outgoing tempo/gain/EQ/filter keys remain supported. Legacy `trim`
+  and `to_trim` keys still parse but are ignored by setup/replay.
 - **`[cues]`** is optional and holds user labels as `beat = label`. Labels are
   annotations only: they populate the event preview and waveform markers.
   `#`, `;`, and line breaks are reserved because they delimit comments/lines.
@@ -136,7 +137,9 @@ b1          = 32.000
   every hot-cue pad referenced by the transition. Keys use role + pad (`a1` is
   outgoing pad 1, `b8` incoming pad 8). Tutorial mode compares these positions
   with the loaded tracks and warns about missing, unverifiable, or mismatched
-  assignments. Legacy files without this section still load normally.
+  assignments. Negative values are valid for cues in audio before the detected
+  first downbeat; an omitted key, rather than a negative number, means that the
+  mapping is unavailable. Legacy files without this section still load normally.
 - **`[events]`** holds one event per line, whitespace-separated columns:
 
   `beat  target  control  [value]  [curve]  [via=gesture@mode]`
@@ -147,15 +150,17 @@ b1          = 32.000
     outgoing track sits.
   - `control` — see table below.
   - `value` — normalized number (most controls 0..1; tempo in ratio; jog in
-    signed ticks). Omitted for ordinary trigger controls. `cue` and
-    `hotcue_1..8` retain `1` press / `0` release values for hold-preview.
+    signed ticks). Omitted for ordinary trigger controls. `cue`,
+    `hotcue_1..8`, and `saved_loop_1..8` retain `1` press / `0` release values
+    for hold-preview.
   - `curve` — optional: `step` (default), `linear`, `scurve`. Non-step means
     "glide from this control's previous value, arriving at `value` on `beat`,
     starting where the previous event for the same (target, control) ended."
   - `via` — optional physical gesture that produced the state change. Replay
     still executes `control`; Tutorial uses `via` for accurate coaching. For
-    example, `play via=performance_pad_3@custom` means CUSTOM pad 3 started a
-    captured loop, so the tutor highlights that pad instead of PLAY. Stable pad
+    example, `saved_loop_3 1 via=performance_pad_3@custom` means CUSTOM pad 3
+    started a captured loop, so the tutor highlights that pad instead of PLAY.
+    Stable pad
     mode names are `hot_cue`, `pad_fx1`, `beat_jump`, `custom`, `keyboard`,
     `pad_fx2`, `beat_loop`, and `key_shift`. Files without `via` remain fully
     compatible and are taught from their state control as before.
@@ -171,10 +176,11 @@ b1          = 32.000
 | `tempo`      | a,b     | playback ratio, 1.0 = native   |
 | `quantize`   | a,b     | per-deck hot-cue/manual-loop snapping, 0 or 1 |
 | `fader`      | a,b     | 0..1 channel fader             |
-| `trim`       | a,b     | 0..1 gain knob                 |
+| `trim`       | a,b     | legacy only; parsed but no longer recorded/applied |
 | `eq_low`,`eq_mid`,`eq_high` | a,b | 0..1 (0.5 = flat, 0 = kill) |
 | `xfader`     | x       | 0 = outgoing ... 1 = incoming (role space) |
 | `hotcue_1..8`| a,b     | 1 press: play from cue; 0 release: stop and return |
+| `saved_loop_1..8` | a,b | 1 press: preview stored loop; 0 release: stop and return unless PLAY latched |
 | `jog`        | a,b     | signed nudge ticks (not recorded) |
 | `loop_auto`  | a,b     | loop length in beats (starts beat-snapped loop) |
 | `loop_in`,`loop_out`,`loop_exit`,`loop_halve`,`loop_double` | a,b | (trigger) |
@@ -206,4 +212,7 @@ versions add controls, old players still perform the rest of the blend.
 mono PCM decimated to 11025 Hz, 8-bit quantized. Cheap, robust to
 tag/filename edits, not robust to remasters — so matching is tiered:
 exact fingerprint ▸ (title+artist, case-folded) ▸ duration within ±1.5 s.
-The UI shows match confidence when offering transitions for a loaded pair.
+Fingerprint or title+artist identity is required for every operational action:
+Perform, Tutorial, transition auto-loading, hot-cue dependency checks, and
+playing-track prioritization. Duration-only similarity is a weak discovery hint
+and must never authorize a transition for a loaded track by itself.

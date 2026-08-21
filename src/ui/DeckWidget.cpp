@@ -1116,8 +1116,8 @@ void DeckWidget::syncPerformancePadUi()
                 color = QStringLiteral("#e8a13a");
                 button->setText(slot->label.isEmpty()
                     ? tr("L%1").arg(pad + 1) : slot->label.left(8));
-                tooltip = tr("Start captured loop %1 (%2–%3 s); every press "
-                             "restarts from its beginning. Use LOOP EXIT to leave it. "
+                tooltip = tr("Hold captured loop %1 (%2–%3 s) to preview; "
+                             "press PLAY while held to continue. Use LOOP EXIT to leave it. "
                              "Right-click to rename, replace, or clear")
                               .arg(pad + 1)
                               .arg(slot->startSec, 0, 'f', 2)
@@ -1134,8 +1134,8 @@ void DeckWidget::syncPerformancePadUi()
                 color = QStringLiteral("#e8a13a");
                 button->setText(slot->label.isEmpty()
                     ? tr("L%1").arg(pad + 1) : slot->label.left(8));
-                tooltip = tr("Start captured loop %1 (%2–%3 s); every press restarts "
-                             "from its beginning. Use LOOP EXIT to leave it. "
+                tooltip = tr("Hold captured loop %1 (%2–%3 s) to preview; press PLAY "
+                             "while held to continue. Use LOOP EXIT to leave it. "
                              "Right-click to edit the CUSTOM assignment")
                               .arg(pad + 1)
                               .arg(slot->startSec, 0, 'f', 2)
@@ -1199,7 +1199,16 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
         } else if (assignment.action == PerformancePadAction::FxHold) {
             dispatchPerformancePadGesture(pressedMode, pad);
             endPadFx(pad);
+        } else if (assignment.action == PerformancePadAction::SavedLoop ||
+                   assignment.action == PerformancePadAction::SamplerSlot) {
+            if (padReleasePending_[pad]) {
+                dispatchPerformancePadGesture(pressedMode, pad);
+                const auto id = static_cast<ControlId>(
+                    static_cast<int>(ControlId::SavedLoop1) + pad);
+                dispatch(id, 0.0);
+            }
         }
+        padReleasePending_[pad] = false;
         padIsPressed_[pad] = false;
         syncPerformancePadUi();
         return;
@@ -1220,6 +1229,7 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
     }
 
     padIsPressed_[pad] = true;
+    padReleasePending_[pad] = false;
     pressedPadModes_[pad] = padMode_;
     switch (assignment.action) {
     case PerformancePadAction::HotCue: {
@@ -1269,21 +1279,18 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
             emit trackPerformanceMetadataChanged(deckIndex_);
             showPadFeedback(tr("Saved active loop to %1").arg(slot.label));
         } else {
-            if (deck.retriggerSavedLoop(slot.startSec, slot.endSec)) {
-                // retriggerSavedLoop() updates audio immediately; publish an
-                // idempotent PLAY as the musical gesture so transition
-                // recording captures both its outgoing-relative time and the
-                // incoming deck's exact loop-start anchor. Replay seeks to
-                // that anchor before applying PLAY.
-                dispatchPerformancePadGesture(padMode_, pad);
-                dispatch(ControlId::Play);
-                showPadFeedback(tr("Started %1").arg(
-                    slot.label.isEmpty() ? tr("captured loop %1").arg(pad + 1)
+            // Saved-loop pads are release-aware transition events. The deck
+            // previews while held and PLAY takes ownership exactly like a hot
+            // cue, so releasing after PLAY cannot stop or rewind transport.
+            dispatchPerformancePadGesture(padMode_, pad);
+            const auto id = static_cast<ControlId>(
+                static_cast<int>(ControlId::SavedLoop1) + pad);
+            dispatch(id, 1.0);
+            padReleasePending_[pad] = true;
+            showPadFeedback(tr("Hold %1 to preview · press PLAY to continue")
+                                .arg(slot.label.isEmpty()
+                                         ? tr("captured loop %1").arg(pad + 1)
                                          : slot.label));
-            } else {
-                showPadFeedback(tr("Could not start captured loop %1")
-                                    .arg(pad + 1));
-            }
         }
         waveform_->update();
         break;
@@ -1298,9 +1305,12 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
         break;
     }
 
-    // Trigger-only pads do not need a later release. HOT CUE and FX do.
+    // Trigger-only pads do not need a later release. HOT CUE, saved-loop
+    // previews, and momentary FX do.
     if (assignment.action != PerformancePadAction::HotCue &&
-        assignment.action != PerformancePadAction::FxHold)
+        assignment.action != PerformancePadAction::FxHold &&
+        assignment.action != PerformancePadAction::SavedLoop &&
+        assignment.action != PerformancePadAction::SamplerSlot)
         padIsPressed_[pad] = false;
     syncPerformancePadUi();
 }

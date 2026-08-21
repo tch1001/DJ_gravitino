@@ -99,7 +99,9 @@ TransitionStore::matching(const TrackData& from, const TrackData& to) const
     for (const GvtFile& f : impl_->files) {
         const MatchQuality qf = matchTrack(f.from, from);
         const MatchQuality qt = matchTrack(f.to, to);
-        if (qf == MatchQuality::None || qt == MatchQuality::None) continue;
+        // Duration alone is far too collision-prone to authorize Perform,
+        // Tutorial, auto-load, or hot-cue expectations for another song.
+        if (!isReliableTrackMatch(qf) || !isReliableTrackMatch(qt)) continue;
         const int pair = (int)std::min(qf, qt);          // tier = weaker side
         scored.push_back({&f, pair * 16 + (int)qf + (int)qt});
     }

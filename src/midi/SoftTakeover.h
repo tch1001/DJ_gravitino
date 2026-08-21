@@ -36,7 +36,7 @@ public:
     // remains exactly at its replayed value; the next physical move flows.
     bool acceptHardware(const ControlEvent& event, bool* stateChanged = nullptr);
 
-    bool active() const noexcept { return !pending_.empty(); }
+    bool active() const noexcept { return !targets_.empty(); }
     std::vector<SoftTakeoverState> pending() const;
 
 private:
@@ -59,7 +59,10 @@ private:
     }
 
     std::map<Key, HardwareValue> hardware_;
-    std::map<Key, double> pending_;
+    // Targets remain armed until every originally mismatched control is
+    // simultaneously inside tolerance. `pending()` derives the currently
+    // mismatched subset, allowing a knob that overshoots to light up again.
+    std::map<Key, double> targets_;
 };
 
 } // namespace gvt

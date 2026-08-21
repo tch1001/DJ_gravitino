@@ -3,6 +3,8 @@
 #include "../../third_party/miniaudio.h"
 #include "../audio/MasterRecorder.h"
 
+#include <QDebug>
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -29,7 +31,8 @@ bool isReleaseAwareTrigger(ControlId id) noexcept
 {
     return id == ControlId::Cue ||
         id == ControlId::PlatterTouch ||
-        (id >= ControlId::HotCue1 && id <= ControlId::HotCue8);
+        (id >= ControlId::HotCue1 && id <= ControlId::HotCue8) ||
+        (id >= ControlId::SavedLoop1 && id <= ControlId::SavedLoop8);
 }
 
 } // namespace
@@ -48,6 +51,9 @@ struct AudioEngine::Impl {
     std::array<float, kCueRingFrames * 2U> cueRing {};
     std::atomic<std::uint64_t> cueWriteFrame {0};
     std::atomic<std::uint64_t> cueReadFrame {0};
+    std::atomic<int> headphoneTestFrames {0};
+    std::atomic<float> headphoneSignalPeak {0.0f};
+    double headphoneTestPhase = 0.0;
     ma_context context {};
     ma_device device {};
     ma_device cueDevice {};
@@ -140,6 +146,7 @@ struct AudioEngine::Impl {
         }
         const int readable = static_cast<int>(std::min<std::uint64_t>(
             available, static_cast<std::uint64_t>(frames)));
+        float outputPeak = 0.0f;
         for (int frame = 0; frame < readable; ++frame) {
             const std::size_t ringFrame = static_cast<std::size_t>(
                 (read + static_cast<std::uint64_t>(frame)) % kCueRingFrames);
@@ -149,13 +156,40 @@ struct AudioEngine::Impl {
             if (channels >= kFlx4Channels) {
                 output[destination + 2U] = cueRing[ringFrame * 2U];
                 output[destination + 3U] = cueRing[ringFrame * 2U + 1U];
+                outputPeak = std::max(
+                    {outputPeak,
+                     std::fabs(output[destination + 2U]),
+                     std::fabs(output[destination + 3U])});
             } else if (channels >= 2) {
                 output[destination] = cueRing[ringFrame * 2U];
                 output[destination + 1U] = cueRing[ringFrame * 2U + 1U];
+                outputPeak = std::max(
+                    {outputPeak,
+                     std::fabs(output[destination]),
+                     std::fabs(output[destination + 1U])});
             }
         }
+        const float previousPeak = headphoneSignalPeak.load(
+            std::memory_order_relaxed);
+        headphoneSignalPeak.store(
+            std::clamp(std::max(outputPeak, previousPeak * 0.90f),
+                       0.0f, 1.0f),
+            std::memory_order_relaxed);
         cueReadFrame.store(read + static_cast<std::uint64_t>(readable),
                            std::memory_order_release);
+    }
+
+    static bool deviceIsActive(const ma_device& candidate) noexcept
+    {
+        const ma_device_state state = ma_device_get_state(&candidate);
+        return state == ma_device_state_starting ||
+               state == ma_device_state_started;
+    }
+
+    bool cueOutputActive() const noexcept
+    {
+        return cueDeviceStarted && cueDeviceInitialized &&
+               deviceIsActive(cueDevice);
     }
 
     void renderMix(float* output, int frames, int outputChannels,
@@ -197,12 +231,29 @@ struct AudioEngine::Impl {
             const float masterGain = !monitorMaster || monitorMix == 0.0f
                                          ? 0.0f : std::sin(monitorAngle);
             const float cueBusGain = monitorA && monitorB ? 0.5f : 1.0f;
+            float chunkPhonePeak = 0.0f;
 
             for (int frame = 0; frame < chunkFrames; ++frame) {
                 const std::size_t stereo = static_cast<std::size_t>(frame) * 2U;
                 const std::size_t destination =
                     static_cast<std::size_t>(rendered + frame) *
                     static_cast<std::size_t>(outputChannels);
+                const int testFrames = headphoneTestFrames.load(
+                    std::memory_order_relaxed);
+                float headphoneTestSample = 0.0f;
+                if (testFrames > 0) {
+                    headphoneTestSample = static_cast<float>(
+                        std::sin(headphoneTestPhase) * 0.12);
+                    headphoneTestPhase +=
+                        2.0 * std::numbers::pi_v<double> * 440.0 /
+                        static_cast<double>(kSampleRate);
+                    if (headphoneTestPhase >=
+                        2.0 * std::numbers::pi_v<double>)
+                        headphoneTestPhase -=
+                            2.0 * std::numbers::pi_v<double>;
+                    headphoneTestFrames.fetch_sub(1,
+                        std::memory_order_relaxed);
+                }
                 for (int channel = 0; channel < 2; ++channel) {
                     const std::size_t sample =
                         stereo + static_cast<std::size_t>(channel);
@@ -219,13 +270,29 @@ struct AudioEngine::Impl {
                     cueSample *= cueBusGain;
                     const float phoneSample = std::clamp(
                         std::tanh(cueSample * cueGain) +
-                            masterSample * masterGain,
+                            masterSample * masterGain + headphoneTestSample,
                         -1.0f, 1.0f);
                     phones[sample] = phoneSample;
+                    chunkPhonePeak = std::max(
+                        chunkPhonePeak, std::fabs(phoneSample));
                     if (outputChannels >= kFlx4Channels)
                         output[destination + 2U +
                                static_cast<std::size_t>(channel)] = phoneSample;
                 }
+            }
+
+            // With a four-channel primary FLX4 stream, this buffer is already
+            // the hardware callback output. With split MacBook/Bluetooth +
+            // FLX4 routing, readCueRing() records the level only after the
+            // secondary device callback has copied it into outputs 3/4.
+            if (outputChannels >= kFlx4Channels) {
+                const float previousPhonePeak = headphoneSignalPeak.load(
+                    std::memory_order_relaxed);
+                headphoneSignalPeak.store(
+                    std::clamp(std::max(chunkPhonePeak,
+                                        previousPhonePeak * 0.90f),
+                               0.0f, 1.0f),
+                    std::memory_order_relaxed);
             }
 
             if (feedCueRing)
@@ -242,8 +309,19 @@ struct AudioEngine::Impl {
 
     bool startFlx4CueDevice()
     {
-        if (fourChannelOutput || cueDeviceStarted || !contextInitialized)
-            return fourChannelOutput || cueDeviceStarted;
+        if (fourChannelOutput || !contextInitialized)
+            return fourChannelOutput;
+        if (cueOutputActive())
+            return true;
+        // CoreAudio stops a device when its USB endpoint disappears. Clear
+        // the stale miniaudio object so a later hot-plug retry can reopen it.
+        if (cueDeviceInitialized) {
+            if (cueDeviceStarted)
+                ma_device_stop(&cueDevice);
+            ma_device_uninit(&cueDevice);
+            cueDeviceInitialized = false;
+            cueDeviceStarted = false;
+        }
 
         ma_device_info* playback = nullptr;
         ma_uint32 playbackCount = 0;
@@ -273,15 +351,38 @@ struct AudioEngine::Impl {
         config.noClip = MA_TRUE;
         config.dataCallback = &Impl::cueDataCallback;
         config.pUserData = this;
-        if (ma_device_init(&context, &config, &cueDevice) != MA_SUCCESS)
+        const ma_result initResult =
+            ma_device_init(&context, &config, &cueDevice);
+        if (initResult != MA_SUCCESS) {
+            qWarning().noquote()
+                << "Could not initialize DDJ-FLX4 headphone output:"
+                << ma_result_description(initResult);
             return false;
+        }
         cueDeviceInitialized = true;
-        if (ma_device_start(&cueDevice) != MA_SUCCESS) {
+        const ma_result startResult = ma_device_start(&cueDevice);
+        if (startResult != MA_SUCCESS) {
+            qWarning().noquote()
+                << "Could not start DDJ-FLX4 headphone output:"
+                << ma_result_description(startResult);
             ma_device_uninit(&cueDevice);
             cueDeviceInitialized = false;
             return false;
         }
         cueDeviceStarted = true;
+        char clientMap[256] {};
+        char deviceMap[256] {};
+        ma_channel_map_to_string(cueDevice.playback.channelMap,
+                                 cueDevice.playback.channels,
+                                 clientMap, sizeof(clientMap));
+        ma_channel_map_to_string(cueDevice.playback.internalChannelMap,
+                                 cueDevice.playback.internalChannels,
+                                 deviceMap, sizeof(deviceMap));
+        qInfo().noquote()
+            << "DDJ-FLX4 headphone output active:"
+            << cueDevice.playback.name << cueDevice.playback.channels
+            << "channels at" << cueDevice.sampleRate << "Hz; client map"
+            << clientMap << "; device map" << deviceMap;
         return true;
     }
 };
@@ -505,7 +606,25 @@ void AudioEngine::renderOfflineFourChannel(float* out, int frames)
 
 bool AudioEngine::headphoneOutputAvailable() const
 {
-    return impl_->fourChannelOutput || impl_->cueDeviceStarted;
+    return (impl_->fourChannelOutput && impl_->deviceStarted &&
+            Impl::deviceIsActive(impl_->device)) ||
+           impl_->cueOutputActive();
+}
+
+float AudioEngine::headphoneSignalLevel() const
+{
+    return impl_->headphoneSignalPeak.load(std::memory_order_relaxed);
+}
+
+void AudioEngine::startHeadphoneTest(int milliseconds)
+{
+    if (!headphoneOutputAvailable())
+        return;
+    const int boundedMs = std::clamp(milliseconds, 250, 10000);
+    impl_->headphoneTestFrames.store(
+        boundedMs * kSampleRate / 1000, std::memory_order_release);
+    qInfo().noquote() << "FLX4 headphone test tone started for"
+                      << boundedMs << "ms";
 }
 
 QString AudioEngine::outputDeviceName() const
@@ -629,6 +748,19 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
         const int index = static_cast<int>(event.id) -
                           static_cast<int>(ControlId::HotCue1);
         target.handleHotCue(index, event.value >= 0.5);
+        break;
+    }
+    case ControlId::SavedLoop1:
+    case ControlId::SavedLoop2:
+    case ControlId::SavedLoop3:
+    case ControlId::SavedLoop4:
+    case ControlId::SavedLoop5:
+    case ControlId::SavedLoop6:
+    case ControlId::SavedLoop7:
+    case ControlId::SavedLoop8: {
+        const int index = static_cast<int>(event.id) -
+                          static_cast<int>(ControlId::SavedLoop1);
+        target.handleSavedLoop(index, event.value >= 0.5);
         break;
     }
     case ControlId::LoopIn:

@@ -33,6 +33,10 @@ public:
     static std::optional<std::array<unsigned char, 3>> ledMessage(
         DeckId deck, ControlId id, bool on) noexcept;
 
+    // Official FLX4 channel-meter output: CC 0x02 on deck channel B0/B1.
+    static std::optional<std::array<unsigned char, 3>> channelLevelMessage(
+        DeckId deck, unsigned char value) noexcept;
+
     // Performance-pad LEDs use mode-specific note ranges rather than
     // ControlIds. `mode` is the integer PerformancePadMode value.
     static std::optional<std::array<unsigned char, 3>> padModeLedMessage(

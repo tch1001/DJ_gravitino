@@ -4,24 +4,74 @@ Updated: 2026-08-19 (Asia/Singapore)
 
 ## Current state
 
-All queued DJ-controller follow-ups through post-transition FLX4 pickup were
-checkpointed at commit `ecdb7c2` (`Checkpoint DJ controls and transition
-workflow`) before the current task, exactly as requested. The centered mixer,
-compact CUSTOM pad UI, persistent Tutorial view, recorded physical-gesture
-hints, and hot-cue dependency guard described below are intentionally
-uncommitted pending the user's next checkpoint request.
+All prior DJ-controller follow-ups through the compact mixer and transition
+tutorial were committed and pushed at `18b70c6` (`Refine transition tutorial
+and compact mixer layout`). The hold-preview CUSTOM loops, transition TRIM
+exclusion, FLX4 channel meters, live full-board tutor, and selective persistent
+post-transition pickup described below are intentionally uncommitted pending
+the user's next checkpoint request.
 
 The user explicitly permits stopping a running Gravitino process when a
 restart is needed. Always resolve the process narrowly with
 `ps -axo pid,etime,command | rg '[b]uild/gravitino$'` so Serato or unrelated
 audio programs are never touched.
 
-The intended future Git push target is
-`git@github.com:tch1001/DJ_gravitino.git`. Do not push until the user asks;
-there is currently no Git remote configured, so add/verify the remote at that
-time rather than changing repository configuration preemptively.
+The Git remote is `git@github.com:tch1001/DJ_gravitino.git`; `main` tracks
+`origin/main`. Do not commit or push this working tree until the user asks.
 
 ## Implemented in this working tree
+
+- **Reliable transition identity and exact held-cue replay:** duration-only
+  similarity remains available as a weak diagnostic tier but can no longer
+  authorize Perform/Tutorial matching, transition auto-load, playing-FROM
+  prioritization, or hot-cue dependency warnings. Those paths require an exact
+  fingerprint or matching title+artist. Recorded hot-cue mappings now use NaN
+  for “unavailable,” allowing real negative beats before a track's detected
+  first downbeat to round-trip and validate correctly. A standalone incoming
+  PLAY still restores its recorded anchor; PLAY during a held CUE/HOT
+  CUE/CUSTOM preview now latches the advanced preview position without the old
+  rewind. Focused regressions reproduce all three original failures and the
+  full build, ctest 19/19, self-test, and diff check pass.
+
+- **Recovering FLX4 headphone output:** MacBook/Bluetooth master output keeps a
+  separate four-channel FLX4 stream for phones 3/4. A startup race could leave
+  MIDI connected before CoreAudio exposed that endpoint, with no later retry.
+  Gravitino now retries the non-destructive cue stream every two seconds while
+  the controller is present, detects/stales out a stopped USB audio device,
+  reports exact miniaudio failures/channel maps, and offers `Settings > Audio
+  Output > Test FLX4 headphones` (quiet two-second phones-only tone). The live
+  probe reached the controller callback at 0.12 peak and the user confirmed
+  hearing it; System Default/MacBook master output was then restored.
+- **Hold-preview CUSTOM loops:** populated saved-loop pads now use the same
+  momentary transport contract as hot cues. Press jumps to the stored loop and
+  previews it, release stops and returns to the loop start, and pressing PLAY
+  while the pad remains held latches playback so release no longer stops it.
+  The UI and `.gvt` event stream retain both press and release through explicit
+  `saved_loop_1..8` controls, while empty pads still capture the active loop.
+- **TRIM is outside transition semantics:** new recordings omit both initial
+  TRIM snapshots and runtime TRIM moves. Perform also filters TRIM from legacy
+  event streams and never primes/applies their stored trim values. Old files
+  remain parseable, but the DJ's current input gain is deliberately left alone.
+- **Physical FLX4 channel meters:** Gravitino now sends each deck's post-EQ /
+  filter / FX, pre-channel-fader peak to the controller's documented five-bar
+  meter (`B0/B1 02`), with dB scaling, 40 ms updates, change suppression, and
+  reconnect resynchronization.
+- **Live, full-board transition tutor:** the virtual FLX4 now includes the full
+  beginner-facing control surface, including circular CUE and PLAY/PAUSE left
+  of the pads, pad modes/pads, loop controls, browser/LOAD, mixer, channel and
+  master cue, shifted pad functions, Quantize indicator, SMART controls, and
+  Beat FX. The large prose block was removed
+  from the board; instruction, detail, countdown, warning, score, and reset
+  coaching now live in the right control panel above CLOSE ENOUGH, leaving the
+  board substantially larger. Outside a just-completed automatic transition it
+  mirrors live transport, modes, pad state, knobs/faders, LEDs, and meters.
+- **Selective, persistent post-transition pickup:** MidiEngine snapshots the
+  pre-transition virtual controls and only arms physical pickup for absolute
+  controls the replay actually changed. Reconciliation uses the last observed
+  physical position instead of assuming the whole FLX4 is wrong. A matched
+  knob is not forgotten until every pending control is simultaneously within
+  tolerance, so overshooting it makes its white target/highlight reappear.
+  Pickup moves stay audio-silent while the link is frozen.
 
 - **Centered mixer and compact deck controls:** the `TRIM → HIGH → MID → LOW →
   FILTER` channel strips and volume faders now occupy a narrow center panel in
@@ -45,12 +95,12 @@ time rather than changing repository configuration preemptively.
   hot-cue deletion all consult every stored transition and require explicit
   confirmation when that cue is referenced.
 
-- **Post-transition FLX4 soft takeover:** Perform tracks every replay/setup
-  change to the physical TEMPO, channel fader, TRIM, HIGH/MID/LOW, FILTER, and
-  crossfader controls. At the final event, the entire FLX4→Gravitino input link
-  freezes if any physical position differs. Only pickup moves are consumed
-  until each control reaches or crosses its target; the pickup event itself is
-  not applied, so audio never jumps. A blinking white status alert lists
+- **Post-transition FLX4 soft takeover:** Perform tracks replay/setup changes
+  to the physical TEMPO, channel fader, HIGH/MID/LOW, FILTER, and crossfader
+  controls. At the final event, the entire FLX4→Gravitino input link freezes if
+  any changed control's physical position differs. Only pickup moves are
+  consumed until every target is simultaneously within tolerance; the pickup
+  event itself is not applied, so audio never jumps. A blinking white status alert lists
   hardware→target values and white-static veils mark the affected virtual
   controls. Software edits retarget the pending pickup, disconnect clears it,
   and no gate appears without a connected controller. Tutorial's full FLX4
@@ -87,10 +137,10 @@ time rather than changing repository configuration preemptively.
   transition/library vertical splitter still persists its position.
 - **Configurable Close Enough transition setup:** the transition panel has a
   persisted CLOSE ENOUGH checkbox plus a TOLERANCE… dialog. Strict matching
-  remains the default. When enabled, BPM, volume controls (channel fader,
-  trim, and crossfader), and LOW/MID/HIGH EQ can differ from the recorded
+  remains the default. When enabled, BPM, volume controls (channel fader and
+  crossfader), and LOW/MID/HIGH EQ can differ from the recorded
   pre-state by independently configurable margins (defaults: ±0.5 BPM,
-  ±5% volume, ±5% EQ). Track identity, transport/loop state, FX state and
+  ±5% channel/crossfader volume, ±5% EQ). Track identity, transport/loop state, FX state and
   type, filters, stems, cue/loop timing, and other setup remain strict. The
   live readiness label says explicitly when a state was accepted only because
   it was close enough; PRIME uses the same readiness policy after its robust
@@ -99,15 +149,15 @@ time rather than changing repository configuration preemptively.
   FLX4 sampler bank and is now presented simply as CUSTOM; old mode selections
   migrate automatically. Each pad can retain an audio-file assignment while
   its per-track captured loop takes operational/visual priority.
-  An empty pad captures the active loop. Every press of a filled saved-loop pad
-  jumps to the stored start and plays, including retriggering an already-active
-  loop like a one-shot hot cue; LOOP EXIT is the explicit way to leave it.
+  An empty pad captures the active loop. A filled pad jumps to the stored start
+  and previews only while held; PLAY during the hold latches transport, exactly
+  like the hot-cue/CUE takeover contract. Pressing it again retriggers the loop.
+  LOOP EXIT remains the explicit way to leave the saved loop itself.
   Right-click exposes loop replace/rename/clear and sampler assign/clear
   together, and the combined occupancy is reflected in the physical pad LEDs.
-  The saved-loop retrigger also publishes an idempotent PLAY gesture after
-  seeking, so transition recordings store the incoming start event and capture
-  the loop IN beat as their TO replay anchor instead of inferring it from a
-  later control move.
+  Explicit saved-loop press/release events store the incoming start time and
+  loop-IN beat as their TO replay anchor instead of inferring it from a later
+  control move.
 - **Auto-fitting button labels:** Gravitino's compact push/tool buttons now
   preserve their normal frame, state, menu arrow, palette, and configured font,
   but shrink the font at paint time when the complete live label would
@@ -227,12 +277,14 @@ six-decimal recorded tempo, and preserves effective BPM after a manual regrid.
 It now also checks readable physical performance-pad gesture capture and an
 eight-beat Tutorial prompt for a button due at transition beat zero.
 `tests/test_soft_takeover.cpp` covers matching-at-arm, unknown positions,
-input freezing, target crossing, consumed pickup events, and software
-retargeting; transition coverage verifies continuous tutorial prompts remain
-active until their recorded value is reached.
-The verified UI
-binary is running as the sole `./build/gravitino` process (PID 25603 at this
-handoff); resolve its current PID narrowly before any future restart.
+input freezing, consumed pickup events, software retargeting, and a control
+being highlighted again after it overshoots while another target is pending.
+Transition coverage verifies continuous tutorial prompts remain active until
+their recorded value is reached. The Computer Use accessibility service timed
+out while reading the large Qt window, so the full-board tutor still deserves
+a physical visual pass. The rebuilt UI is running as the sole Gravitino process
+(PID 25864 at this handoff); resolve its current PID narrowly before any future
+restart.
 
 New focused coverage includes:
 

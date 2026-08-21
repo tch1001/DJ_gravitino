@@ -6,6 +6,51 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-08-19 (codex): **Transition identity, negative hot-cue, and replay-latch
+  fixes.** Operational transition matching now requires a fingerprint or
+  title+artist match; duration within 1.5 seconds remains diagnostic only and
+  can no longer select/auto-load a transition, prioritize an unrelated FROM
+  track, or trigger another song's hot-cue deletion warning. Missing recorded
+  hot-cue mappings now use NaN internally, so finite negative beats before the
+  detected first downbeat serialize, parse, and validate normally. Incoming
+  PLAY still restores the recorded anchor when standalone, but when pressed
+  during a held CUE/HOT CUE/CUSTOM preview it latches the already-advanced
+  position instead of rewinding to the preview start. Regressions cover a
+  0.7-second duration collision, `b2 = -17`, the recorder's negative-grid path,
+  and delayed hot-cue→PLAY replay. Verified: clean full build, ctest 19/19,
+  full self-test, and `git diff --check`.
+
+- 2026-08-19 (codex): **FLX4 cue-output hot-plug recovery and headphone test.**
+  Diagnosed silence with live CoreAudio state: the four-output FLX4 was alive
+  but its audio device had never started while System Default/MacBook speakers
+  owned master. Gravitino now retries the separate phones 3/4 stream every two
+  seconds while MIDI is connected, reinitializes stale/stopped USB endpoints,
+  and logs actual init/start errors plus client/device channel maps. Settings >
+  Audio Output now includes a quiet, phones-only two-second test tone. The live
+  probe verified CoreAudio's named MASTER L/R and PHONES L/R channels, an
+  identical miniaudio channel map, active 48 kHz output, and 0.12 signal at the
+  FLX4 callback; the user heard the tone. Restored System Default for MacBook
+  master + FLX4 cue and restarted one verified process. Build, ctest 19/19,
+  full self-test, and `git diff --check` pass.
+
+- 2026-08-19 (codex): **Hold-preview CUSTOM loops, trim-free transitions,
+  FLX4 meters, and live full-board tutor.** Saved-loop pads now press-to-preview,
+  release-to-return, and latch when PLAY is pressed during the hold, matching
+  hot-cue/CUE semantics; explicit `saved_loop_1..8` press/release events make
+  that reproducible in transitions. New transition snapshots/events exclude
+  TRIM, and replay ignores legacy trim automation. The controller's documented
+  five-segment channel meters now receive post-EQ/filter/FX, pre-fader peaks.
+  Tutorial renders a substantially larger, beginner-facing FLX4 surface with
+  circular CUE/PLAY, all pad/loop/browser/mixer/cue/Smart/Beat-FX controls,
+  live LEDs and meters; its prose/countdown/reset guidance moved to the right
+  panel above CLOSE ENOUGH. Post-transition pickup compares the actual last
+  hardware state, arms only absolute controls the replay changed, and keeps all
+  original targets provisional until they are simultaneously in tolerance, so
+  an overshot knob is highlighted again. Verified: clean build, ctest 19/19,
+  full audio/transition/loop/stem self-test, and `git diff --check`. Computer
+  Use timed out reading the large Qt window, so a physical visual/controller
+  smoke test remains appropriate.
+
 - 2026-08-19 (codex): **Centered mixer, compact CUSTOM pads, and persistent
   tutorial view.** Checkpointed all prior work as commit `ecdb7c2`, then moved
   the FLX4-ordered channel volume/EQ/filter mixer out of the transition

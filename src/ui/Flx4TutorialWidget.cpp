@@ -1,11 +1,11 @@
 #include "Flx4TutorialWidget.h"
 
 #include "Theme.h"
+#include "../performance/PerformancePads.h"
 
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 #include <QTimer>
 
 #include <algorithm>
@@ -15,28 +15,38 @@ namespace gvt {
 namespace {
 
 constexpr qreal kDesignWidth = 1000.0;
-constexpr qreal kDesignHeight = 650.0;
+constexpr qreal kDesignHeight = 620.0;
+constexpr double kPi = 3.14159265358979323846;
 
 QRectF padRect(int deck, int pad)
 {
-    const qreal startX = deck == 0 ? 78.0 : 702.0;
-    return QRectF(startX + (pad % 4) * 54.0,
-                  472.0 + (pad / 4) * 38.0, 48.0, 30.0);
+    const qreal startX = deck == 0 ? 158.0 : 758.0;
+    return QRectF(startX + (pad % 4) * 49.0,
+                  465.0 + (pad / 4) * 42.0, 44.0, 34.0);
+}
+
+QRectF padModeRect(int deck, int mode)
+{
+    const qreal startX = deck == 0 ? 158.0 : 758.0;
+    return QRectF(startX + mode * 49.0, 431.0, 44.0, 24.0);
 }
 
 QRectF deckButtonRect(int deck, int slot)
 {
-    const qreal start = deck == 0 ? 112.0 : 726.0;
-    return QRectF(start + slot * 61.0, 550.0, 54.0, 38.0);
+    const qreal offset = deck == 0 ? 0.0 : 600.0;
+    if (slot == 0)
+        return QRectF(offset + 24.0, 44.0, 55.0, 27.0);
+    return QRectF(offset + (slot == 1 ? 55.0 : 107.0),
+                  470.0, 44.0, 44.0);
 }
 
 QRectF loopButtonRect(int deck, int slot)
 {
-    const qreal start = deck == 0 ? 83.0 : 703.0;
-    return QRectF(start + slot * 44.0, 169.0, 39.0, 24.0);
+    const qreal start = deck == 0 ? 88.0 : 688.0;
+    return QRectF(start + slot * 52.0, 44.0, 47.0, 27.0);
 }
 
-qreal channelX(int deck) { return deck == 0 ? 414.0 : 546.0; }
+qreal channelX(int deck) { return deck == 0 ? 414.0 : 536.0; }
 
 bool isAnimatedContinuous(Flx4SurfaceControl surface)
 {
@@ -62,6 +72,16 @@ double surfaceValue(ControlId control, double value)
     if (control == ControlId::Tempo)
         return std::clamp((value - 0.92) / 0.16, 0.0, 1.0);
     return std::clamp(value, 0.0, 1.0);
+}
+
+int physicalPadModeButton(int mode)
+{
+    if (mode >= static_cast<int>(PerformancePadMode::Keyboard) &&
+        mode <= static_cast<int>(PerformancePadMode::KeyShift))
+        return mode - static_cast<int>(PerformancePadMode::Keyboard);
+    if (mode == static_cast<int>(PerformancePadMode::SavedLoop))
+        return 3;
+    return std::clamp(mode, 0, 3);
 }
 
 } // namespace
@@ -90,7 +110,7 @@ void Flx4TutorialWidget::setWaiting(const QString& transitionName,
     mapping_.reset();
     transitionName_ = transitionName;
     instruction_ = tr("Get ready — the next FLX4 control will light up");
-    detail_ = tr("Use the physical controller or click the highlighted virtual control");
+    detail_ = tr("Use the physical controller or highlighted virtual control");
     warning_ = warning;
     feedback_.clear();
     hardwareValue_.reset();
@@ -137,7 +157,7 @@ void Flx4TutorialWidget::clearExpected()
     expected_.reset();
     mapping_.reset();
     instruction_ = tr("Good — watch for the next highlighted control");
-    detail_ = tr("Keep the outgoing track running and follow the recorded sequence");
+    detail_ = tr("Keep the outgoing track running and follow the sequence");
     warning_.clear();
     activationEnabled_ = false;
     gesturePadMode_ = -1;
@@ -148,10 +168,22 @@ void Flx4TutorialWidget::clearExpected()
 void Flx4TutorialWidget::setHardwareValue(const ControlEvent& event)
 {
     if (!expected_ || expected_->deck != event.deck ||
-        expected_->id != event.id || !std::isfinite(event.value)) {
+        expected_->id != event.id || !std::isfinite(event.value))
         return;
-    }
     hardwareValue_ = event.value;
+    update();
+}
+
+void Flx4TutorialWidget::setLiveState(const Flx4TutorialLiveState& state)
+{
+    live_ = state;
+    update();
+}
+
+void Flx4TutorialWidget::setTakeovers(
+    const std::vector<SoftTakeoverState>& states)
+{
+    takeovers_ = states;
     update();
 }
 
@@ -175,7 +207,7 @@ QPointF Flx4TutorialWidget::toDesign(const QPointF& point) const
 
 QRectF Flx4TutorialWidget::fxAssignmentRect(int deck) const
 {
-    return QRectF(deck == 0 ? 594.0 : 634.0, 285.0, 34.0, 22.0);
+    return QRectF(deck == 0 ? 571.0 : 603.0, 270.0, 28.0, 20.0);
 }
 
 QRectF Flx4TutorialWidget::targetRect(const Flx4TutorialMapping& mapping,
@@ -187,31 +219,32 @@ QRectF Flx4TutorialWidget::targetRect(const Flx4TutorialMapping& mapping,
     case Flx4SurfaceControl::Cue:           return deckButtonRect(deck, 1);
     case Flx4SurfaceControl::Sync:          return deckButtonRect(deck, 0);
     case Flx4SurfaceControl::Load:
-        return QRectF(deck == 0 ? 388.0 : 538.0, 164.0, 54.0, 24.0);
+        return QRectF(deck == 0 ? 378.0 : 536.0, 31.0, 54.0, 24.0);
     case Flx4SurfaceControl::PerformancePad:return padRect(deck, mapping.pad);
-    case Flx4SurfaceControl::LoopIn:        return loopButtonRect(deck, 0);
-    case Flx4SurfaceControl::LoopOut:       return loopButtonRect(deck, 1);
+    case Flx4SurfaceControl::LoopIn:
+    case Flx4SurfaceControl::LoopHalve:     return loopButtonRect(deck, 0);
+    case Flx4SurfaceControl::LoopOut:
+    case Flx4SurfaceControl::LoopDouble:    return loopButtonRect(deck, 1);
     case Flx4SurfaceControl::FourBeatExit:  return loopButtonRect(deck, 2);
-    case Flx4SurfaceControl::LoopHalve:     return loopButtonRect(deck, 3);
-    case Flx4SurfaceControl::LoopDouble:    return loopButtonRect(deck, 4);
     case Flx4SurfaceControl::TempoFader:
-        return QRectF(deck == 0 ? 45.0 : 931.0, 225.0, 24.0, 190.0);
+        return QRectF(deck == 0 ? 24.0 : 956.0, 143.0, 25.0, 246.0);
     case Flx4SurfaceControl::JogWheel:
-        return QRectF(deck == 0 ? 93.0 : 707.0, 224.0, 200.0, 200.0);
-    case Flx4SurfaceControl::ChannelFader:  return QRectF(chX - 13.0, 435.0, 26.0, 112.0);
-    case Flx4SurfaceControl::Trim:          return QRectF(chX - 16.0, 207.0, 32.0, 32.0);
-    case Flx4SurfaceControl::EqHigh:        return QRectF(chX - 16.0, 250.0, 32.0, 32.0);
-    case Flx4SurfaceControl::EqMid:         return QRectF(chX - 16.0, 293.0, 32.0, 32.0);
-    case Flx4SurfaceControl::EqLow:         return QRectF(chX - 16.0, 336.0, 32.0, 32.0);
-    case Flx4SurfaceControl::Filter:        return QRectF(chX - 17.0, 379.0, 34.0, 34.0);
-    case Flx4SurfaceControl::Crossfader:    return QRectF(414.0, 565.0, 132.0, 24.0);
-    case Flx4SurfaceControl::ChannelCue:    return QRectF(chX - 23.0, 414.0, 46.0, 20.0);
-    case Flx4SurfaceControl::MasterCue:     return QRectF(468.0, 214.0, 54.0, 22.0);
-    case Flx4SurfaceControl::HeadphoneMix:  return QRectF(477.0, 251.0, 36.0, 36.0);
-    case Flx4SurfaceControl::BeatFxSelect:  return QRectF(590.0, 211.0, 82.0, 24.0);
-    case Flx4SurfaceControl::BeatFxOn:      return QRectF(590.0, 319.0, 82.0, 26.0);
-    case Flx4SurfaceControl::BeatFxWet:     return QRectF(614.0, 355.0, 36.0, 36.0);
-    case Flx4SurfaceControl::BeatFxBeats:   return QRectF(590.0, 247.0, 82.0, 25.0);
+        return QRectF(deck == 0 ? 82.0 : 682.0, 145.0, 220.0, 220.0);
+    case Flx4SurfaceControl::ChannelFader:
+        return QRectF(chX - 13.0, 429.0, 26.0, 112.0);
+    case Flx4SurfaceControl::Trim:          return QRectF(chX - 16.0, 148.0, 32.0, 32.0);
+    case Flx4SurfaceControl::EqHigh:        return QRectF(chX - 16.0, 198.0, 32.0, 32.0);
+    case Flx4SurfaceControl::EqMid:         return QRectF(chX - 16.0, 248.0, 32.0, 32.0);
+    case Flx4SurfaceControl::EqLow:         return QRectF(chX - 16.0, 298.0, 32.0, 32.0);
+    case Flx4SurfaceControl::Filter:        return QRectF(chX - 17.0, 348.0, 34.0, 34.0);
+    case Flx4SurfaceControl::Crossfader:    return QRectF(405.0, 556.0, 140.0, 27.0);
+    case Flx4SurfaceControl::ChannelCue:    return QRectF(chX - 23.0, 397.0, 46.0, 22.0);
+    case Flx4SurfaceControl::MasterCue:     return QRectF(462.0, 124.0, 56.0, 22.0);
+    case Flx4SurfaceControl::HeadphoneMix:  return QRectF(474.0, 160.0, 36.0, 36.0);
+    case Flx4SurfaceControl::BeatFxSelect:  return QRectF(570.0, 160.0, 62.0, 23.0);
+    case Flx4SurfaceControl::BeatFxOn:      return QRectF(570.0, 301.0, 62.0, 24.0);
+    case Flx4SurfaceControl::BeatFxWet:     return QRectF(583.0, 339.0, 36.0, 36.0);
+    case Flx4SurfaceControl::BeatFxBeats:   return QRectF(570.0, 195.0, 62.0, 24.0);
     }
     return {};
 }
@@ -220,180 +253,298 @@ void Flx4TutorialWidget::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.fillRect(rect(), QColor(8, 10, 13, 245));
+    p.fillRect(rect(), QColor(8, 10, 13, 248));
 
     const QRectF fitted = fittedDesignRect();
     p.translate(fitted.left(), fitted.top());
     p.scale(fitted.width() / kDesignWidth, fitted.height() / kDesignHeight);
 
-    p.setPen(QPen(QColor(74, 80, 92), 2));
-    p.setBrush(QColor(22, 24, 29));
-    p.drawRoundedRect(QRectF(3, 3, 994, 644), 14, 14);
-
-    QFont titleFont = p.font();
-    titleFont.setBold(true);
-    titleFont.setPixelSize(17);
-    titleFont.setLetterSpacing(QFont::AbsoluteSpacing, 2.0);
-    p.setFont(titleFont);
-    p.setPen(themeText());
-    p.drawText(QRectF(28, 18, 730, 28), Qt::AlignVCenter,
-               tr("FLX4 TRANSITION TUTOR · %1").arg(transitionName_));
-
-    p.setPen(QPen(QColor(74, 80, 92), 1));
-    p.setBrush(QColor(42, 46, 55));
-    p.drawRoundedRect(QRectF(941, 17, 34, 28), 5, 5);
-    p.setPen(themeText());
-    p.drawText(QRectF(941, 17, 34, 28), Qt::AlignCenter, QStringLiteral("×"));
-
-    QFont instructionFont = p.font();
-    instructionFont.setPixelSize(23);
-    instructionFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.0);
-    p.setFont(instructionFont);
-    p.setPen(mapping_.has_value() ? themeText() : QColor(0xe8, 0xa8, 0x35));
-    p.drawText(QRectF(28, 51, 780, 34), Qt::AlignVCenter, instruction_);
-
-    QFont infoFont = p.font();
-    infoFont.setPixelSize(13);
-    p.setFont(infoFont);
-    p.setPen(themeDimText());
-    p.drawText(QRectF(28, 87, 760, 23), Qt::AlignVCenter, detail_);
-    if (expected_) {
-        const QString countdown = beatsAhead_ > 0.05
-            ? tr("IN %1 BEATS").arg(std::max(0.0, beatsAhead_), 0, 'f', 1)
-            : tr("NOW");
-        QFont countdownFont = p.font();
-        countdownFont.setBold(true);
-        countdownFont.setPixelSize(21);
-        p.setFont(countdownFont);
-        p.setPen(beatsAhead_ <= 0.25 ? QColor(0x4c, 0xd9, 0x64)
-                                     : transitionEntryColor());
-        p.drawText(QRectF(800, 53, 170, 34), Qt::AlignRight | Qt::AlignVCenter,
-                   countdown);
-    }
-
-    p.setFont(infoFont);
-    if (!warning_.isEmpty()) {
-        p.setPen(QColor(0xe8, 0xa8, 0x35));
-        p.drawText(QRectF(28, 112, 944, 23), Qt::AlignVCenter,
-                   QStringLiteral("⚠ ") + warning_);
-    } else if (!feedback_.isEmpty()) {
-        p.setPen(feedbackColor_);
-        p.drawText(QRectF(28, 112, 944, 23), Qt::AlignVCenter, feedback_);
-    } else {
-        p.setPen(themeDimText());
-        p.drawText(QRectF(28, 112, 944, 23), Qt::AlignVCenter,
-                   tr("Esc closes the tutorial · highlighted controls are clickable"));
-    }
-
-    const QRectF controller(25, 143, 950, 470);
-    p.setPen(QPen(QColor(76, 82, 94), 2));
-    p.setBrush(QColor(31, 34, 41));
-    p.drawRoundedRect(controller, 12, 12);
+    p.setPen(QPen(QColor(78, 84, 96), 2));
+    p.setBrush(QColor(29, 32, 38));
+    p.drawRoundedRect(QRectF(5, 5, 990, 610), 14, 14);
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(25, 28, 34));
-    p.drawRoundedRect(QRectF(359, 153, 242, 448), 8, 8);
+    p.setBrush(QColor(23, 26, 31));
+    p.drawRoundedRect(QRectF(357, 14, 286, 584), 9, 9);
+
+    p.setPen(QPen(QColor(94, 101, 115), 1));
+    p.setBrush(QColor(45, 49, 58));
+    p.drawRoundedRect(QRectF(961, 13, 25, 23), 5, 5);
+    p.setPen(themeText());
+    p.drawText(QRectF(961, 13, 25, 23), Qt::AlignCenter, QStringLiteral("×"));
 
     auto drawButton = [&p](const QRectF& r, const QString& label,
-                           const QColor& text = themeDimText()) {
-        p.setPen(QPen(QColor(73, 79, 91), 1));
-        p.setBrush(QColor(48, 52, 62));
-        p.drawRoundedRect(r, 3, 3);
-        QFont f = p.font(); f.setPixelSize(9); f.setBold(true); p.setFont(f);
-        p.setPen(text);
-        p.drawText(r, Qt::AlignCenter, label);
-    };
-    auto drawKnob = [&p](qreal x, qreal y, const QString& label) {
-        p.setPen(QPen(QColor(92, 99, 113), 2));
-        p.setBrush(QColor(40, 44, 52));
-        p.drawEllipse(QPointF(x, y), 13, 13);
-        p.drawLine(QPointF(x, y), QPointF(x, y - 9));
-        QFont f = p.font(); f.setPixelSize(8); p.setFont(f);
-        p.setPen(themeDimText());
-        p.drawText(QRectF(x - 32, y + 14, 64, 12), Qt::AlignCenter, label);
+                           const QColor& accent, bool lit = false,
+                           bool round = false) {
+        const QColor border = lit ? accent : QColor(75, 81, 93);
+        p.setPen(QPen(border, lit ? 2.2 : 1.0));
+        p.setBrush(lit ? QColor(accent.red(), accent.green(), accent.blue(), 92)
+                       : QColor(47, 51, 60));
+        if (round) p.drawEllipse(r);
+        else p.drawRoundedRect(r, 3, 3);
+        QFont f = p.font();
+        f.setPixelSize(label.size() > 8 ? 7 : 8);
+        f.setBold(true);
+        p.setFont(f);
+        p.setPen(lit ? QColor(245, 247, 250) : accent);
+        p.drawText(r.adjusted(2, 1, -2, -1), Qt::AlignCenter | Qt::TextWordWrap,
+                   label);
     };
 
+    auto drawKnob = [&p](qreal x, qreal y, const QString& label,
+                         double value) {
+        value = std::clamp(value, 0.0, 1.0);
+        p.setPen(QPen(QColor(94, 101, 115), 2));
+        p.setBrush(QColor(39, 43, 51));
+        p.drawEllipse(QPointF(x, y), 13, 13);
+        const double radians = (225.0 + value * 270.0) * kPi / 180.0;
+        p.setPen(QPen(QColor(232, 236, 241), 2));
+        p.drawLine(QPointF(x, y),
+                   QPointF(x + std::cos(radians) * 9.0,
+                           y + std::sin(radians) * 9.0));
+        QFont f = p.font(); f.setPixelSize(7); p.setFont(f);
+        p.setPen(themeDimText());
+        p.drawText(QRectF(x - 33, y + 14, 66, 12), Qt::AlignCenter, label);
+    };
+
+    const QStringList loopLabels {tr("IN / ½×"), tr("OUT / 2×"),
+                                  tr("4 BEAT / EXIT"), tr("CALL ◁"),
+                                  tr("CALL ▷")};
+    const QStringList modeLabels {tr("HOT CUE"), tr("PAD FX1"),
+                                  tr("BEAT JUMP"), tr("CUSTOM")};
+    const QStringList shiftedModeLabels {tr("⇧ KEYBOARD"), tr("⇧ PAD FX2"),
+                                         tr("⇧ BEAT LOOP"), tr("⇧ KEY SHIFT")};
     for (int deck = 0; deck < 2; ++deck) {
         const QColor accent = deckAccent(deck);
-        const qreal jogX = deck == 0 ? 193.0 : 807.0;
-        QFont deckFont = p.font(); deckFont.setPixelSize(13); deckFont.setBold(true);
+        const qreal offset = deck == 0 ? 0.0 : 600.0;
+        const qreal jogX = deck == 0 ? 192.0 : 792.0;
+
+        QFont deckFont = p.font();
+        deckFont.setPixelSize(11); deckFont.setBold(true);
         p.setFont(deckFont); p.setPen(accent);
-        p.drawText(QRectF(deck == 0 ? 42.0 : 890.0, 154, 55, 20),
+        p.drawText(QRectF(offset + 20.0, 12.0, 75.0, 20.0),
                    Qt::AlignCenter, deck == 0 ? tr("DECK A") : tr("DECK B"));
 
-        const QStringList loopLabels {tr("IN"), tr("OUT"), tr("4/EXIT"),
-                                      tr("1/2"), tr("2×")};
-        for (int i = 0; i < loopLabels.size(); ++i)
-            drawButton(loopButtonRect(deck, i), loopLabels[i]);
+        drawButton(deckButtonRect(deck, 0), tr("BEAT SYNC"), accent);
+        drawButton(QRectF(offset + 24.0, 76.0, 55.0, 23.0),
+                   tr("MASTER"), accent);
+        for (int slot = 0; slot < loopLabels.size(); ++slot)
+            drawButton(loopButtonRect(deck, slot), loopLabels[slot],
+                       themeDimText(), live_.loopActive[deck] && slot < 3);
 
-        p.setPen(QPen(QColor(79, 86, 99), 3));
-        p.setBrush(QColor(37, 40, 48));
-        p.drawEllipse(QPointF(jogX, 324), 96, 96);
-        p.setPen(QPen(QColor(56, 61, 71), 2));
-        p.drawEllipse(QPointF(jogX, 324), 64, 64);
-        p.drawEllipse(QPointF(jogX, 324), 24, 24);
+        p.setPen(QPen(QColor(82, 89, 102), 3));
+        p.setBrush(QColor(36, 39, 47));
+        p.drawEllipse(QPointF(jogX, 255.0), 104.0, 104.0);
+        p.setPen(QPen(QColor(58, 64, 75), 2));
+        p.drawEllipse(QPointF(jogX, 255.0), 71.0, 71.0);
+        p.drawEllipse(QPointF(jogX, 255.0), 25.0, 25.0);
         p.setPen(themeDimText());
-        p.drawText(QRectF(jogX - 55, 313, 110, 22), Qt::AlignCenter, tr("JOG"));
+        p.drawText(QRectF(jogX - 55.0, 244.0, 110.0, 22.0),
+                   Qt::AlignCenter, tr("JOG TOP / RIM"));
 
-        const qreal tempoX = deck == 0 ? 57.0 : 943.0;
-        p.setPen(QPen(QColor(77, 83, 95), 5));
-        p.drawLine(QPointF(tempoX, 235), QPointF(tempoX, 405));
-        p.setBrush(QColor(185, 191, 202)); p.setPen(Qt::NoPen);
-        p.drawRoundedRect(QRectF(tempoX - 9, 310, 18, 24), 3, 3);
-        QFont tiny = p.font(); tiny.setPixelSize(8); p.setFont(tiny);
+        const qreal tempoX = deck == 0 ? 36.0 : 968.0;
+        const double tempoValue = surfaceValue(ControlId::Tempo,
+                                                live_.tempo[deck]);
+        p.setPen(QPen(QColor(78, 84, 96), 5));
+        p.drawLine(QPointF(tempoX, 153.0), QPointF(tempoX, 379.0));
+        p.setPen(Qt::NoPen); p.setBrush(QColor(189, 195, 205));
+        const qreal tempoY = 153.0 + tempoValue * 226.0;
+        p.drawRoundedRect(QRectF(tempoX - 9.0, tempoY - 11.0, 18.0, 22.0),
+                          3, 3);
         p.setPen(themeDimText());
-        p.drawText(QRectF(tempoX - 28, 211, 56, 14), Qt::AlignCenter, tr("TEMPO"));
+        p.drawText(QRectF(tempoX - 28.0, 130.0, 56.0, 14.0),
+                   Qt::AlignCenter, tr("TEMPO"));
 
-        for (int pad = 0; pad < 8; ++pad) {
-            const QColor color = hotCueColor(pad);
-            drawButton(padRect(deck, pad), QString::number(pad + 1), color);
+        const bool shifted = live_.padMode[deck] >=
+                                 static_cast<int>(PerformancePadMode::Keyboard) &&
+                             live_.padMode[deck] <=
+                                 static_cast<int>(PerformancePadMode::KeyShift);
+        const int litMode = physicalPadModeButton(live_.padMode[deck]);
+        for (int mode = 0; mode < 4; ++mode) {
+            drawButton(padModeRect(deck, mode), modeLabels[mode], accent,
+                       mode == litMode);
+            QFont shiftedFont = p.font();
+            shiftedFont.setPixelSize(5);
+            shiftedFont.setBold(mode == litMode && shifted);
+            p.setFont(shiftedFont);
+            p.setPen(mode == litMode && shifted ? accent : themeDimText());
+            const QRectF modeRect = padModeRect(deck, mode);
+            p.drawText(QRectF(modeRect.left(), modeRect.bottom(),
+                              modeRect.width(), 10.0),
+                       Qt::AlignCenter, shiftedModeLabels[mode]);
         }
-        p.setPen(themeDimText());
-        p.drawText(QRectF(deck == 0 ? 78.0 : 702.0, 453, 210, 16),
-                   Qt::AlignLeft, tr("PERFORMANCE PADS"));
+        for (int pad = 0; pad < 8; ++pad) {
+            const unsigned int bit = 1U << static_cast<unsigned int>(pad);
+            const bool on = (live_.padEnabledMask[deck] & bit) != 0U;
+            const bool pressed = (live_.padPressedMask[deck] & bit) != 0U;
+            drawButton(padRect(deck, pad), QString::number(pad + 1),
+                       hotCueColor(pad), on || pressed);
+            if (pressed) {
+                p.setPen(QPen(Qt::white, 2));
+                p.setBrush(Qt::NoBrush);
+                p.drawRoundedRect(padRect(deck, pad).adjusted(2, 2, -2, -2),
+                                  3, 3);
+            }
+        }
 
-        drawButton(deckButtonRect(deck, 0), tr("SYNC"), accent);
-        drawButton(deckButtonRect(deck, 1), tr("CUE"));
-        drawButton(deckButtonRect(deck, 2), tr("PLAY"), accent);
+        drawButton(deckButtonRect(deck, 1), tr("CUE"), QColor(240, 240, 240),
+                   live_.cueSet[deck], true);
+        drawButton(deckButtonRect(deck, 2), tr("PLAY / PAUSE"), accent,
+                   live_.playing[deck], true);
+        drawButton(QRectF(offset + 55.0, 525.0, 96.0, 24.0), tr("SHIFT"),
+                   themeDimText(), shifted);
+        drawButton(QRectF(offset + 55.0, 556.0, 96.0, 22.0),
+                   tr("VINYL MODE"), themeDimText());
     }
 
-    // Browser/load context at the top of the central strip.
-    drawButton(QRectF(388, 164, 54, 24), tr("LOAD A"), deckAccent(0));
-    drawButton(QRectF(538, 164, 54, 24), tr("LOAD B"), deckAccent(1));
-    drawKnob(490, 174, tr("BROWSE"));
+    drawButton(QRectF(378, 31, 54, 24), tr("LOAD A"), deckAccent(0));
+    drawButton(QRectF(536, 31, 54, 24), tr("LOAD B"), deckAccent(1));
+    drawKnob(484, 43, tr("BROWSE / PRESS"), 0.5);
+    drawKnob(484, 91, tr("MASTER LEVEL"), 0.5);
+    drawButton(QRectF(462, 124, 56, 22), tr("MASTER CUE"),
+               QColor(230, 230, 235), live_.masterCue);
+    drawKnob(492, 178, tr("CUE / MASTER"), live_.headphoneMix);
+    drawKnob(492, 225, tr("PHONES LEVEL"), 0.5);
+    drawKnob(492, 273, tr("MIC LEVEL"), 0.5);
+    drawButton(QRectF(459, 306, 66, 22), tr("SMART CFX"), themeDimText());
+    drawButton(QRectF(459, 338, 66, 22), tr("SMART FADER"), themeDimText());
 
     for (int deck = 0; deck < 2; ++deck) {
         const qreal x = channelX(deck);
-        drawKnob(x, 223, tr("TRIM"));
-        drawKnob(x, 266, tr("HIGH"));
-        drawKnob(x, 309, tr("MID"));
-        drawKnob(x, 352, tr("LOW"));
-        drawKnob(x, 396, tr("FILTER"));
-        drawButton(QRectF(x - 23, 414, 46, 20), tr("CH CUE"), deckAccent(deck));
-        p.setPen(QPen(QColor(78, 84, 96), 5));
-        p.drawLine(QPointF(x, 444), QPointF(x, 540));
-        p.setPen(Qt::NoPen); p.setBrush(QColor(186, 192, 202));
-        p.drawRoundedRect(QRectF(x - 10, 484, 20, 17), 3, 3);
+        drawKnob(x, 164, tr("TRIM"), live_.trim[deck]);
+        drawKnob(x, 214, tr("HIGH"), live_.eqHigh[deck]);
+        drawKnob(x, 264, tr("MID"), live_.eqMid[deck]);
+        drawKnob(x, 314, tr("LOW"), live_.eqLow[deck]);
+        drawKnob(x, 365, tr("FILTER / CFX"), live_.filter[deck]);
+        drawButton(QRectF(x - 23.0, 397.0, 46.0, 22.0), tr("CH CUE"),
+                   deckAccent(deck), live_.channelCue[deck]);
+        QFont quantFont = p.font();
+        quantFont.setPixelSize(5);
+        quantFont.setBold(live_.quantize[deck]);
+        p.setFont(quantFont);
+        p.setPen(live_.quantize[deck] ? deckAccent(deck) : themeDimText());
+        p.drawText(QRectF(x - 23.0, 419.0, 46.0, 9.0), Qt::AlignCenter,
+                   tr("⇧ QUANT"));
+
+        const int litSegments = live_.level[deck] <= 0.0001
+            ? 0 : std::clamp(static_cast<int>(std::ceil(
+                    std::clamp((20.0 * std::log10(live_.level[deck]) + 48.0) /
+                                   48.0,
+                               0.0, 1.0) * 5.0)),
+                             0, 5);
+        for (int segment = 0; segment < 5; ++segment) {
+            const QColor color = segment < 2 ? QColor(0x4c, 0xd9, 0x64)
+                                 : segment < 4 ? QColor(0xe8, 0xa8, 0x35)
+                                               : QColor(0xe8, 0x55, 0x55);
+            const QRectF bar(x + (deck == 0 ? 20.0 : -25.0),
+                             430.0 + (4 - segment) * 13.0, 5.0, 9.0);
+            p.setPen(Qt::NoPen);
+            p.setBrush(segment < litSegments ? color : QColor(55, 59, 68));
+            p.drawRoundedRect(bar, 1, 1);
+        }
+
+        p.setPen(QPen(QColor(79, 85, 97), 5));
+        p.drawLine(QPointF(x, 435), QPointF(x, 537));
+        const qreal faderY = 537.0 - std::clamp(live_.fader[deck], 0.0, 1.0) *
+                                          102.0;
+        p.setPen(Qt::NoPen); p.setBrush(QColor(188, 194, 204));
+        p.drawRoundedRect(QRectF(x - 10.0, faderY - 8.0, 20.0, 16.0), 3, 3);
     }
 
-    drawButton(QRectF(468, 214, 54, 22), tr("MASTER CUE"));
-    drawKnob(495, 269, tr("CUE / MASTER"));
-    p.setPen(QPen(QColor(78, 84, 96), 5));
-    p.drawLine(QPointF(424, 577), QPointF(536, 577));
-    p.setPen(Qt::NoPen); p.setBrush(QColor(186, 192, 202));
-    p.drawRoundedRect(QRectF(464, 568, 23, 18), 3, 3);
+    p.setPen(QPen(QColor(79, 85, 97), 5));
+    p.drawLine(QPointF(414, 570), QPointF(536, 570));
+    const qreal crossX = 414.0 + std::clamp(live_.crossfader, 0.0, 1.0) * 122.0;
+    p.setPen(Qt::NoPen); p.setBrush(QColor(188, 194, 204));
+    p.drawRoundedRect(QRectF(crossX - 11.0, 561.0, 22.0, 18.0), 3, 3);
     p.setPen(themeDimText());
-    p.drawText(QRectF(414, 590, 132, 12), Qt::AlignCenter, tr("CROSSFADER"));
+    p.drawText(QRectF(405, 584, 140, 12), Qt::AlignCenter, tr("CROSSFADER"));
 
-    // Shared Beat FX panel and deck assignment.
     p.setPen(themeDimText());
-    p.drawText(QRectF(590, 190, 82, 17), Qt::AlignCenter, tr("BEAT FX"));
-    drawButton(QRectF(590, 211, 82, 24), tr("FX SELECT"));
-    drawButton(QRectF(590, 247, 38, 25), tr("◀ BEAT"));
-    drawButton(QRectF(634, 247, 38, 25), tr("BEAT ▶"));
-    drawButton(fxAssignmentRect(0), tr("A"), deckAccent(0));
-    drawButton(fxAssignmentRect(1), tr("B"), deckAccent(1));
-    drawButton(QRectF(590, 319, 82, 26), tr("FX ON"));
-    drawKnob(632, 373, tr("LEVEL/DEPTH"));
+    p.drawText(QRectF(570, 139, 62, 16), Qt::AlignCenter, tr("BEAT FX"));
+    drawButton(QRectF(570, 160, 62, 23), tr("FX SELECT"), themeDimText());
+    drawButton(QRectF(570, 195, 29, 24), tr("BEAT ◁"), themeDimText());
+    drawButton(QRectF(603, 195, 29, 24), tr("BEAT ▷"), themeDimText());
+    drawButton(QRectF(570, 231, 62, 23), tr("FX CH SELECT"), themeDimText());
+    drawButton(fxAssignmentRect(0), tr("1"), deckAccent(0));
+    drawButton(fxAssignmentRect(1), tr("2"), deckAccent(1));
+    drawButton(QRectF(570, 301, 62, 24), tr("FX ON / OFF"),
+               QColor(0xe8, 0xa8, 0x35), live_.fxOn[0] || live_.fxOn[1]);
+    drawKnob(601, 355, tr("LEVEL / DEPTH"), live_.fxWet);
+
+    auto liveControlValue = [this](DeckId deck, ControlId id) {
+        if (id == ControlId::Crossfader) return live_.crossfader;
+        if (id == ControlId::HeadphoneMix) return live_.headphoneMix;
+        if (deck < 0 || deck > 1) return 0.5;
+        switch (id) {
+        case ControlId::Tempo: return live_.tempo[deck];
+        case ControlId::Fader: return live_.fader[deck];
+        case ControlId::Trim: return live_.trim[deck];
+        case ControlId::EqHigh: return live_.eqHigh[deck];
+        case ControlId::EqMid: return live_.eqMid[deck];
+        case ControlId::EqLow: return live_.eqLow[deck];
+        case ControlId::Filter: return live_.filter[deck];
+        case ControlId::FxWet: return live_.fxWet;
+        default: return 0.5;
+        }
+    };
+
+    auto drawMotion = [&p](Flx4SurfaceControl surface, const QRectF& target,
+                           ControlId id, double currentRaw, double targetRaw,
+                           const QColor& glow, bool animate) {
+        const double current = surfaceValue(id, currentRaw);
+        const double wanted = surfaceValue(id, targetRaw);
+        QPointF from;
+        QPointF to;
+        if (surface == Flx4SurfaceControl::Crossfader) {
+            from = QPointF(target.left() + current * target.width(),
+                           target.center().y());
+            to = QPointF(target.left() + wanted * target.width(),
+                         target.center().y());
+        } else if (surface == Flx4SurfaceControl::ChannelFader) {
+            from = QPointF(target.center().x(),
+                           target.bottom() - current * target.height());
+            to = QPointF(target.center().x(),
+                         target.bottom() - wanted * target.height());
+        } else if (surface == Flx4SurfaceControl::TempoFader) {
+            from = QPointF(target.center().x(),
+                           target.top() + current * target.height());
+            to = QPointF(target.center().x(),
+                         target.top() + wanted * target.height());
+        } else {
+            const auto dialPoint = [&target](double value) {
+                const double radians = (225.0 + value * 270.0) * kPi / 180.0;
+                const double radius = std::min(target.width(), target.height()) *
+                                      0.42;
+                return target.center() + QPointF(std::cos(radians) * radius,
+                                                  std::sin(radians) * radius);
+            };
+            from = dialPoint(current);
+            to = dialPoint(wanted);
+        }
+        p.setPen(QPen(QColor(255, 255, 255, 190), 2, Qt::DashLine));
+        p.drawLine(from, to);
+        p.setPen(QPen(Qt::white, 3));
+        p.setBrush(QColor(255, 255, 255, 220));
+        p.drawEllipse(to, 5, 5);
+        p.setPen(Qt::NoPen);
+        p.setBrush(glow);
+        const QPointF moving = animate ? from + (to - from) * 0.6 : from;
+        p.drawEllipse(moving, 4, 4);
+    };
+
+    for (const SoftTakeoverState& state : takeovers_) {
+        const auto map = flx4TutorialMapping(state.control, state.targetValue);
+        if (!map) continue;
+        const QRectF target = targetRect(*map, state.deck);
+        p.setBrush(QColor(255, 255, 255, pulse_ ? 88 : 45));
+        p.setPen(QPen(Qt::white, pulse_ ? 4.0 : 2.5, Qt::DashLine));
+        p.drawRoundedRect(target.adjusted(-5, -5, 5, 5), 7, 7);
+        if (isAnimatedContinuous(map->surface))
+            drawMotion(map->surface, target, state.control,
+                       state.hardwareKnown
+                           ? state.hardwareValue
+                           : liveControlValue(state.deck, state.control),
+                       state.targetValue, QColor(255, 255, 255, 210), false);
+    }
 
     if (mapping_ && expected_) {
         const QRectF target = targetRect(*mapping_, expected_->deck);
@@ -402,101 +553,25 @@ void Flx4TutorialWidget::paintEvent(QPaintEvent*)
                                                         : transitionEntryColor())
                                 : QColor(0xe8, 0xa8, 0x35);
         p.setBrush(QColor(glow.red(), glow.green(), glow.blue(),
-                          pulse_ ? 105 : 55));
+                          pulse_ ? 110 : 56));
         p.setPen(QPen(glow, pulse_ ? 5.0 : 3.0));
         p.drawRoundedRect(target.adjusted(-5, -5, 5, 5), 7, 7);
-        if (mapping_->needsFxAssignment && expected_->deck >= 0) {
-            const QRectF assign = fxAssignmentRect(expected_->deck);
-            p.drawRoundedRect(assign.adjusted(-4, -4, 4, 4), 6, 6);
-        }
-        if (mapping_->padMode != Flx4PadMode::None) {
-            p.setPen(glow);
-            QFont modeFont = p.font(); modeFont.setBold(true); modeFont.setPixelSize(11);
-            p.setFont(modeFont);
-            QString mode;
-            switch (mapping_->padMode) {
-            case Flx4PadMode::HotCue:   mode = tr("HOT CUE"); break;
-            case Flx4PadMode::PadFx1:    mode = tr("PAD FX1"); break;
-            case Flx4PadMode::BeatJump:  mode = tr("BEAT JUMP"); break;
-            case Flx4PadMode::Custom:    mode = tr("CUSTOM"); break;
-            case Flx4PadMode::Keyboard:  mode = tr("KEYBOARD"); break;
-            case Flx4PadMode::PadFx2:    mode = tr("PAD FX2"); break;
-            case Flx4PadMode::BeatLoop:  mode = tr("BEAT LOOP"); break;
-            case Flx4PadMode::KeyShift:  mode = tr("KEY SHIFT"); break;
-            case Flx4PadMode::None:      break;
-            }
-            p.drawText(QRectF(expected_->deck == 0 ? 78.0 : 702.0, 434,
-                              210, 17), Qt::AlignLeft,
-                       tr("PAD MODE: %1").arg(mode));
-        }
-
-        // Continuous tutorial moves get an actual motion cue, not just a
-        // blinking halo: a white ghost marker is the recorded target and the
-        // animated dot travels from the last physical FLX4 value toward it.
-        if (isAnimatedContinuous(mapping_->surface)) {
-            const double targetValue = surfaceValue(
-                expected_->id, expected_->value);
-            const double currentValue = surfaceValue(
-                expected_->id,
-                hardwareValue_.value_or(expected_->id == ControlId::Tempo
-                                            ? 1.0 : 0.5));
-            QPointF from;
-            QPointF to;
-            if (mapping_->surface == Flx4SurfaceControl::Crossfader) {
-                from = QPointF(target.left() + currentValue * target.width(),
-                               target.center().y());
-                to = QPointF(target.left() + targetValue * target.width(),
-                             target.center().y());
-            } else if (mapping_->surface ==
-                           Flx4SurfaceControl::ChannelFader) {
-                from = QPointF(target.center().x(),
-                               target.bottom() - currentValue * target.height());
-                to = QPointF(target.center().x(),
-                             target.bottom() - targetValue * target.height());
-            } else if (mapping_->surface ==
-                           Flx4SurfaceControl::TempoFader) {
-                from = QPointF(target.center().x(),
-                               target.top() + currentValue * target.height());
-                to = QPointF(target.center().x(),
-                             target.top() + targetValue * target.height());
-            } else {
-                const auto dialPoint = [&target](double value) {
-                    const double radians =
-                        (225.0 + value * 270.0) * 3.141592653589793 / 180.0;
-                    const double radius = std::min(target.width(),
-                                                   target.height()) * 0.42;
-                    return target.center() +
-                        QPointF(std::cos(radians) * radius,
-                                std::sin(radians) * radius);
-                };
-                from = dialPoint(currentValue);
-                to = dialPoint(targetValue);
-            }
-            const double progress =
-                (static_cast<double>(animationPhase_) + 1.0) / 8.0;
-            const QPointF moving = from + (to - from) * progress;
-            p.setPen(QPen(QColor(255, 255, 255, 180), 2, Qt::DashLine));
-            p.drawLine(from, to);
-            p.setPen(QPen(Qt::white, 3));
-            p.setBrush(QColor(255, 255, 255, pulse_ ? 230 : 150));
-            p.drawEllipse(to, 6, 6);
-            p.setPen(Qt::NoPen);
-            p.drawEllipse(moving, 4, 4);
-            QFont targetFont = p.font();
-            targetFont.setBold(true);
-            targetFont.setPixelSize(9);
-            p.setFont(targetFont);
-            p.setPen(Qt::white);
-            p.drawText(target.adjusted(-34, -22, 34, -4),
-                       Qt::AlignCenter, tr("TARGET"));
-        }
+        if (mapping_->needsFxAssignment && expected_->deck >= 0)
+            p.drawRoundedRect(
+                fxAssignmentRect(expected_->deck).adjusted(-4, -4, 4, 4),
+                6, 6);
+        if (isAnimatedContinuous(mapping_->surface))
+            drawMotion(mapping_->surface, target, expected_->id,
+                       hardwareValue_.value_or(
+                           liveControlValue(expected_->deck, expected_->id)),
+                       expected_->value, glow, true);
     }
 }
 
 void Flx4TutorialWidget::mousePressEvent(QMouseEvent* event)
 {
     const QPointF point = toDesign(event->position());
-    if (QRectF(941, 17, 34, 28).contains(point)) {
+    if (QRectF(961, 13, 25, 23).contains(point)) {
         emit abortRequested();
         event->accept();
         return;
@@ -509,9 +584,10 @@ void Flx4TutorialWidget::mousePressEvent(QMouseEvent* event)
             bool pressed = true;
             if (expected_->id == ControlId::Cue ||
                 (expected_->id >= ControlId::HotCue1 &&
-                 expected_->id <= ControlId::HotCue8)) {
+                 expected_->id <= ControlId::HotCue8) ||
+                (expected_->id >= ControlId::SavedLoop1 &&
+                 expected_->id <= ControlId::SavedLoop8))
                 pressed = expected_->value >= 0.5;
-            }
             emit performancePadActivated(expected_->deck, gesturePadMode_,
                                          mapping_->pad, pressed);
         } else {

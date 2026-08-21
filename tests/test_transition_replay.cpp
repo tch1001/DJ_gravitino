@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QTimer>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -85,6 +86,35 @@ int main(int argc, char** argv)
     CHECK(std::fabs(engine.deck(1).positionSec() - 1.0) < 1.0e-6);
     player.abort();
 
+    // PLAY while a recorded hot cue is still held must latch the preview at
+    // its advanced position. Re-seeking the incoming anchor here makes the
+    // replayed song start several beats earlier than the recorded take.
+    TrackDataPtr heldCueTrack = engine.deck(1).track();
+    heldCueTrack->hotCues[0] = 0.5;
+    engine.deck(0).stop();
+    engine.deck(0).seekSec(0.0);
+    engine.deck(0).play();
+    engine.deck(1).stop();
+    GvtFile heldCueReplay;
+    heldCueReplay.anchorFromBeat = 0.0;
+    heldCueReplay.anchorToBeat = 1.0;
+    heldCueReplay.masterBpm = 120.0;
+    heldCueReplay.events = {
+        {0.0, Role::ToDeck, ControlId::HotCue1, 1.0, Curve::Step},
+        {1.0, Role::ToDeck, ControlId::Play, 1.0, Curve::Step},
+        {2.0, Role::ToDeck, ControlId::HotCue1, 0.0, Curve::Step},
+    };
+    CHECK(player.arm(heldCueReplay, 0, true, &error));
+    spinEvents();
+    CHECK(engine.deck(1).previewActive());
+    float replayScratch[24000 * 2] {};
+    engine.renderOffline(replayScratch, 24000); // advance both decks by 1 beat
+    spinEvents();
+    CHECK(engine.deck(1).playing.load());
+    CHECK(!engine.deck(1).previewActive());
+    CHECK(std::fabs(engine.deck(1).positionSec() - 1.0) < 1.0e-6);
+    player.abort();
+
     // If the incoming deck was already rolling in the recorded pre-state,
     // restore and start it at transition beat zero without requiring a PLAY
     // event or any manual deck alignment.
@@ -121,6 +151,34 @@ int main(int argc, char** argv)
     CHECK(!engine.deck(1).quantizeHotCues.load());
     player.abort();
 
+    // A recorded CUSTOM loop follows the same press -> PLAY -> release order
+    // as the live pad. PLAY takes ownership of the momentary preview, so the
+    // recorded release cannot stop or rewind the incoming deck.
+    TrackDataPtr customTrack = engine.deck(1).track();
+    customTrack->savedLoops[0].startSec = 0.5;
+    customTrack->savedLoops[0].endSec = 1.5;
+    customTrack->savedLoops[0].label = QStringLiteral("Intro");
+    engine.deck(0).loopActive.store(false);
+    engine.deck(0).seekSec(0.0);
+    engine.deck(0).play();
+    GvtFile customReplay;
+    customReplay.anchorFromBeat = 0.0;
+    customReplay.anchorToBeat = 1.0;
+    customReplay.masterBpm = 120.0;
+    customReplay.events = {
+        {0.0, Role::ToDeck, ControlId::SavedLoop1, 1.0, Curve::Step},
+        {0.0, Role::ToDeck, ControlId::Play, 1.0, Curve::Step},
+        {0.0, Role::ToDeck, ControlId::SavedLoop1, 0.0, Curve::Step},
+    };
+    transitionPlayerSetMode(&player, PlayerMode::Perform);
+    CHECK(player.arm(customReplay, 0, true, &error));
+    spinEvents();
+    CHECK(engine.deck(1).playing.load());
+    CHECK(engine.deck(1).loopActive.load());
+    CHECK(!engine.deck(1).previewActive());
+    CHECK(std::fabs(engine.deck(1).positionSec() - 0.5) < 1.0e-6);
+    player.abort();
+
     // Recorder output retains the controller/audio engine's six-decimal
     // tempo precision instead of rounding it to a drift-inducing 0.001.
     engine.deck(0).loadTrack(makeTrack(127.987654));
@@ -130,10 +188,12 @@ int main(int argc, char** argv)
     recorder.start(0);
     constexpr double capturedRatio = 0.985643;
     bus.dispatch({0, ControlId::Tempo, capturedRatio}, Origin::Ui);
+    bus.dispatch({0, ControlId::Trim, 0.91}, Origin::Ui);
     const GvtFile recorded = recorder.finish();
     CHECK(std::fabs(recorded.from.bpm - 127.987654) < 1.0e-9);
     CHECK(std::fabs(recorded.initialFrom.tempoRatio - 1.000027) < 1.0e-9);
     CHECK(recorded.initialFrom.quantizeCaptured);
+    CHECK(!recorded.initialFrom.trimCaptured);
     bool foundTempo = false;
     for (const GvtEvent& event : recorded.events) {
         if (event.role == Role::FromDeck &&
@@ -143,6 +203,10 @@ int main(int argc, char** argv)
         }
     }
     CHECK(foundTempo);
+    CHECK(std::none_of(recorded.events.begin(), recorded.events.end(),
+                       [](const GvtEvent& event) {
+                           return event.control == ControlId::Trim;
+                       }));
 
     // A host performance-pad event is retained as the physical gesture for the
     // audible action that follows it, while remaining absent from replay.

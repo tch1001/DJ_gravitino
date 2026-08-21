@@ -219,6 +219,16 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
         buttons->addWidget(b);
     rightCol->addLayout(buttons);
 
+    tutorialGuideLabel_ = new QLabel(this);
+    tutorialGuideLabel_->setWordWrap(true);
+    tutorialGuideLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    tutorialGuideLabel_->setStyleSheet(
+        QStringLiteral("background:#20242b; color:%1; border:1px solid #4b5260; "
+                       "border-radius:4px; padding:5px; font-weight:bold;")
+            .arg(themeText().name()));
+    tutorialGuideLabel_->hide();
+    rightCol->addWidget(tutorialGuideLabel_);
+
     auto* setupRow = new QHBoxLayout;
     setupLabel_ = new QLabel;
     setupLabel_->setWordWrap(true);
@@ -349,7 +359,11 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     connect(stateTimer_, &QTimer::timeout, this, [this] {
         updateControls();
         updateSetupStatus();
-        if (tutorialViewOpen_) layoutTutorialOverlay();
+        if (tutorialViewOpen_) {
+            layoutTutorialOverlay();
+            refreshTutorialLiveState();
+            refreshTutorialGuideLabel();
+        }
     });
     stateTimer_->start();
 
@@ -740,8 +754,6 @@ bool TransitionPanel::setupMatches(const Match& match,
                 track->bpm * wantedRatio, SetupToleranceField::Bpm, 0.05);
         compare(tr("%1 fader").arg(deckName), deck.fader.load(), expected.fader,
                 SetupToleranceField::Volume);
-        compare(tr("%1 trim").arg(deckName), deck.trim.load(), expected.trim,
-                SetupToleranceField::Volume);
         compare(tr("%1 low").arg(deckName), deck.eqLow.load(), expected.eqLow,
                 SetupToleranceField::Eq);
         compare(tr("%1 mid").arg(deckName), deck.eqMid.load(), expected.eqMid,
@@ -975,7 +987,6 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
         const std::pair<ControlId, double> values[] = {
             {ControlId::Tempo, expectedTempoRatio(match, fromRole)},
             {ControlId::Fader, setup.fader},
-            {ControlId::Trim, setup.trim},
             {ControlId::EqLow, setup.eqLow},
             {ControlId::EqMid, setup.eqMid},
             {ControlId::EqHigh, setup.eqHigh},
@@ -983,7 +994,6 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
         };
         for (const auto& [control, value] : values)
             bus_->dispatch({deckIndex, control, value}, Origin::System);
-
         if (!match.file->initialComplete) return;
         const std::pair<ControlId, double> extended[] = {
             {ControlId::FxType, (double)setup.fxType},
@@ -1241,13 +1251,15 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
                 return false;
             return event.control == ControlId::Play ||
                    (event.control >= ControlId::HotCue1 &&
-                    event.control <= ControlId::HotCue8);
+                    event.control <= ControlId::HotCue8) ||
+                   (event.control >= ControlId::SavedLoop1 &&
+                    event.control <= ControlId::SavedLoop8);
         });
     if (mode == PlayerMode::Perform && !incomingInitiallyPlaying &&
         !hasIncomingStartEvent) {
         emit statusMessage(
             tr("Can't perform “%1” accurately: the recording has no incoming "
-               "PLAY or hot-cue event. Re-record it with the current CUSTOM-loop capture.")
+               "PLAY, hot-cue, or CUSTOM-loop event. Re-record it with the current controls.")
                 .arg(m.file->name),
             9000);
         return;
@@ -1332,6 +1344,16 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         }
         ensureTutorialOverlay();
         const QStringList warnings = tutorialWarnings(m);
+        tutorialGuideInstruction_ =
+            tr("Get ready — the next FLX4 control will light up");
+        tutorialGuideDetail_ =
+            tr("Use the physical controller or click the highlighted virtual control.");
+        tutorialGuideWarning_ = warnings.isEmpty()
+            ? QString()
+            : tr("%1 mapping warning(s); unavailable steps appear in amber.")
+                  .arg(warnings.size());
+        tutorialGuideFeedback_.clear();
+        tutorialGuideLabel_->show();
         tutorialOverlay_->setWaiting(
             m.file->name,
             warnings.isEmpty()
@@ -1342,6 +1364,8 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         tutorialOverlay_->show();
         tutorialOverlay_->raise();
         tutorialOverlay_->setFocus(Qt::OtherFocusReason);
+        refreshTutorialLiveState();
+        refreshTutorialGuideLabel();
     } else if (!tutorialViewOpen_) {
         closeTutorialOverlay();
     }
@@ -1385,7 +1409,10 @@ void TransitionPanel::onAbort()
 void TransitionPanel::onProgress(double beatsIn, double beatsTotal)
 {
     tutorialBeatsIn_ = beatsIn;
-    if (tutorialActive_) showNextTutorialPrompt();
+    if (tutorialActive_) {
+        showNextTutorialPrompt();
+        refreshTutorialGuideLabel();
+    }
     if (takeoverTrackingActive_ && beatsTotal > 0.0 &&
         beatsIn >= beatsTotal) {
         // Arm pickup as soon as the final automatic event lands. Waiting for
@@ -1417,8 +1444,29 @@ void TransitionPanel::onFinished(bool completed)
 void TransitionPanel::observeTutorialHardwareControl(
     const ControlEvent& event)
 {
-    if (tutorialActive_ && tutorialOverlay_)
+    if (tutorialViewOpen_ && tutorialOverlay_)
         tutorialOverlay_->setHardwareValue(event);
+}
+
+void TransitionPanel::observePerformancePadState(
+    int deck, int mode, unsigned int enabledMask, unsigned int pressedMask)
+{
+    if (deck < 0 || deck >= 2)
+        return;
+    tutorialPadMode_[static_cast<std::size_t>(deck)] = mode;
+    tutorialPadEnabledMask_[static_cast<std::size_t>(deck)] = enabledMask;
+    tutorialPadPressedMask_[static_cast<std::size_t>(deck)] = pressedMask;
+    if (tutorialViewOpen_)
+        refreshTutorialLiveState();
+}
+
+void TransitionPanel::setHardwareTakeovers(
+    const std::vector<SoftTakeoverState>& states)
+{
+    tutorialTakeovers_ = states;
+    if (tutorialOverlay_)
+        tutorialOverlay_->setTakeovers(tutorialTakeovers_);
+    refreshTutorialGuideLabel();
 }
 
 void TransitionPanel::showBanner(const QString& text, const QColor& color,
@@ -1498,7 +1546,7 @@ QString TransitionPanel::tutorialWarningForEvent(
     const auto& recorded = fromRole ? match.file->fromHotCueBeats
                                     : match.file->toHotCueBeats;
     const double expectedBeat = recorded[static_cast<std::size_t>(pad)];
-    if (!std::isfinite(expectedBeat) || expectedBeat < 0.0) {
+    if (!hotCueBeatIsMapped(expectedBeat)) {
         return tr("Deck %1 HOT CUE %2 is assigned, but this older recording "
                   "does not store its expected position")
             .arg(deckName).arg(pad + 1);
@@ -1564,7 +1612,7 @@ bool TransitionPanel::tutorialEventCanActivate(
     const double expectedBeat = recorded[static_cast<std::size_t>(pad)];
     // A legacy transition is allowed after warning when the pad exists; a
     // known mismatch is disabled because clicking it would teach the wrong cue.
-    return !std::isfinite(expectedBeat) || expectedBeat < 0.0 ||
+    return !hotCueBeatIsMapped(expectedBeat) ||
            std::fabs(track->beatAtSec(track->hotCues[pad]) - expectedBeat) <= 0.05;
 }
 
@@ -1617,13 +1665,27 @@ QString TransitionPanel::tutorialInstruction(
         const bool release =
             (event.control == ControlId::Cue ||
              (event.control >= ControlId::HotCue1 &&
-              event.control <= ControlId::HotCue8)) &&
+              event.control <= ControlId::HotCue8) ||
+             (event.control >= ControlId::SavedLoop1 &&
+              event.control <= ControlId::SavedLoop8)) &&
             event.value < 0.5;
-        return release
-                   ? tr("Release %1 pad %2 on %3")
-                         .arg(modeName).arg(pad).arg(deck)
-                   : tr("Select %1, then press pad %2 on %3")
-                         .arg(modeName).arg(pad).arg(deck);
+        if (release)
+            return tr("Release %1 pad %2 on %3")
+                .arg(modeName).arg(pad).arg(deck);
+        if (event.gesturePadMode >=
+                static_cast<int>(PerformancePadMode::Keyboard) &&
+            event.gesturePadMode <=
+                static_cast<int>(PerformancePadMode::KeyShift)) {
+            const QStringList baseButtons {
+                tr("HOT CUE"), tr("PAD FX1"), tr("BEAT JUMP"), tr("CUSTOM")};
+            const int shiftedIndex = event.gesturePadMode -
+                static_cast<int>(PerformancePadMode::Keyboard);
+            return tr("Hold SHIFT + %1 for %2, then press pad %3 on %4")
+                .arg(baseButtons.value(shiftedIndex), modeName)
+                .arg(pad).arg(deck);
+        }
+        return tr("Select %1, then press pad %2 on %3")
+            .arg(modeName).arg(pad).arg(deck);
     }
     switch (event.control) {
     case ControlId::Play: return tr("Press PLAY/PAUSE on %1").arg(deck);
@@ -1640,6 +1702,16 @@ QString TransitionPanel::tutorialInstruction(
         return event.value >= 0.5
                    ? tr("Hold HOT CUE %1 on %2").arg(hotCue).arg(deck)
                    : tr("Release HOT CUE %1 on %2").arg(hotCue).arg(deck);
+    case ControlId::SavedLoop1: case ControlId::SavedLoop2:
+    case ControlId::SavedLoop3: case ControlId::SavedLoop4:
+    case ControlId::SavedLoop5: case ControlId::SavedLoop6:
+    case ControlId::SavedLoop7: case ControlId::SavedLoop8: {
+        const int pad = static_cast<int>(event.control) -
+                        static_cast<int>(ControlId::SavedLoop1) + 1;
+        return event.value >= 0.5
+                   ? tr("Hold CUSTOM loop %1 on %2").arg(pad).arg(deck)
+                   : tr("Release CUSTOM loop %1 on %2").arg(pad).arg(deck);
+    }
     case ControlId::LoopIn: return tr("Press LOOP IN on %1").arg(deck);
     case ControlId::LoopOut: return tr("Press LOOP OUT on %1").arg(deck);
     case ControlId::LoopExit: return tr("Press 4 BEAT/EXIT on %1").arg(deck);
@@ -1758,6 +1830,8 @@ void TransitionPanel::ensureTutorialOverlay()
                 // tutorial scoring active in the background.
                 tutorialBtn_->setChecked(false);
             });
+    tutorialOverlay_->setTakeovers(tutorialTakeovers_);
+    refreshTutorialLiveState();
 }
 
 void TransitionPanel::layoutTutorialOverlay()
@@ -1794,6 +1868,7 @@ void TransitionPanel::onTutorialViewToggled(bool open)
             return;
         }
         tutorialViewOpen_ = true;
+        tutorialGuideLabel_->show();
         refreshTutorialView();
         emit statusMessage(
             tr("Tutorial view open — use Perform for an 8-beat count-in or Prime to arm guidance"),
@@ -1815,12 +1890,25 @@ void TransitionPanel::refreshTutorialView()
 
     const int idx = selectedMatch();
     if (idx < 0) {
+        tutorialGuideInstruction_ = tr("Select a transition");
+        tutorialGuideDetail_ =
+            tr("The full FLX4 surface mirrors live controls and LEDs here.");
+        tutorialGuideWarning_ =
+            tr("No transition is selected for guided Perform or Prime.");
         tutorialOverlay_->setWaiting(
             tr("No transition selected"),
             tr("Select a transition to prepare guided Perform or Prime"));
     } else {
         const Match& match = matches_[static_cast<std::size_t>(idx)];
         const QStringList warnings = tutorialWarnings(match);
+        tutorialGuideInstruction_ =
+            tr("Ready for guided Perform or Prime: %1").arg(match.file->name);
+        tutorialGuideDetail_ =
+            tr("The virtual FLX4 mirrors the live deck state. The next required control will pulse.");
+        tutorialGuideWarning_ = warnings.isEmpty()
+            ? QString()
+            : tr("%1 mapping warning(s); unavailable steps appear in amber.")
+                  .arg(warnings.size());
         tutorialOverlay_->setWaiting(
             match.file->name,
             warnings.isEmpty()
@@ -1828,6 +1916,9 @@ void TransitionPanel::refreshTutorialView()
                 : tr("%1 mapping warning(s); unavailable steps will appear in amber")
                       .arg(warnings.size()));
     }
+    tutorialGuideFeedback_.clear();
+    refreshTutorialLiveState();
+    refreshTutorialGuideLabel();
     layoutTutorialOverlay();
     tutorialOverlay_->show();
     tutorialOverlay_->raise();
@@ -1852,7 +1943,86 @@ void TransitionPanel::closeTutorialOverlay()
         QSignalBlocker block(tutorialBtn_);
         tutorialBtn_->setChecked(false);
     }
+    if (tutorialGuideLabel_) tutorialGuideLabel_->hide();
     if (tutorialOverlay_) tutorialOverlay_->hide();
+}
+
+void TransitionPanel::refreshTutorialLiveState()
+{
+    if (!tutorialOverlay_)
+        return;
+
+    Flx4TutorialLiveState state;
+    for (int deck = 0; deck < 2; ++deck) {
+        const Deck& source = engine_->deck(deck);
+        state.tempo[deck] = source.tempoRatio.load();
+        state.fader[deck] = source.fader.load();
+        state.trim[deck] = source.trim.load();
+        state.eqHigh[deck] = source.eqHigh.load();
+        state.eqMid[deck] = source.eqMid.load();
+        state.eqLow[deck] = source.eqLow.load();
+        state.filter[deck] = source.filter.load();
+        state.level[deck] = source.channelLevel.load();
+        state.playing[deck] = source.playing.load();
+        state.cueSet[deck] = source.cuePointSec.load() >= 0.0;
+        state.loopActive[deck] = source.loopActive.load();
+        state.channelCue[deck] = engine_->headphoneCue[deck].load();
+        state.quantize[deck] = source.quantizeHotCues.load();
+        state.fxOn[deck] = source.fxOn.load();
+        state.padMode[deck] = tutorialPadMode_[deck];
+        state.padEnabledMask[deck] = tutorialPadEnabledMask_[deck];
+        state.padPressedMask[deck] = tutorialPadPressedMask_[deck];
+    }
+    state.masterCue = engine_->masterCue.load();
+    state.headphoneMix = engine_->headphoneMix.load();
+    state.crossfader = engine_->crossfader.load();
+    state.fxWet = state.fxOn[1] ? engine_->deck(1).fxWet.load()
+                                : engine_->deck(0).fxWet.load();
+    tutorialOverlay_->setLiveState(state);
+    tutorialOverlay_->setTakeovers(tutorialTakeovers_);
+}
+
+void TransitionPanel::refreshTutorialGuideLabel()
+{
+    if (!tutorialGuideLabel_ || !tutorialViewOpen_) {
+        if (tutorialGuideLabel_) tutorialGuideLabel_->hide();
+        return;
+    }
+
+    QStringList lines;
+    QString first = tutorialGuideInstruction_.isEmpty()
+        ? tr("FLX4 Tutorial view") : tutorialGuideInstruction_;
+    if (tutorialActive_ && !tutorialPrompts_.empty()) {
+        const double remaining =
+            tutorialPrompts_.front().beat - tutorialBeatsIn_;
+        first += remaining > 0.05
+            ? tr("  ·  IN %1 BEATS").arg(std::max(0.0, remaining), 0, 'f', 1)
+            : tr("  ·  NOW");
+    }
+    lines.append(first);
+    if (!tutorialGuideDetail_.isEmpty())
+        lines.append(tutorialGuideDetail_);
+    if (!tutorialTakeovers_.empty()) {
+        lines.append(tr("⚠ Reset the %1 highlighted FLX4 control(s). They stay monitored until every control is correct at the same time.")
+                         .arg(tutorialTakeovers_.size()));
+    } else if (!tutorialGuideWarning_.isEmpty()) {
+        lines.append(QStringLiteral("⚠ ") + tutorialGuideWarning_);
+    }
+    if (!tutorialGuideFeedback_.isEmpty())
+        lines.append(tutorialGuideFeedback_);
+
+    const QColor border = !tutorialTakeovers_.empty() ||
+                                  !tutorialGuideWarning_.isEmpty()
+                              ? QColor(0xe8, 0xa8, 0x35)
+                              : (!tutorialGuideFeedback_.isEmpty()
+                                     ? tutorialGuideFeedbackColor_
+                                     : transitionEntryColor());
+    tutorialGuideLabel_->setStyleSheet(
+        QStringLiteral("background:#20242b; color:%1; border:1px solid %2; "
+                       "border-radius:4px; padding:5px; font-weight:bold;")
+            .arg(themeText().name(), border.name()));
+    tutorialGuideLabel_->setText(lines.join(QLatin1Char('\n')));
+    tutorialGuideLabel_->show();
 }
 
 void TransitionPanel::showNextTutorialPrompt()
@@ -1861,6 +2031,12 @@ void TransitionPanel::showNextTutorialPrompt()
         return;
     if (tutorialPrompts_.empty()) {
         tutorialOverlay_->clearExpected();
+        tutorialGuideInstruction_ =
+            tr("Good — watch for the next highlighted control");
+        tutorialGuideDetail_ =
+            tr("Keep the outgoing track running and follow the recorded sequence.");
+        tutorialGuideWarning_.clear();
+        refreshTutorialGuideLabel();
         return;
     }
     const GvtEvent& event = tutorialPrompts_.front();
@@ -1868,12 +2044,16 @@ void TransitionPanel::showNextTutorialPrompt()
     if (idx < 0) return;
     const Match& match = matches_[static_cast<std::size_t>(idx)];
     const ControlEvent physical = tutorialPhysicalEvent(event);
+    tutorialGuideInstruction_ = tutorialInstruction(event, physical);
+    tutorialGuideDetail_ = tutorialDetail(event);
+    tutorialGuideWarning_ = tutorialWarningForEvent(match, event);
     tutorialOverlay_->setExpected(
-        physical, tutorialInstruction(event, physical), tutorialDetail(event),
+        physical, tutorialGuideInstruction_, tutorialGuideDetail_,
         event.beat - tutorialBeatsIn_,
         tutorialEventCanActivate(match, event),
-        tutorialWarningForEvent(match, event),
+        tutorialGuideWarning_,
         tutorialMappingForEvent(event), event.gesturePadMode);
+    refreshTutorialGuideLabel();
 }
 
 void TransitionPanel::onTutorialPrompt(const GvtEvent& e, double beatsAhead)
@@ -1917,13 +2097,14 @@ void TransitionPanel::onTutorialScored(const GvtEvent& e, double beatError,
         std::remove_if(tutorialPrompts_.begin(), tutorialPrompts_.end(), sameEvent),
         tutorialPrompts_.end());
     if (tutorialOverlay_) {
-        tutorialOverlay_->setFeedback(
+        tutorialGuideFeedback_ =
             QStringLiteral("%1 %2%3 beats · %4")
                 .arg(QString::fromUtf8(controlName(e.control)),
                      beatError >= 0 ? QStringLiteral("+")
                                     : QStringLiteral("−"),
-                     QString::number(abs, 'f', 2), verdict),
-            color);
+                     QString::number(abs, 'f', 2), verdict);
+        tutorialGuideFeedbackColor_ = color;
+        tutorialOverlay_->setFeedback(tutorialGuideFeedback_, color);
         showNextTutorialPrompt();
     }
 }

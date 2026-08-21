@@ -30,6 +30,7 @@ public:
     bool previewActive() const;              // CUE/hot-cue held without PLAY latch
     void handleCue(bool pressed);           // press/hold-preview/release semantics
     void handleHotCue(int i, bool pressed); // hold: play; release: stop + return
+    void handleSavedLoop(int i, bool pressed); // same hold/PLAY-latch contract
     void cueJump();                         // jump to the stored deck cue point
     void setHotCue(int i);                   // store current pos
     void jumpHotCue(int i);                  // jump if set
@@ -80,6 +81,9 @@ public:
     std::atomic<float>  fader      { 1.0f };
     std::atomic<float>  trim       { 0.5f };
     std::atomic<float>  eqLow      { 0.5f }, eqMid { 0.5f }, eqHigh { 0.5f };
+    // Post-EQ/filter/FX, pre-channel-fader peak envelope for the FLX4's
+    // five-segment channel level meter.
+    std::atomic<float>  channelLevel { 0.0f };
     std::atomic<bool>   playing    { false };
     std::atomic<double> cuePointSec { -1.0 };
 
@@ -122,6 +126,10 @@ public:
     std::atomic<float> headphoneMix { 0.0f };     // 0 = CUE, 1 = MASTER
 
     bool headphoneOutputAvailable() const;
+    float headphoneSignalLevel() const;
+    // Low-level diagnostic routed only to the FLX4 phones bus (outputs 3/4).
+    // It never enters MASTER or a transition/master recording.
+    void startHeadphoneTest(int milliseconds = 2000);
     QString outputDeviceName() const;
     QString outputDevicePreference() const;
     QList<AudioOutputDevice> availableOutputDevices(QString* error = nullptr);

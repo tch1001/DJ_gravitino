@@ -192,8 +192,8 @@ public:
             for (int deck = 0; deck < kNumDecks; ++deck) {
                 if (!engine_->deck(deck).playing.load()) continue;
                 const TrackDataPtr track = engine_->deck(deck).track();
-                if (track && matchTrack(file.from, *track) !=
-                                 MatchQuality::None) {
+                if (track && isReliableTrackMatch(
+                                 matchTrack(file.from, *track))) {
                     return true;
                 }
             }
@@ -758,7 +758,7 @@ int LibraryWidget::trackRowFor(const GvtTrackRef& ref) const
             bestRow = row;
         }
     }
-    return bestRow;
+    return isReliableTrackMatch(best) ? bestRow : -1;
 }
 
 void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
@@ -804,7 +804,7 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
     const int playingDeck = playingA ? 0 : 1;
     const TrackDataPtr playingTrack = engine_->deck(playingDeck).track();
     if (!playingTrack ||
-        matchTrack(transition.from, *playingTrack) == MatchQuality::None) {
+        !isReliableTrackMatch(matchTrack(transition.from, *playingTrack))) {
         emit statusMessage(
             tr("Transition not loaded: the playing track does not match its FROM track"),
             5500);

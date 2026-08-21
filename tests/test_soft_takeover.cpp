@@ -21,7 +21,7 @@ int main()
     SoftTakeover takeover;
 
     // A known mismatch arms. Unrelated FLX4 input remains frozen, moving the
-    // knob toward target is consumed, and crossing the target releases it.
+    // knob toward target is consumed, and reaching the target releases it.
     takeover.rememberHardware({0, ControlId::EqHigh, 0.1});
     takeover.arm({{0, ControlId::EqHigh, 0.7}});
     CHECK(takeover.active());
@@ -29,10 +29,25 @@ int main()
     CHECK(!takeover.acceptHardware({0, ControlId::Play, 1.0}));
     bool changed = false;
     CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.5}, &changed));
-    CHECK(!changed && takeover.active());
-    CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.71}, &changed));
+    CHECK(changed && takeover.active());
+    CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.705}, &changed));
     CHECK(changed && !takeover.active());
     CHECK(takeover.acceptHardware({0, ControlId::EqHigh, 0.72}));
+
+    // A matched control stays monitored while another target is unresolved.
+    // If it overshoots, it returns to the pending/highlighted set.
+    takeover.clearHardware();
+    takeover.rememberHardware({0, ControlId::EqHigh, 0.1});
+    takeover.rememberHardware({1, ControlId::EqLow, 0.1});
+    takeover.arm({{0, ControlId::EqHigh, 0.7},
+                  {1, ControlId::EqLow, 0.8}});
+    CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.7}, &changed));
+    CHECK(takeover.active() && takeover.pending().size() == 1);
+    CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.9}, &changed));
+    CHECK(takeover.active() && takeover.pending().size() == 2);
+    CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.7}, &changed));
+    CHECK(!takeover.acceptHardware({1, ControlId::EqLow, 0.8}, &changed));
+    CHECK(!takeover.active());
 
     // Controls already matching at arm time do not create false alerts.
     takeover.rememberHardware({kNoDeck, ControlId::Crossfader, 0.5});

@@ -24,9 +24,13 @@ struct TransitionRecorder::Impl {
     GvtInitialState initialFrom;
     GvtInitialState initialTo;
     std::array<double, 8> fromHotCueBeats {
-        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat};
     std::array<double, 8> toHotCueBeats {
-        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
+        kUnmappedHotCueBeat, kUnmappedHotCueBeat};
     double initialCrossfader = 0.0; // role space
     bool   toAnchorSet = false;
     double toAnchorBeat = 0.0;
@@ -67,6 +71,8 @@ struct TransitionRecorder::Impl {
              cause->id == ControlId::TempoSync ||
              (cause->id >= ControlId::HotCue1 &&
               cause->id <= ControlId::HotCue8) ||
+             (cause->id >= ControlId::SavedLoop1 &&
+              cause->id <= ControlId::SavedLoop8) ||
              cause->id == ControlId::BeatJump ||
              cause->id == ControlId::PlatterScratch);
         if (haveDeckTrackBeat && !causedSeek) {
@@ -125,6 +131,7 @@ struct TransitionPlayer::Impl {
     double     anchorFrom = 0.0;
     double     totalBeats = 0.0;
     bool       preStateTransportApplied = false;
+    ControlId  incomingPreviewControl = ControlId::Count;
 
     std::vector<ScheduledEvent> sched;
     std::vector<uint8_t> done;      // fired (Perform) / resolved (Tutorial)
@@ -257,6 +264,16 @@ struct TransitionPlayer::Impl {
         e.id = id;
         e.value = (id == ControlId::Crossfader) ? xfaderRoleToPhysical(value) : value;
         bus->dispatch(e, Origin::Replay);
+        const bool previewControl =
+            id == ControlId::Cue ||
+            (id >= ControlId::HotCue1 && id <= ControlId::HotCue8) ||
+            (id >= ControlId::SavedLoop1 && id <= ControlId::SavedLoop8);
+        if (role == Role::ToDeck && previewControl) {
+            if (value >= 0.5 && engine->deck(toDeck).previewActive())
+                incomingPreviewControl = id;
+            else if (value < 0.5 && incomingPreviewControl == id)
+                incomingPreviewControl = ControlId::Count;
+        }
         if (role == Role::FromDeck) {
             // Scheduled transport actions may seek the outgoing track. They
             // are events *on* the transition timeline, not elapsed time, so
@@ -274,6 +291,14 @@ struct TransitionPlayer::Impl {
             case ControlId::HotCue6:
             case ControlId::HotCue7:
             case ControlId::HotCue8:
+            case ControlId::SavedLoop1:
+            case ControlId::SavedLoop2:
+            case ControlId::SavedLoop3:
+            case ControlId::SavedLoop4:
+            case ControlId::SavedLoop5:
+            case ControlId::SavedLoop6:
+            case ControlId::SavedLoop7:
+            case ControlId::SavedLoop8:
             case ControlId::BeatJump:
             case ControlId::PlatterScratch:
                 lastDeckTrackBeat = engine->deck(fromDeck).beatPosition();
@@ -291,14 +316,24 @@ struct TransitionPlayer::Impl {
     }
 
     void fireFinal(const ScheduledEvent& s) {
-        // A ToDeck PLAY is authoritative transport, not merely "ensure
-        // running": always return to the recorded anchor first. This makes
-        // Perform deterministic even if the incoming deck was moved or
-        // accidentally started after priming.
+        // A standalone ToDeck PLAY is authoritative transport: return to the
+        // recorded anchor first if the incoming deck was disturbed after
+        // priming. PLAY while CUE/HOT CUE/CUSTOM is held is different: it
+        // latches that already-advancing preview exactly where the DJ pressed
+        // PLAY, and must not rewind it to the preview's starting anchor.
         if (s.e.role == Role::ToDeck && s.e.control == ControlId::Play &&
             s.e.value >= 0.5) {
-            if (TrackDataPtr t = engine->deck(toDeck).track())
-                engine->deck(toDeck).seekSec(t->secAtBeat(file.anchorToBeat));
+            Deck& incoming = engine->deck(toDeck);
+            const bool latchingPreview =
+                incomingPreviewControl != ControlId::Count &&
+                incoming.previewActive();
+            if (!latchingPreview) {
+                if (TrackDataPtr t = incoming.track())
+                    incoming.seekSec(t->secAtBeat(file.anchorToBeat));
+            }
+            dispatch(s.e.role, s.e.control, s.e.value);
+            incomingPreviewControl = ControlId::Count;
+            return;
         }
         dispatch(s.e.role, s.e.control, s.e.value);
     }

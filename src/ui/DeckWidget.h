@@ -153,6 +153,7 @@ private:
                kPerformanceModeCount> padAssignments_ {};
     std::array<PerformancePadMode, kPerformancePadCount> pressedPadModes_ {};
     std::array<bool, kPerformancePadCount> padIsPressed_ {};
+    std::array<bool, kPerformancePadCount> padReleasePending_ {};
     int padFeedbackSerial_ = 0;
 
     struct PadFxSnapshot {

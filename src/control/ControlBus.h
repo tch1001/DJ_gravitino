@@ -47,6 +47,10 @@ enum class ControlId : uint8_t {
     PerformancePad1, PerformancePad2, PerformancePad3, PerformancePad4,
     PerformancePad5, PerformancePad6, PerformancePad7, PerformancePad8,
     PlatterTouch,   // top-platter contact state, 1 = held / 0 = released
+    // Per-track CUSTOM/saved-loop pads. These are release-aware like hot cues:
+    // hold previews the stored loop; PLAY while held latches transport.
+    SavedLoop1, SavedLoop2, SavedLoop3, SavedLoop4,
+    SavedLoop5, SavedLoop6, SavedLoop7, SavedLoop8,
     Count
 };
 

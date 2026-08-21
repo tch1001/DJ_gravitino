@@ -18,7 +18,11 @@ int failures = 0;
     } \
 } while (0)
 
-bool near(double a, double b, double eps = 1e-9) { return std::fabs(a - b) < eps; }
+bool near(double a, double b, double eps = 1e-9) {
+    if (std::isnan(a) || std::isnan(b))
+        return std::isnan(a) && std::isnan(b);
+    return std::fabs(a - b) < eps;
+}
 
 const char* kExample = R"gvt(gravitino-transition 1
 
@@ -93,7 +97,8 @@ bool initialEqual(const gvt::GvtInitialState& a,
     return a.captured == b.captured && a.playing == b.playing &&
            near(a.positionBeat, b.positionBeat) && near(a.cueBeat, b.cueBeat) &&
            near(a.tempoRatio, b.tempoRatio) &&
-           near(a.fader, b.fader) && near(a.trim, b.trim) &&
+           near(a.fader, b.fader) &&
+           a.trimCaptured == b.trimCaptured && near(a.trim, b.trim) &&
            near(a.eqLow, b.eqLow) && near(a.eqMid, b.eqMid) &&
            near(a.eqHigh, b.eqHigh) && near(a.filter, b.filter) &&
            a.quantizeCaptured == b.quantizeCaptured &&
@@ -291,10 +296,15 @@ int main() {
         complete.initialTo.stemDrums = 0.5;
         complete.fromHotCueBeats[2] = 220.5;
         complete.toHotCueBeats[0] = 32.0;
+        // A beat grid may begin after audio at the start of a track. Hot cues
+        // in that intro therefore have valid negative track-relative beats.
+        complete.toHotCueBeats[1] = -17.0;
 
         // Release-aware triggers must retain their 0 value in the text file.
         complete.events.push_back(
             {33.0, Role::ToDeck, ControlId::HotCue1, 0.0, Curve::Step});
+        complete.events.push_back(
+            {34.0, Role::ToDeck, ControlId::SavedLoop1, 0.0, Curve::Step});
         const QString text = gvtSerialize(complete);
         GvtFile parsed;
         QStringList w2;
@@ -303,7 +313,14 @@ int main() {
         CHECK(filesEqual(complete, parsed));
         CHECK(near(parsed.fromHotCueBeats[2], 220.5));
         CHECK(near(parsed.toHotCueBeats[0], 32.0));
-        CHECK(!parsed.events.empty() && near(parsed.events.back().value, 0.0));
+        CHECK(near(parsed.toHotCueBeats[1], -17.0));
+        CHECK(parsed.events.size() >= 2 &&
+              parsed.events[parsed.events.size() - 2].control ==
+                  ControlId::HotCue1 &&
+              near(parsed.events[parsed.events.size() - 2].value, 0.0));
+        CHECK(!parsed.events.empty() &&
+              parsed.events.back().control == ControlId::SavedLoop1 &&
+              near(parsed.events.back().value, 0.0));
         CHECK(parsed.initialFrom.quantizeCaptured &&
               !parsed.initialFrom.quantize);
         CHECK(parsed.initialTo.quantizeCaptured && parsed.initialTo.quantize);
