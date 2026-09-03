@@ -327,6 +327,8 @@ TrackDataPtr loadAndAnalyzeTrack(const QString& audioPath, QString* error)
     if (ba.ok) {
         t->bpm = ba.bpm;
         t->firstBeatSec = ba.firstBeatSec;
+        t->analyzedBpm = ba.bpm;
+        t->analyzedFirstBeatSec = ba.firstBeatSec;
     } // else leave bpm = 0 (track still usable, no grid)
 
     const KeyResult key = analyzeKey(t->pcm.data(), t->frameCount(), kSampleRate);

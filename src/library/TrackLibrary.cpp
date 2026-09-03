@@ -34,6 +34,9 @@ namespace {
 
 enum Col { ColTitle = 0, ColArtist, ColBpm, ColKey, ColDuration, ColStatus, ColCount };
 
+constexpr int kCacheSchemaVersion = 2;
+constexpr int kAnalysisVersion = 2; // gvsf2 structural identity + audio tags
+
 struct Row {
     QString      path;
     TrackDataPtr track;             // null until analyzed
@@ -76,6 +79,84 @@ QString cacheFileFor(const QString& trackPath)
     return cacheDirPath() + QLatin1Char('/') + QString::fromLatin1(sha1) + QStringLiteral(".json");
 }
 
+QJsonObject readCacheObject(const QString& trackPath)
+{
+    QFile file(cacheFileFor(trackPath));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+    return document.isObject() ? document.object() : QJsonObject{};
+}
+
+bool cacheMatchesFile(const QJsonObject& object, qint64 mtimeMs)
+{
+    return !object.isEmpty() &&
+           static_cast<qint64>(object.value(QStringLiteral("mtime"))
+                                   .toDouble(-1.0)) == mtimeMs;
+}
+
+bool hasCurrentAnalysis(const QJsonObject& object)
+{
+    const bool hasPortableIdentity =
+        object.contains(QStringLiteral("camelotKey")) &&
+        object.contains(QStringLiteral("isrc")) &&
+        object.contains(QStringLiteral("musicBrainzRecording")) &&
+        object.value(QStringLiteral("structureFingerprint")).toString()
+            .startsWith(QStringLiteral("gvsf2:"));
+    if (!hasPortableIdentity) return false;
+
+    // The portable-identity release predates an explicit analysis version.
+    // Its complete gvsf2 records are already version 2 and only need the
+    // non-destructive cache-schema wrapper added.
+    if (!object.contains(QStringLiteral("analysisVersion"))) return true;
+    return object.value(QStringLiteral("analysisVersion")).toInt() >=
+           kAnalysisVersion;
+}
+
+bool hasStoredGrid(const QJsonObject& object)
+{
+    const double bpm = object.value(QStringLiteral("bpm")).toDouble();
+    const double anchor = object.value(QStringLiteral("firstBeatSec")).toDouble();
+    return std::isfinite(bpm) && bpm > 0.0 && std::isfinite(anchor);
+}
+
+void loadPerformanceState(const QJsonObject& object, TrackData& track)
+{
+    const QJsonArray cues = object.value(QStringLiteral("hotCues")).toArray();
+    for (int i = 0; i < 8 && i < cues.size(); ++i)
+        track.hotCues[i] = cues[i].toDouble(-1.0);
+
+    const QJsonArray savedLoops =
+        object.value(QStringLiteral("savedLoops")).toArray();
+    for (int i = 0; i < 8 && i < savedLoops.size(); ++i) {
+        const QJsonObject saved = savedLoops.at(i).toObject();
+        SavedLoopSlot slot;
+        slot.startSec = saved.value(QStringLiteral("startSec")).toDouble(-1.0);
+        slot.endSec = saved.value(QStringLiteral("endSec")).toDouble(-1.0);
+        slot.label = saved.value(QStringLiteral("label")).toString();
+        track.savedLoops[i] = slot.isSet() ? slot : SavedLoopSlot{};
+    }
+}
+
+void preserveAuthoredState(const QJsonObject& previous, TrackData& analyzed)
+{
+    const QString recordedSource =
+        previous.value(QStringLiteral("beatGridSource")).toString();
+    // A cache without a source marker may contain an old manual correction;
+    // protecting it is safer than guessing that it was disposable analysis.
+    // Once a source marker exists, only non-analysis grids are protected when
+    // a future analysis algorithm is intentionally refreshed.
+    const bool protectGrid = recordedSource.isEmpty() ||
+                             recordedSource != QStringLiteral("analysis");
+    if (protectGrid && hasStoredGrid(previous)) {
+        analyzed.bpm = previous.value(QStringLiteral("bpm")).toDouble();
+        analyzed.firstBeatSec =
+            previous.value(QStringLiteral("firstBeatSec")).toDouble();
+        analyzed.beatGridSource = recordedSource.isEmpty()
+            ? QStringLiteral("legacy-preserved") : recordedSource;
+    }
+    loadPerformanceState(previous, analyzed);
+}
+
 bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
                 const TrackData* gridOverride = nullptr,
                 const TrackData* performanceOverride = nullptr)
@@ -90,6 +171,8 @@ bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
         return false;
     }
     QJsonObject o;
+    o[QStringLiteral("cacheVersion")] = kCacheSchemaVersion;
+    o[QStringLiteral("analysisVersion")] = kAnalysisVersion;
     o[QStringLiteral("path")]         = t.filePath;
     o[QStringLiteral("mtime")]        = (double)mtimeMs;
     o[QStringLiteral("title")]        = t.title;
@@ -101,6 +184,12 @@ bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
     o[QStringLiteral("bpm")] = gridOverride ? gridOverride->bpm : t.bpm;
     o[QStringLiteral("firstBeatSec")] = gridOverride
         ? gridOverride->firstBeatSec : t.firstBeatSec;
+    o[QStringLiteral("analyzedBpm")] = t.analyzedBpm;
+    o[QStringLiteral("analyzedFirstBeatSec")] = t.analyzedFirstBeatSec;
+    o[QStringLiteral("beatGridSource")] = gridOverride
+        ? QStringLiteral("user")
+        : (t.beatGridSource.isEmpty() ? QStringLiteral("analysis")
+                                      : t.beatGridSource);
     o[QStringLiteral("fingerprint")]  = t.fingerprint;
     o[QStringLiteral("structureFingerprint")] = t.structureFingerprint;
     o[QStringLiteral("assetSha256")] = t.assetSha256;
@@ -148,21 +237,11 @@ bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
 }
 
 // Cache hit: decode PCM (needed for playback) but skip beat analysis.
-TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
+TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs,
+                           const QJsonObject& o, QString* error)
 {
-    QFile f(cacheFileFor(path));
-    if (!f.open(QIODevice::ReadOnly)) return nullptr;
-    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
-    if (!doc.isObject()) return nullptr;
-    const QJsonObject o = doc.object();
-    if ((qint64)o.value(QStringLiteral("mtime")).toDouble(-1) != mtimeMs) return nullptr;
-    // Entries written before portable structural identity existed re-analyze
-    // once so alternate encodes can be grouped safely.
-    if (!o.contains(QStringLiteral("camelotKey")) ||
-        !o.contains(QStringLiteral("isrc")) ||
-        !o.contains(QStringLiteral("musicBrainzRecording")) ||
-        !o.value(QStringLiteral("structureFingerprint")).toString()
-             .startsWith(QStringLiteral("gvsf2:"))) return nullptr;
+    if (!cacheMatchesFile(o, mtimeMs) || !hasCurrentAnalysis(o))
+        return nullptr;
 
     auto t = std::make_shared<TrackData>();
     t->filePath = path;
@@ -175,6 +254,15 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
         o.value(QStringLiteral("musicBrainzRecording")).toString();
     t->bpm          = o.value(QStringLiteral("bpm")).toDouble();
     t->firstBeatSec = o.value(QStringLiteral("firstBeatSec")).toDouble();
+    t->analyzedBpm = o.value(QStringLiteral("analyzedBpm"))
+                         .toDouble(t->bpm);
+    t->analyzedFirstBeatSec =
+        o.value(QStringLiteral("analyzedFirstBeatSec"))
+            .toDouble(t->firstBeatSec);
+    t->beatGridSource =
+        o.value(QStringLiteral("beatGridSource")).toString();
+    if (t->beatGridSource.isEmpty())
+        t->beatGridSource = QStringLiteral("legacy-preserved");
     t->fingerprint  = o.value(QStringLiteral("fingerprint")).toString();
     t->structureFingerprint =
         o.value(QStringLiteral("structureFingerprint")).toString();
@@ -185,19 +273,7 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
     t->camelotKey   = o.value(QStringLiteral("camelotKey")).toString();
     t->keyName      = o.value(QStringLiteral("keyName")).toString();
     t->durationSec  = (double)t->frameCount() / (double)kSampleRate;
-    const QJsonArray cues = o.value(QStringLiteral("hotCues")).toArray();
-    for (int i = 0; i < 8 && i < cues.size(); ++i) t->hotCues[i] = cues[i].toDouble(-1.0);
-    const QJsonArray savedLoops =
-        o.value(QStringLiteral("savedLoops")).toArray();
-    for (int i = 0; i < 8 && i < savedLoops.size(); ++i) {
-        const QJsonObject saved = savedLoops.at(i).toObject();
-        SavedLoopSlot slot;
-        slot.startSec = saved.value(QStringLiteral("startSec")).toDouble(-1.0);
-        slot.endSec = saved.value(QStringLiteral("endSec")).toDouble(-1.0);
-        slot.label = saved.value(QStringLiteral("label")).toString();
-        if (slot.isSet())
-            t->savedLoops[i] = slot;
-    }
+    loadPerformanceState(o, *t);
     if (t->title.isEmpty()) t->title = QFileInfo(path).completeBaseName();
     t->overviewPeaks = detail::computeOverviewPeaks(t->pcm);
     detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh);
@@ -207,10 +283,24 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
 TrackDataPtr analyzeWithCache(const QString& path, QString* error)
 {
     const qint64 mtimeMs = QFileInfo(path).lastModified().toMSecsSinceEpoch();
-    if (TrackDataPtr cached = loadFromCache(path, mtimeMs, error))
+    const QJsonObject previous = readCacheObject(path);
+    if (TrackDataPtr cached = loadFromCache(path, mtimeMs, previous, error)) {
+        if (previous.value(QStringLiteral("cacheVersion")).toInt() <
+                kCacheSchemaVersion ||
+            !previous.contains(QStringLiteral("analyzedBpm")) ||
+            !previous.contains(QStringLiteral("beatGridSource"))) {
+            // Schema-only migrations rewrite the already-loaded record; they
+            // never re-run analysis or discard effective/performance state.
+            (void)writeCache(*cached, mtimeMs);
+        }
         return cached;
+    }
     TrackDataPtr t = loadAndAnalyzeTrack(path, error);
-    if (t) (void)writeCache(*t, mtimeMs);
+    if (t) {
+        if (cacheMatchesFile(previous, mtimeMs))
+            preserveAuthoredState(previous, *t);
+        (void)writeCache(*t, mtimeMs);
+    }
     return t;
 }
 
@@ -388,6 +478,7 @@ bool TrackLibrary::persistBeatGrid(const TrackData& corrected, QString* error)
 
     libraryRow.track->bpm = corrected.bpm;
     libraryRow.track->firstBeatSec = corrected.firstBeatSec;
+    libraryRow.track->beatGridSource = QStringLiteral("user");
     emit dataChanged(index(row, ColBpm), index(row, ColBpm),
                      {Qt::DisplayRole});
     return true;

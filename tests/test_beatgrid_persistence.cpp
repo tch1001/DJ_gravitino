@@ -5,6 +5,9 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTimer>
 
@@ -160,6 +163,100 @@ int main(int argc, char** argv)
     CHECK(std::fabs(reloaded->savedLoops[3].startSec - 0.75) < 1e-9);
     CHECK(std::fabs(reloaded->savedLoops[3].endSec - 1.75) < 1e-9);
     CHECK(reloaded->savedLoops[3].label == QStringLiteral("Chorus"));
+
+    // Regression: adding new derived-analysis fields used to turn an older
+    // cache into a miss and then overwrite its corrected grid, hot cues, and
+    // saved loops. Simulate that old record and require the upgrade to merge
+    // the newly derived fields around the authored state.
+    const QStringList cacheFiles = QDir(cacheDir).entryList(
+        {QStringLiteral("*.json")}, QDir::Files);
+    CHECK(cacheFiles.size() == 1);
+    const QString cachePath = cacheDir + QLatin1Char('/') + cacheFiles.front();
+    QFile oldCacheFile(cachePath);
+    CHECK(oldCacheFile.open(QIODevice::ReadOnly));
+    QJsonObject oldCache = QJsonDocument::fromJson(
+        oldCacheFile.readAll()).object();
+    oldCacheFile.close();
+    oldCache.remove(QStringLiteral("cacheVersion"));
+    oldCache.remove(QStringLiteral("analysisVersion"));
+    oldCache.remove(QStringLiteral("analyzedBpm"));
+    oldCache.remove(QStringLiteral("analyzedFirstBeatSec"));
+    oldCache.remove(QStringLiteral("beatGridSource"));
+    oldCache.remove(QStringLiteral("isrc"));
+    oldCache.remove(QStringLiteral("musicBrainzRecording"));
+    oldCache.remove(QStringLiteral("structureFingerprint"));
+    oldCache.remove(QStringLiteral("assetSha256"));
+    oldCache.remove(QStringLiteral("audibleDurationSec"));
+    oldCache.insert(QStringLiteral("bpm"), 123.45);
+    oldCache.insert(QStringLiteral("firstBeatSec"), 0.234);
+    QJsonArray legacyCues = oldCache.value(
+        QStringLiteral("hotCues")).toArray();
+    legacyCues[5] = 0.9;
+    oldCache.insert(QStringLiteral("hotCues"), legacyCues);
+    QJsonArray legacyLoops = oldCache.value(
+        QStringLiteral("savedLoops")).toArray();
+    QJsonObject legacyLoop;
+    legacyLoop.insert(QStringLiteral("startSec"), 0.4);
+    legacyLoop.insert(QStringLiteral("endSec"), 1.4);
+    legacyLoop.insert(QStringLiteral("label"), QStringLiteral("Protected"));
+    legacyLoops[6] = legacyLoop;
+    oldCache.insert(QStringLiteral("savedLoops"), legacyLoops);
+    CHECK(oldCacheFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray oldBytes = QJsonDocument(oldCache).toJson();
+    CHECK(oldCacheFile.write(oldBytes) == oldBytes.size());
+    oldCacheFile.close();
+
+    CHECK(scanAndWait(library, musicDir));
+    reloaded = library.trackAt(0);
+    CHECK(reloaded != nullptr);
+    if (!reloaded)
+        return 1;
+    CHECK(std::fabs(reloaded->bpm - 123.45) < 1e-9);
+    CHECK(std::fabs(reloaded->firstBeatSec - 0.234) < 1e-9);
+    CHECK(reloaded->beatGridSource == QStringLiteral("legacy-preserved"));
+    CHECK(std::fabs(reloaded->hotCues[5] - 0.9) < 1e-9);
+    CHECK(reloaded->savedLoops[6].isSet());
+    CHECK(reloaded->savedLoops[6].label == QStringLiteral("Protected"));
+
+    CHECK(oldCacheFile.open(QIODevice::ReadOnly));
+    const QJsonObject upgradedCache = QJsonDocument::fromJson(
+        oldCacheFile.readAll()).object();
+    CHECK(upgradedCache.value(QStringLiteral("cacheVersion")).toInt() == 2);
+    CHECK(upgradedCache.value(QStringLiteral("analysisVersion")).toInt() == 2);
+    CHECK(upgradedCache.value(QStringLiteral("beatGridSource")).toString() ==
+          QStringLiteral("legacy-preserved"));
+    CHECK(upgradedCache.value(QStringLiteral("structureFingerprint")).toString()
+              .startsWith(QStringLiteral("gvsf2:")));
+    oldCacheFile.close();
+
+    // A future derived-analysis version must likewise keep an explicitly
+    // user-approved grid. Performance metadata remains independent of the
+    // grid source and survives either kind of upgrade.
+    QJsonObject futureCache = upgradedCache;
+    futureCache.insert(QStringLiteral("analysisVersion"), 1);
+    futureCache.insert(QStringLiteral("bpm"), 129.5);
+    futureCache.insert(QStringLiteral("firstBeatSec"), 0.345);
+    futureCache.insert(QStringLiteral("beatGridSource"),
+                       QStringLiteral("user"));
+    QJsonArray futureCues = futureCache.value(
+        QStringLiteral("hotCues")).toArray();
+    futureCues[7] = 1.125;
+    futureCache.insert(QStringLiteral("hotCues"), futureCues);
+    CHECK(oldCacheFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray futureBytes = QJsonDocument(futureCache).toJson();
+    CHECK(oldCacheFile.write(futureBytes) == futureBytes.size());
+    oldCacheFile.close();
+
+    CHECK(scanAndWait(library, musicDir));
+    reloaded = library.trackAt(0);
+    CHECK(reloaded != nullptr);
+    if (!reloaded)
+        return 1;
+    CHECK(std::fabs(reloaded->bpm - 129.5) < 1e-9);
+    CHECK(std::fabs(reloaded->firstBeatSec - 0.345) < 1e-9);
+    CHECK(reloaded->beatGridSource == QStringLiteral("user"));
+    CHECK(std::fabs(reloaded->hotCues[7] - 1.125) < 1e-9);
+    CHECK(reloaded->savedLoops[6].isSet());
 
     gvt::TrackData invalid;
     invalid.filePath = reloaded->filePath;

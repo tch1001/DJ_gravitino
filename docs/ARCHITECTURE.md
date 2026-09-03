@@ -108,6 +108,16 @@ confirmed local catalog binding may add one constant offset to this analyzed
 asset beat; legacy `.gvt` coordinates retain their historical asset-local
 interpretation.
 
+The library cache keeps the analyzer's latest BPM/anchor separately from the
+effective beat grid and records whether that grid came from analysis, a user
+edit, or a protected migration. Adding fingerprints, tags, or another derived
+analysis field therefore performs a merge migration: an approved/legacy grid,
+permanent hot cues, and saved loops survive unchanged while only the derived
+fields refresh. Records predating the source marker are conservatively treated
+as protected because they may contain manual work. The tempo candidate search
+includes octave, 3:2, and 4:3 ratios so prominent pop subdivisions do not force
+a harmonic BPM alias.
+
 ## Transition record/replay
 
 See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:

@@ -7,8 +7,9 @@
 
 namespace gvt {
 
-// Scans MP3/FLAC/WAV/AIFF audio, analyzes in background threads, caches analysis
-// (bpm/grid/fingerprint/hotcues) as JSON in ~/.gravitino/cache/.
+// Scans MP3/FLAC/WAV/AIFF audio, analyzes in background threads, and caches
+// derived analysis separately from the effective grid and authored cue/loop
+// state in ~/.gravitino/cache/.
 // Columns: Title, Artist, BPM, Key, Duration, Status.
 class TrackLibrary : public QAbstractTableModel {
     Q_OBJECT

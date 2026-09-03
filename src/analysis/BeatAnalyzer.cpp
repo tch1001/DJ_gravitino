@@ -5,9 +5,10 @@
 //  1. Onset envelope: log-energy flux (rectified increase) on 512-sample hops.
 //  2. Coarse tempo: autocorrelation of the mean-removed envelope, comb-scored
 //     over harmonics, searched in 60..180 BPM.
-//  3. Octave disambiguation + fine tuning: phase-concentration score (how much
-//     onset energy lands in one narrow phase bin of the beat comb), scanned on
-//     a fine BPM grid around each octave candidate, preferring 90..180 BPM.
+//  3. Harmonic disambiguation + fine tuning: phase-concentration score (how
+//     much onset energy lands in one narrow phase bin of the beat comb),
+//     scanned around octave, 3:2, and 4:3 candidates. The non-octave ratios
+//     matter for pop tracks whose strongest onset subdivision is not the beat.
 //  4. Phase: dominant phase bin gives the grid; firstBeatSec is the earliest
 //     grid position whose local onset peak is strong.
 
@@ -151,9 +152,11 @@ BeatAnalysis analyzeBeats(const float* mono, int64_t n, int sampleRate)
     if (bestComb <= 0.0) return result;
     const double coarseBpm = 60.0 * envRate / bestLag;
 
-    // ---- 3. Octave candidates + fine tuning ---------------------------------
+    // ---- 3. Harmonic candidates + fine tuning -------------------------------
     std::vector<double> candidates;
-    for (double c : {coarseBpm, coarseBpm * 2.0, coarseBpm * 0.5}) {
+    for (double ratio : {1.0, 2.0, 0.5, 1.5, 2.0 / 3.0,
+                         4.0 / 3.0, 0.75}) {
+        double c = coarseBpm * ratio;
         if (c < kBpmMin - 2.0 || c > kBpmMax + 2.0) continue;
         c = std::clamp(c, kBpmMin, kBpmMax);
         bool dup = false;

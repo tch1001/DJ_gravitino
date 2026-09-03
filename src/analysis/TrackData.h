@@ -34,6 +34,12 @@ struct TrackData {
     // Fixed-tempo beatgrid.
     double bpm = 0.0;
     double firstBeatSec = 0.0;
+    // The detector's latest result is kept separately from the effective
+    // grid. A user-approved correction may replace bpm/firstBeatSec without
+    // being lost when unrelated cached analysis is upgraded later.
+    double analyzedBpm = 0.0;
+    double analyzedFirstBeatSec = 0.0;
+    QString beatGridSource = QStringLiteral("analysis");
     double beatAtSec(double sec) const { return (sec - firstBeatSec) * bpm / 60.0; }
     double secAtBeat(double beat) const { return firstBeatSec + beat * 60.0 / bpm; }
     // Local catalog alignment: canonical arrangement beat = analyzed asset

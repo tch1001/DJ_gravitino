@@ -72,9 +72,9 @@ int runSelfTest(const QStringList& args) {
     if (!ta) { std::printf("FAIL: load A (%s): %s\n", qPrintable(pathA), qPrintable(err)); return 1; }
     TrackDataPtr tb = loadAndAnalyzeTrack(pathB, &err);
     if (!tb) { std::printf("FAIL: load B (%s): %s\n", qPrintable(pathB), qPrintable(err)); return 1; }
-    std::printf("A: %-28s bpm=%.2f firstBeat=%.3fs dur=%.1fs fp=%s\n", qPrintable(ta->title),
+    std::printf("A: %-28s bpm=%.6f firstBeat=%.6fs dur=%.1fs fp=%s\n", qPrintable(ta->title),
                 ta->bpm, ta->firstBeatSec, ta->durationSec, qPrintable(ta->fingerprint));
-    std::printf("B: %-28s bpm=%.2f firstBeat=%.3fs dur=%.1fs fp=%s\n", qPrintable(tb->title),
+    std::printf("B: %-28s bpm=%.6f firstBeat=%.6fs dur=%.1fs fp=%s\n", qPrintable(tb->title),
                 tb->bpm, tb->firstBeatSec, tb->durationSec, qPrintable(tb->fingerprint));
     if (ta->bpm < 60 || ta->bpm > 200 || tb->bpm < 60 || tb->bpm > 200) {
         std::printf("FAIL: implausible BPM\n"); return 1;

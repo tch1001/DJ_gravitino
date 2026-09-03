@@ -6,6 +6,17 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-04 (codex): **Non-destructive analysis-cache migration and harmonic
+  BPM fix.** Cached detector output is now stored separately from the effective
+  beat grid with an explicit source marker. Schema/analysis upgrades merge
+  around protected grids, hot cues, and saved loops; unmarked historical
+  records are protected conservatively. Beat analysis now evaluates 3:2 and
+  4:3 candidates in addition to octave aliases, correcting the observed Baby,
+  Turn Down for What, Party In The U.S.A., and Yeah! detections against the
+  actual local audio. A regression test forces an old-cache upgrade and checks
+  that its manual grid and performance metadata survive. No transition-file
+  schema or replay semantics changed.
+
 - 2026-09-04 (codex): **Side-by-side legacy/portable migration testing.** The
   Transitions tab now has independent `.gvt` and `.transition` checkboxes,
   both enabled by default, and retains each source as a distinct filterable
