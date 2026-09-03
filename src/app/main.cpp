@@ -7,6 +7,8 @@
 #include <QStandardPaths>
 #include <QTimer>
 
+#include <cstdio>
+
 #include "../audio/AudioEngine.h"
 #include "../control/ControlBus.h"
 #include "../library/TrackLibrary.h"
@@ -30,6 +32,24 @@ int main(int argc, char** argv)
     const QStringList args = app.arguments();
     if (args.contains(QStringLiteral("--selftest")))
         return gvt::runSelfTest(args); // headless: no window, no live device
+    if (args.contains(QStringLiteral("--convert-transitions"))) {
+        gvt::TransitionStore store;
+        QStringList converted;
+        QStringList errors;
+        const int count = store.convertAllLegacy(&converted, &errors);
+        std::printf("Transition directory: %s\n",
+                    qUtf8Printable(store.directory()));
+        for (const QString& path : converted)
+            std::printf("converted: %s\n", qUtf8Printable(path));
+        for (const QString& error : errors)
+            std::fprintf(stderr, "conversion failed: %s\n",
+                         qUtf8Printable(error));
+        std::printf("Converted %d legacy transition%s; %lld error%s.\n",
+                    count, count == 1 ? "" : "s",
+                    static_cast<long long>(errors.size()),
+                    errors.size() == 1 ? "" : "s");
+        return errors.isEmpty() ? 0 : 1;
+    }
 
     // Two GUI processes would each open their own CoreAudio stream. A hidden
     // older process can then sound exactly like one deck is playing two tracks

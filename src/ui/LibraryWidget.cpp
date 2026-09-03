@@ -3,6 +3,7 @@
 #include "Theme.h"
 
 #include <QAbstractTableModel>
+#include <QCheckBox>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -153,6 +154,7 @@ private:
 // ------------------------------------------------------ TransitionEdgeModel
 
 constexpr int kTransitionFromPlayingRole = Qt::UserRole + 1;
+constexpr int kTransitionFormatRole = Qt::UserRole + 2;
 
 // Read-only graph edge list over every saved transition. Each row is one
 // directed From -> To edge, which makes possible set routes easy to scan and
@@ -202,6 +204,8 @@ public:
             }
             return false;
         }
+        if (role == kTransitionFormatRole)
+            return static_cast<int>(file.sourceFormat);
         double endBeat = 0.0;
         for (const GvtEvent& event : file.events)
             endBeat = std::max(endBeat, event.beat);
@@ -312,7 +316,32 @@ public:
         sort(sortColumn(), sortOrder());
     }
 
+    void setFormatVisibility(bool showLegacy, bool showPortable)
+    {
+        if (showLegacy_ == showLegacy && showPortable_ == showPortable)
+            return;
+        beginFilterChange();
+        showLegacy_ = showLegacy;
+        showPortable_ = showPortable;
+        endFilterChange(QSortFilterProxyModel::Direction::Rows);
+    }
+
 protected:
+    bool filterAcceptsRow(int sourceRow,
+                          const QModelIndex& sourceParent) const override
+    {
+        const QModelIndex index = sourceModel()->index(
+            sourceRow, TransitionEdgeModel::ColFrom, sourceParent);
+        const auto format = static_cast<TransitionSourceFormat>(
+            index.data(kTransitionFormatRole).toInt());
+        if (format == TransitionSourceFormat::LegacyGvt && !showLegacy_)
+            return false;
+        if (format == TransitionSourceFormat::PortableYaml && !showPortable_)
+            return false;
+        return QSortFilterProxyModel::filterAcceptsRow(sourceRow,
+                                                       sourceParent);
+    }
+
     bool lessThan(const QModelIndex& left,
                   const QModelIndex& right) const override
     {
@@ -332,6 +361,8 @@ protected:
 private:
     AudioEngine* engine_ = nullptr;
     std::array<QString, kNumDecks> playingTrackKeys_ {};
+    bool showLegacy_ = true;
+    bool showPortable_ = true;
 };
 
 // ------------------------------------------------------------ LibraryWidget
@@ -404,6 +435,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     libraryTabBtn_ = new FitPushButton(tr("Library"));
     historyTabBtn_ = new FitPushButton(tr("History"));
     transitionTabBtn_ = new FitPushButton(tr("Transitions"));
+    transitionTabBtn_->setObjectName(QStringLiteral("transitionLibraryTab"));
     for (QPushButton* b : {libraryTabBtn_, historyTabBtn_, transitionTabBtn_}) {
         b->setCheckable(true);
         b->setAutoExclusive(true);
@@ -486,7 +518,34 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     transitionProxy_->setFilterKeyColumn(-1);
     transitionProxy_->setSortCaseSensitivity(Qt::CaseInsensitive);
     transitionProxy_->setSortRole(Qt::UserRole);
+    auto* transitionPage = new QWidget;
+    auto* transitionPageLayout = new QVBoxLayout(transitionPage);
+    transitionPageLayout->setContentsMargins(0, 0, 0, 0);
+    transitionPageLayout->setSpacing(2);
+    auto* formatRow = new QHBoxLayout;
+    formatRow->setContentsMargins(2, 0, 2, 0);
+    formatRow->setSpacing(10);
+    auto* formatLabel = new QLabel(tr("SHOW"));
+    formatLabel->setStyleSheet(
+        QStringLiteral("color:#8a909c; font-weight:bold; letter-spacing:1px;"));
+    formatRow->addWidget(formatLabel);
+    legacyTransitionFilter_ = new QCheckBox(tr(".gvt"));
+    legacyTransitionFilter_->setObjectName(
+        QStringLiteral("legacyTransitionFilter"));
+    legacyTransitionFilter_->setToolTip(
+        tr("Show legacy .gvt transition files"));
+    legacyTransitionFilter_->setChecked(true);
+    portableTransitionFilter_ = new QCheckBox(tr(".transition"));
+    portableTransitionFilter_->setObjectName(
+        QStringLiteral("portableTransitionFilter"));
+    portableTransitionFilter_->setToolTip(
+        tr("Show portable .transition YAML files"));
+    portableTransitionFilter_->setChecked(true);
+    formatRow->addWidget(legacyTransitionFilter_);
+    formatRow->addWidget(portableTransitionFilter_);
+    formatRow->addStretch(1);
     transitionTable_ = new QTableView;
+    transitionTable_->setObjectName(QStringLiteral("transitionLibraryTable"));
     transitionTable_->setModel(transitionProxy_);
     transitionTable_->setSortingEnabled(true);
     transitionTable_->sortByColumn(TransitionEdgeModel::ColFrom,
@@ -511,7 +570,9 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
         transitionTable_->horizontalHeader()->setSectionResizeMode(
             col, QHeaderView::ResizeToContents);
     transitionTable_->setAlternatingRowColors(true);
-    transitionPageIndex_ = stack_->addWidget(transitionTable_);
+    transitionPageLayout->addWidget(transitionTable_, 1);
+    transitionPageLayout->addLayout(formatRow);
+    transitionPageIndex_ = stack_->addWidget(transitionPage);
 
     splitter_ = new QSplitter(Qt::Horizontal);
     splitter_->addWidget(crateTree_);
@@ -530,6 +591,16 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
         proxy_->setFilterFixedString(t);
         transitionProxy_->setFilterFixedString(t);
     });
+    const auto updateTransitionFormatFilter = [this] {
+        transitionProxy_->setFormatVisibility(
+            legacyTransitionFilter_->isChecked(),
+            portableTransitionFilter_->isChecked());
+        updateTransitionButtons();
+    };
+    connect(legacyTransitionFilter_, &QCheckBox::toggled, this,
+            updateTransitionFormatFilter);
+    connect(portableTransitionFilter_, &QCheckBox::toggled, this,
+            updateTransitionFormatFilter);
     connect(loadABtn_, &QPushButton::clicked, this,
             [this] { loadSelectedTo(0); });
     connect(loadBBtn_, &QPushButton::clicked, this,
@@ -547,12 +618,12 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             &LibraryWidget::renameSelectedTransition);
     connect(deleteTransitionBtn_, &QPushButton::clicked, this,
             &LibraryWidget::deleteSelectedTransition);
-    connect(libraryTabBtn_, &QPushButton::clicked, this,
-            [this] { showTab(0); });
-    connect(historyTabBtn_, &QPushButton::clicked, this,
-            [this] { showTab(1); });
-    connect(transitionTabBtn_, &QPushButton::clicked, this,
-            [this] { showTab(2); });
+    connect(libraryTabBtn_, &QPushButton::toggled, this,
+            [this](bool checked) { if (checked) showTab(0); });
+    connect(historyTabBtn_, &QPushButton::toggled, this,
+            [this](bool checked) { if (checked) showTab(1); });
+    connect(transitionTabBtn_, &QPushButton::toggled, this,
+            [this](bool checked) { if (checked) showTab(2); });
     connect(table_->selectionModel(), &QItemSelectionModel::currentChanged,
             this, [this] { updateLoadButtons(); });
     showTab(0); // initial tab styles

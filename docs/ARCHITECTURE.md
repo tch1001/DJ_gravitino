@@ -164,6 +164,11 @@ overlapping outgoing/incoming moves share a two-lane row, and common hot-cue
 launch gestures become one instruction. Raw mode retains the prior recorded
 event table; both views derive from the same typed timeline and never alter
 serialized checkpoints.
+The Library's Transitions tab keeps legacy and portable files as distinct rows
+and exposes independent `.gvt` and `.transition` checkboxes, both enabled by
+default. This makes migration comparisons explicit instead of hiding the
+legacy source behind its portable counterpart. `--convert-transitions` creates
+only missing portable counterparts and is safe to run repeatedly.
 During Perform and Tutorial, a translucent bar fills across the most recently
 reached row until the next distinct action beat, so the row change itself is
 the timing cue. A derived, non-actionable beat-zero “Transition starts” row

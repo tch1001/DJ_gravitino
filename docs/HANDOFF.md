@@ -5,9 +5,12 @@ Updated: 2026-09-04 (Asia/Singapore)
 ## Current state
 
 The Tutor/progress/mouse-control work is committed and pushed at `00fe760`
-(`Improve tutor workflow and mouse deck controls`). The current change set
-introduces the portable `.transition` YAML model, permanent `.gvt` adapter,
-multi-format arrangement catalog/matching, and transition-owned temporary cues.
+(`Improve tutor workflow and mouse deck controls`). Portable `.transition`
+YAML, the permanent `.gvt` adapter, multi-format catalog/matching, and
+transition-owned cues are pushed at `641db49`. The current follow-up adds
+format checkboxes to the Transitions tab and an idempotent bulk-conversion
+command. All 28 files in the user's transition directory were converted on
+2026-09-04; their 28 legacy sources remain beside them.
 
 The user explicitly permits stopping a running Gravitino process when a
 restart is needed. Always resolve the process narrowly with

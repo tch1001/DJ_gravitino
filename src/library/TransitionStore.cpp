@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSet>
 #include <QStringList>
 #include <QUuid>
 
@@ -185,17 +186,7 @@ void TransitionStore::reload()
         QStringList warnings;
         if (loadTransitionFile(fi.absoluteFilePath(), f, &error, &warnings)) {
             f.filePath = fi.absoluteFilePath();
-            const auto duplicate = std::find_if(
-                impl_->files.begin(), impl_->files.end(),
-                [&f](const GvtFile& existing) {
-                    return !displayIdentity(f).isEmpty() &&
-                           displayIdentity(existing) == displayIdentity(f);
-                });
-            if (duplicate == impl_->files.end()) {
-                impl_->files.push_back(std::move(f));
-            } else if (f.sourceFormat == TransitionSourceFormat::PortableYaml) {
-                *duplicate = std::move(f); // portable copy supersedes legacy source
-            }
+            impl_->files.push_back(std::move(f));
         } else {
             qWarning("TransitionStore: skipping %s: %s",
                      qUtf8Printable(fi.absoluteFilePath()), qUtf8Printable(error));
@@ -286,6 +277,45 @@ bool isManagedPath(const QString& dir, const QString& path)
 }
 
 } // namespace
+
+int TransitionStore::convertAllLegacy(QStringList* convertedPaths,
+                                      QStringList* errors)
+{
+    QDir().mkpath(impl_->dir);
+    QSet<QString> alreadyConverted;
+    for (const GvtFile& file : impl_->files) {
+        if (file.sourceFormat == TransitionSourceFormat::PortableYaml &&
+            !file.legacySourceId.isEmpty())
+            alreadyConverted.insert(file.legacySourceId);
+    }
+
+    int converted = 0;
+    const std::vector<GvtFile> snapshot = impl_->files;
+    for (const GvtFile& source : snapshot) {
+        if (source.sourceFormat != TransitionSourceFormat::LegacyGvt)
+            continue;
+        const QString sourceId = displayIdentity(source);
+        if (alreadyConverted.contains(sourceId)) continue;
+
+        GvtFile portable = migratedPortableCopy(source);
+        const QString path = pathFor(impl_->dir, portable);
+        QString error;
+        if (QFileInfo::exists(path)) {
+            error = QStringLiteral("destination already exists: %1").arg(path);
+        } else if (!saveTransitionFile(portable, path, &error)) {
+            error = QStringLiteral("%1: %2").arg(source.filePath, error);
+        }
+        if (!error.isEmpty()) {
+            if (errors) errors->append(error);
+            continue;
+        }
+        alreadyConverted.insert(sourceId);
+        if (convertedPaths) convertedPaths->append(path);
+        ++converted;
+    }
+    if (converted > 0) reload();
+    return converted;
+}
 
 QString TransitionStore::save(GvtFile& f, QString* error)
 {

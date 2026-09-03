@@ -9,12 +9,14 @@
 #include "ui/TransitionPanel.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTableWidget>
+#include <QTableView>
 #include <QTemporaryDir>
 
 #include <cmath>
@@ -124,6 +126,11 @@ int main(int argc, char** argv)
     };
     QString saveError;
     CHECK(!store.save(sample, &saveError).isEmpty());
+    const QString legacyPath = store.directory() +
+        QStringLiteral("/progress-ui-fixture.gvt");
+    CHECK(gvtSaveFile(sample, legacyPath, &saveError));
+    store.reload();
+    CHECK(store.all().size() == 2);
     engine.deck(0).loadTrack(
         makeTrack(sample.from.title, sample.from.fingerprint));
     engine.deck(1).loadTrack(
@@ -153,6 +160,33 @@ int main(int argc, char** argv)
         CHECK(libraryPanel && !libraryPanel->isHidden());
         CHECK(libraryToggle && libraryToggle->text().contains(
                                    QStringLiteral("HIDE LIBRARY")));
+        auto* transitionTab = window.findChild<QPushButton*>(
+            QStringLiteral("transitionLibraryTab"));
+        auto* legacyFilter = window.findChild<QCheckBox*>(
+            QStringLiteral("legacyTransitionFilter"));
+        auto* portableFilter = window.findChild<QCheckBox*>(
+            QStringLiteral("portableTransitionFilter"));
+        auto* transitionTable = window.findChild<QTableView*>(
+            QStringLiteral("transitionLibraryTable"));
+        CHECK(transitionTab != nullptr);
+        CHECK(legacyFilter != nullptr);
+        CHECK(portableFilter != nullptr);
+        CHECK(transitionTable != nullptr);
+        if (transitionTab) transitionTab->click();
+        app.processEvents();
+        CHECK(legacyFilter && legacyFilter->isVisible());
+        CHECK(portableFilter && portableFilter->isVisible());
+        CHECK(legacyFilter && legacyFilter->isChecked());
+        CHECK(portableFilter && portableFilter->isChecked());
+        CHECK(transitionTable && transitionTable->model()->rowCount() == 2);
+        if (legacyFilter) legacyFilter->setChecked(false);
+        CHECK(transitionTable && transitionTable->model()->rowCount() == 1);
+        if (portableFilter) portableFilter->setChecked(false);
+        CHECK(transitionTable && transitionTable->model()->rowCount() == 0);
+        if (legacyFilter) legacyFilter->setChecked(true);
+        CHECK(transitionTable && transitionTable->model()->rowCount() == 1);
+        if (portableFilter) portableFilter->setChecked(true);
+        CHECK(transitionTable && transitionTable->model()->rowCount() == 2);
         auto* midiStatus = window.findChild<QLabel*>(
             QStringLiteral("midiConnectionStatus"));
         CHECK(midiStatus != nullptr);

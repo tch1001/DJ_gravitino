@@ -41,6 +41,7 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/gravitino            # launch the app
 ./build/gravitino --selftest # headless: renders a scripted transition to WAV
+./build/gravitino --convert-transitions # copy legacy .gvt files to YAML
 ```
 
 ## Using it
@@ -66,8 +67,8 @@ cmake --build build
    warns before starting when an action lacks an FLX4 mapping or a referenced
    hot cue is missing, unverifiable, or mapped to the wrong beat.
 
-`--selftest` writes `selftest_transition.transition`,
-`selftest_recorded.transition`, and `selftest_out.wav` in the working directory.
+`--selftest` writes `selftest_out.wav` in the working directory; its temporary
+transition round-trip files are removed automatically.
 
 Plug in a DDJ-FLX4 at any time — the status bar shows the connection and all
 controls + LEDs map automatically (see docs/STATUS.md for the exact mapping).
@@ -75,8 +76,9 @@ Choose the master speakers under Settings ▸ Audio Output. The system default i
 used initially; Bluetooth works with its expected latency, while a connected
 FLX4 continues to provide the separate headphone-cue output.
 
-Dev flags: `--selftest` (headless render check), `--autoload [A B]` (auto-load
-matching library tracks onto the decks).
+Utility/dev flags: `--convert-transitions` (idempotently create portable copies
+of every legacy transition), `--selftest` (headless render check), and
+`--autoload [A B]` (auto-load matching library tracks onto the decks).
 
 ## Repository layout
 

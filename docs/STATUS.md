@@ -6,6 +6,18 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-04 (codex): **Side-by-side legacy/portable migration testing.** The
+  Transitions tab now has independent `.gvt` and `.transition` checkboxes,
+  both enabled by default, and retains each source as a distinct filterable
+  row. `--convert-transitions` atomically creates only missing portable copies,
+  records their stable legacy source identities, never overwrites `.gvt`, and
+  is idempotent. All 28 existing legacy transitions in
+  `~/Music/Gravitino/Transitions` were converted successfully: the directory
+  now contains 28 `.gvt` and 28 `.transition` files. Verified with all 27
+  CTest targets, the full offline `--selftest`, `git diff --check`, an
+  idempotence rerun that created zero additional files, and a live compact-view
+  check confirming the bottom filter row remains visible.
+
 - 2026-09-04 (codex): **Portable `.transition` YAML, arrangement catalog, and
   semantic cues.** New recordings use deterministic safe-subset YAML with
   typed endpoint evidence, canonical fractional beat coordinates, exact

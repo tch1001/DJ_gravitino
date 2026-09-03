@@ -101,8 +101,8 @@ int main()
     CHECK(!QFileInfo::exists(renamedPath));
     CHECK(store.all().empty());
 
-    // A legacy file remains where it is when edited. The portable copy has
-    // the same stable identity and therefore supersedes it in the UI.
+    // Bulk conversion leaves the legacy source in place and exposes both
+    // files so the library's format filters can compare them directly.
     GvtFile legacy;
     legacy.name = QStringLiteral("Legacy source");
     legacy.from.title = QStringLiteral("Old From");
@@ -121,26 +121,37 @@ int main()
     QString legacyId;
     if (!store.all().empty()) {
         CHECK(store.all()[0].sourceFormat == TransitionSourceFormat::LegacyGvt);
-        GvtFile edited = store.all()[0];
-        legacyId = edited.id;
-        edited.description = QStringLiteral("Converted without overwrite");
-        const bool converted = store.update(edited, &error);
-        if (!converted)
-            std::fprintf(stderr, "legacy conversion error: %s\n",
-                         qUtf8Printable(error));
-        CHECK(converted);
+        legacyId = store.all()[0].id;
     }
+    QStringList convertedPaths;
+    QStringList conversionErrors;
+    CHECK(store.convertAllLegacy(&convertedPaths, &conversionErrors) == 1);
+    CHECK(conversionErrors.isEmpty());
+    CHECK(convertedPaths.size() == 1);
     CHECK(QFileInfo::exists(legacyPath));
-    CHECK(store.all().size() == 1);
-    if (!store.all().empty()) {
-        CHECK(store.all()[0].sourceFormat == TransitionSourceFormat::PortableYaml);
-        CHECK(store.all()[0].id != legacyId);
-        CHECK(store.all()[0].legacySourceId == legacyId);
-        CHECK(store.all()[0].description ==
-              QStringLiteral("Converted without overwrite"));
-        CHECK(store.all()[0].filePath != legacyPath);
-        CHECK(QFileInfo::exists(store.all()[0].filePath));
+    CHECK(store.all().size() == 2);
+    const GvtFile* portable = nullptr;
+    const GvtFile* legacySource = nullptr;
+    for (const GvtFile& candidate : store.all()) {
+        if (candidate.sourceFormat == TransitionSourceFormat::PortableYaml)
+            portable = &candidate;
+        else if (candidate.sourceFormat == TransitionSourceFormat::LegacyGvt)
+            legacySource = &candidate;
     }
+    CHECK(portable != nullptr);
+    CHECK(legacySource != nullptr);
+    CHECK(portable && portable->id != legacyId);
+    CHECK(portable && portable->legacySourceId == legacyId);
+    CHECK(portable && portable->filePath != legacyPath);
+    CHECK(portable && QFileInfo::exists(portable->filePath));
+    CHECK(legacySource && legacySource->filePath == legacyPath);
+
+    // Re-running conversion is idempotent and cannot accumulate copies.
+    convertedPaths.clear();
+    CHECK(store.convertAllLegacy(&convertedPaths, &conversionErrors) == 0);
+    CHECK(convertedPaths.isEmpty());
+    CHECK(conversionErrors.isEmpty());
+    CHECK(store.all().size() == 2);
 
     qunsetenv("GRAVITINO_TRANSITIONS_DIR");
     if (failures) return 1;

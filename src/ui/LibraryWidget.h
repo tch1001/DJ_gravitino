@@ -7,6 +7,7 @@
 class QLineEdit;
 class QPoint;
 class QPushButton;
+class QCheckBox;
 class QSplitter;
 class QStackedWidget;
 class QTableView;
@@ -82,6 +83,8 @@ private:
     int historyPageIndex_ = -1;
     int transitionPageIndex_ = -1;
     QLineEdit* search_ = nullptr;
+    QCheckBox* legacyTransitionFilter_ = nullptr;
+    QCheckBox* portableTransitionFilter_ = nullptr;
     QPushButton* libraryTabBtn_ = nullptr;
     QPushButton* historyTabBtn_ = nullptr;
     QPushButton* transitionTabBtn_ = nullptr;

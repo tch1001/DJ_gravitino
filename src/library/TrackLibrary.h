@@ -64,6 +64,10 @@ public:
     QString renameTransition(const GvtFile& f, const QString& newName,
                              QString* error);
     bool deleteTransition(const GvtFile& f, QString* error);
+    // Create one portable copy for every legacy source that does not already
+    // have a migrated counterpart. Legacy files are never overwritten.
+    int convertAllLegacy(QStringList* convertedPaths = nullptr,
+                         QStringList* errors = nullptr);
 signals:
     void changed();
 private:

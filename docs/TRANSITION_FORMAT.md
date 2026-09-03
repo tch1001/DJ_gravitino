@@ -305,5 +305,8 @@ semantic temporary cues during adaptation.
 Until conversion, a legacy document receives a stable content-derived identity
 (`legacy-…`). Its first portable save receives a persistent UUID and records
 the legacy source identity under `extensions.gravitino.legacy.source_id`.
-Scanning uses that link to show the portable copy instead of a duplicate while
-leaving the `.gvt` intact.
+Scanning keeps both source files available as distinct rows so they can be
+compared with the Transitions tab's `.gvt` and `.transition` filters. The link
+still makes bulk conversion idempotent. `gravitino --convert-transitions`
+creates only missing portable counterparts and always leaves each `.gvt`
+intact.
