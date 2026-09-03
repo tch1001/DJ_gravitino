@@ -13,6 +13,7 @@
 #include "../midi/SoftTakeover.h"
 #include "../transitions/Transition.h"
 #include "../transitions/TransitionEngine.h"
+#include "../transitions/TransitionEventSummary.h"
 #include "../transitions/TransitionTolerance.h"
 
 class QCheckBox;
@@ -27,16 +28,18 @@ namespace gvt {
 
 class Flx4TutorialWidget;
 
-// Transition browser + record/perform controls.
-// Left: .gvt files matching the currently loaded (A,B) pair (both orderings).
-// Right: REC / STOP&SAVE / PERFORM / TUTORIAL / ABORT with progress + rec
-// indicator, plus tutorial prompt banner and accuracy toasts.
+// Transition record/perform controls and event-sequence preview. The canonical
+// .gvt picker lives in Library > Transitions; an internal list retains the
+// loaded-deck match and direction used by replay.
 class TransitionPanel : public QWidget {
     Q_OBJECT
 public:
     TransitionPanel(ControlBus* bus, AudioEngine* engine,
                     TransitionStore* store, TransitionRecorder* recorder,
                     TransitionPlayer* player, QWidget* parent = nullptr);
+    // MainWindow supplies the dedicated large Tutor region. The tutorial
+    // surface remains owned by this panel but is laid out over that region.
+    void setTutorialOverlayAnchor(QWidget* anchor);
 
 signals:
     void statusMessage(const QString& msg, int timeoutMs);
@@ -55,6 +58,8 @@ signals:
     void hardwareTakeoverTrackingCancelled();
     void tutorialPerformancePadRequested(int deck, int mode, int pad,
                                          bool pressed);
+    void tutorialViewChanged(bool open);
+    void transitionEditingEnabled(bool enabled);
     // Exact visible controls currently outside the selected transition's
     // accepted pre-state tolerance. Empty clears all highlights.
     void setupMismatchControlsChanged(
@@ -62,6 +67,12 @@ signals:
 
 public slots:
     void refreshMatches();  // call on trackLoaded / store changed
+    // Select the canonical edge chosen in Library > Transitions after its
+    // tracks have been loaded onto the physical decks.
+    void selectTransitionFile(const QString& filePath);
+    // Open any managed transition in the validated source editor. This also
+    // serves Library > Transitions, where the tracks need not be loaded.
+    void editTransitionFile(const QString& filePath);
     void observeTutorialHardwareControl(const gvt::ControlEvent& event);
     void observePerformancePadState(int deck, int mode,
                                     unsigned int enabledMask,
@@ -81,6 +92,7 @@ private slots:
     void onAbort();
     void onRename();
     void onDelete();
+    void onEdit();
     void onLabelCue();
     void onApplySetup();
     void onEditSetupTolerance();
@@ -92,6 +104,10 @@ private slots:
                           double valueError);
 
 private:
+    enum class SequenceViewMode {
+        Human,
+        Raw,
+    };
     struct Match {
         const GvtFile* file = nullptr;
         int fromDeck = 0;          // physical deck holding the [from] track
@@ -111,13 +127,28 @@ private:
     void clearReplayLifecycle();
     void setReplayBlocked(const Match& match, const QString& reason);
     void announceEntryMarker();    // emit entryMarkerChanged for selection
+    void announceSelectedEventMarker();
     void updatePreview();
+    void configurePreviewColumns();
+    void addSequenceStartRow(const GvtFile& file);
+    void updateRawPreview(const GvtFile& file);
+    void updateHumanPreview(const GvtFile& file);
+    void updateSequenceProgressOverlay();
+    void clearSequenceProgress();
+    QString humanActionText(const GvtFile& file,
+                            const HumanTransitionAction& action) const;
+    QString humanBeatText(double anchor,
+                          const HumanTransitionAction& action) const;
+    int summaryRowForEvent(const GvtEvent& event) const;
+    void setTutorialPreviewEvent(const GvtEvent* event);
+    void editTransition(const GvtFile& file);
     void updateControls();
     void updateSetupStatus();
     void applyInitialSetup(const Match& match, bool announce,
                            bool prepareFromTransport = false,
                            bool prepareToTransport = false,
-                           bool applyFromTempo = true);
+                           bool applyFromTempo = true,
+                           bool applyCrossfader = true);
     bool setupMatches(const Match& match, QStringList* differences = nullptr,
                       bool honorCloseEnough = true,
                       QList<ControlEvent>* mismatchControls = nullptr) const;
@@ -162,7 +193,10 @@ private:
     QPushButton* abortBtn_ = nullptr;
     QPushButton* renameBtn_ = nullptr;
     QPushButton* deleteBtn_ = nullptr;
+    QPushButton* editBtn_ = nullptr;
     QPushButton* labelCueBtn_ = nullptr;
+    QPushButton* humanModeBtn_ = nullptr;
+    QPushButton* rawModeBtn_ = nullptr;
     QPushButton* applySetupBtn_ = nullptr;
     QCheckBox* closeEnoughCheck_ = nullptr;
     QPushButton* toleranceBtn_ = nullptr;
@@ -176,6 +210,7 @@ private:
     int capturedCount_ = 0;
     QString selectedPath_;
     Flx4TutorialWidget* tutorialOverlay_ = nullptr;
+    QWidget* tutorialOverlayAnchor_ = nullptr;
     QWidget* tutorialLeftPane_ = nullptr;
     QWidget* tutorialPreviewPane_ = nullptr;
     std::vector<GvtEvent> tutorialPrompts_;
@@ -185,6 +220,15 @@ private:
     bool tutorialViewOpen_ = false;
     bool takeoverTrackingActive_ = false;
     bool refreshingMatches_ = false;
+    bool transitionEditingEnabled_ = false;
+    int tutorialPreviewRow_ = -1;
+    SequenceViewMode sequenceViewMode_ = SequenceViewMode::Human;
+    std::vector<HumanTransitionRow> humanPreviewRows_;
+    std::vector<double> previewRowBeats_;
+    double sequenceBeatsIn_ = 0.0;
+    double sequenceBeatsTotal_ = 0.0;
+    bool sequenceProgressActive_ = false;
+    int sequenceProgressRow_ = -1;
     ReplayLifecycle replayLifecycle_ = ReplayLifecycle::None;
     QString replayPath_;
     int replayFromDeck_ = -1;

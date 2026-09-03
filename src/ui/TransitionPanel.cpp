@@ -2,6 +2,7 @@
 #include "FitButton.h"
 #include "Flx4TutorialWidget.h"
 #include "../performance/PerformancePads.h"
+#include "../transitions/TransitionEventSummary.h"
 #include "../transitions/TransitionPrime.h"
 #include "../transitions/TransitionPlayerExt.h"
 #include "Theme.h"
@@ -9,9 +10,12 @@
 #include <QHBoxLayout>
 #include <QAbstractButton>
 #include <QCheckBox>
+#include <QBrush>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QFileInfo>
+#include <QFontDatabase>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -19,7 +23,9 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QProgressBar>
+#include <QPlainTextEdit>
 #include <QSettings>
 #include <QSet>
 #include <QSignalBlocker>
@@ -37,6 +43,16 @@
 namespace gvt {
 
 namespace {
+
+QString compactNumber(double value, int decimals)
+{
+    QString text = QString::number(value, 'f', decimals);
+    while (text.contains(QLatin1Char('.')) && text.endsWith(QLatin1Char('0')))
+        text.chop(1);
+    if (text.endsWith(QLatin1Char('.'))) text.chop(1);
+    if (text == QLatin1String("-0")) text = QStringLiteral("0");
+    return text;
+}
 
 class ToggleSelectionList final : public QListWidget {
 public:
@@ -56,25 +72,64 @@ protected:
     }
 };
 
-std::vector<int> summarizedEventIndices(const GvtFile& file) {
-    int firstCrossfader = -1;
-    int lastCrossfader = -1;
-    for (int i = 0; i < (int)file.events.size(); ++i) {
-        if (file.events[(size_t)i].control != ControlId::Crossfader) continue;
-        if (firstCrossfader < 0) firstCrossfader = i;
-        lastCrossfader = i;
+class ProgressTableWidget final : public QTableWidget {
+public:
+    using QTableWidget::QTableWidget;
+
+    void setTimelineProgress(int row, double fraction)
+    {
+        const double clamped = std::clamp(fraction, 0.0, 1.0);
+        const int pixel = row >= 0
+                              ? static_cast<int>(std::lround(
+                                    viewport()->width() * clamped))
+                              : -1;
+        if (row == progressRow_ && pixel == progressPixel_) return;
+        progressRow_ = row;
+        progressFraction_ = clamped;
+        progressPixel_ = pixel;
+        setProperty("timelineProgressRow", row);
+        setProperty("timelineProgressFraction", clamped);
+        viewport()->update();
     }
 
-    std::vector<int> indices;
-    indices.reserve(file.events.size());
-    for (int i = 0; i < (int)file.events.size(); ++i) {
-        if (file.events[(size_t)i].control == ControlId::Crossfader &&
-            i != firstCrossfader && i != lastCrossfader)
-            continue;
-        indices.push_back(i);
+protected:
+    void paintEvent(QPaintEvent* event) override
+    {
+        QTableWidget::paintEvent(event);
+        if (progressRow_ < 0 || progressRow_ >= rowCount() ||
+            columnCount() <= 0)
+            return;
+
+        QRect rowRect = visualRect(model()->index(progressRow_, 0));
+        if (!rowRect.isValid() || rowRect.bottom() < 0 ||
+            rowRect.top() >= viewport()->height())
+            return;
+        rowRect.setLeft(0);
+        rowRect.setRight(viewport()->width() - 1);
+
+        QPainter painter(viewport());
+        painter.setClipRect(viewport()->rect());
+        const int fillWidth = static_cast<int>(std::lround(
+            rowRect.width() * progressFraction_));
+        if (fillWidth > 0) {
+            QRect fill = rowRect;
+            fill.setWidth(std::min(fillWidth, rowRect.width()));
+            painter.fillRect(fill, QColor(0x35, 0xc8, 0xe8, 58));
+        }
+        const int edgeX = rowRect.left() +
+                          std::clamp(fillWidth, 0,
+                                     std::max(0, rowRect.width() - 1));
+        painter.setPen(QPen(QColor(0x67, 0xd8, 0xf0, 210), 2));
+        painter.drawLine(edgeX, rowRect.top(), edgeX, rowRect.bottom());
+        painter.setPen(QPen(QColor(0x35, 0xc8, 0xe8, 125), 1));
+        painter.drawRect(rowRect.adjusted(0, 0, -1, -1));
     }
-    return indices;
-}
+
+private:
+    int progressRow_ = -1;
+    int progressPixel_ = -1;
+    double progressFraction_ = 0.0;
+};
 
 Flx4PadMode tutorialPadMode(int recordedMode)
 {
@@ -115,20 +170,22 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
 {
     setObjectName(QStringLiteral("transitionPanel"));
     setProperty("panel", true);
-    setMinimumHeight(124);
+    setMinimumHeight(190);
 
     auto* root = new QHBoxLayout(this);
     root->setContentsMargins(6, 4, 6, 4);
     root->setSpacing(0);
-    auto* contentSplitter = new QSplitter(Qt::Horizontal, this);
+    auto* contentSplitter = new QSplitter(Qt::Vertical, this);
     contentSplitter->setObjectName(
         QStringLiteral("transitionContentSplitter"));
     contentSplitter->setChildrenCollapsible(false);
     root->addWidget(contentSplitter);
 
-    // Left: matching transitions list.
+    // The canonical transition picker now lives in Library > Transitions.
+    // Keep this list as a hidden selection model so matching, direction, and
+    // replay code retain one source of truth without duplicating an on-screen
+    // transition list.
     auto* leftPane = new QWidget(contentSplitter);
-    tutorialLeftPane_ = leftPane;
     leftPane->setMinimumWidth(140);
     auto* leftCol = new QVBoxLayout(leftPane);
     leftCol->setContentsMargins(0, 0, 4, 0);
@@ -151,11 +208,12 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     list_->setMinimumHeight(52);
     leftCol->addWidget(list_, 1);
     contentSplitter->addWidget(leftPane);
+    leftPane->hide();
 
-    // Center: deterministic sequence preview for the selected transition.
+    // Bottom: deterministic sequence preview for the selected transition.
     auto* previewPane = new QWidget(contentSplitter);
     tutorialPreviewPane_ = previewPane;
-    previewPane->setMinimumWidth(220);
+    previewPane->setMinimumHeight(92);
     auto* previewCol = new QVBoxLayout(previewPane);
     previewCol->setContentsMargins(4, 0, 4, 0);
     auto* previewHeader = new QLabel(tr("EVENT SEQUENCE"));
@@ -166,20 +224,47 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     previewHeaderRow->setSpacing(3);
     previewHeaderRow->addWidget(previewHeader);
     previewHeaderRow->addStretch(1);
+    humanModeBtn_ = new FitPushButton(tr("HUMAN"));
+    rawModeBtn_ = new FitPushButton(tr("RAW"));
+    humanModeBtn_->setObjectName(QStringLiteral("humanSequenceMode"));
+    rawModeBtn_->setObjectName(QStringLiteral("rawSequenceMode"));
+    for (QPushButton* button : {humanModeBtn_, rawModeBtn_}) {
+        button->setCheckable(true);
+        button->setAutoExclusive(true);
+        button->setFixedHeight(18);
+        button->setStyleSheet(
+            "QPushButton:checked { background:#35c8e8; color:#111318; "
+            "font-weight:bold; }");
+        previewHeaderRow->addWidget(button);
+    }
+    humanModeBtn_->setChecked(true);
+    humanModeBtn_->setToolTip(
+        tr("Show condensed, role-aware transition instructions"));
+    rawModeBtn_->setToolTip(
+        tr("Show the existing recorded event sequence"));
+    editBtn_ = new FitPushButton(tr("EDIT TRANSITION…"));
+    editBtn_->setFixedHeight(18);
+    editBtn_->setToolTip(
+        tr("Edit and validate the selected transition's .gvt source"));
+    previewHeaderRow->addWidget(editBtn_);
     labelCueBtn_ = new FitPushButton(tr("LABEL CUE…"));
     labelCueBtn_->setFixedHeight(18);
     labelCueBtn_->setToolTip(
         tr("Add, change, or clear a waveform label at the selected event beat"));
     previewHeaderRow->addWidget(labelCueBtn_);
     previewCol->addLayout(previewHeaderRow);
-    preview_ = new QTableWidget;
+    preview_ = new ProgressTableWidget;
+    preview_->setObjectName(QStringLiteral("transitionEventSequence"));
     preview_->setColumnCount(5);
     preview_->setHorizontalHeaderLabels(
         {tr("Beat"), tr("Target"), tr("Action"), tr("Value"), tr("Cue label")});
     preview_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     preview_->setSelectionBehavior(QAbstractItemView::SelectRows);
     preview_->setSelectionMode(QAbstractItemView::SingleSelection);
+    preview_->setWordWrap(false);
     preview_->verticalHeader()->hide();
+    preview_->verticalHeader()->setDefaultSectionSize(19);
+    preview_->horizontalHeader()->setFixedHeight(20);
     preview_->horizontalHeader()->setStretchLastSection(true);
     preview_->setColumnWidth(0, 52);
     preview_->setColumnWidth(1, 68);
@@ -188,9 +273,10 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     previewCol->addWidget(preview_, 1);
     contentSplitter->addWidget(previewPane);
 
-    // Right: controls.
+    // Top: transition controls and readiness guidance.
     auto* rightPane = new QWidget(contentSplitter);
-    rightPane->setMinimumWidth(240);
+    tutorialLeftPane_ = rightPane;
+    rightPane->setMinimumHeight(84);
     auto* rightCol = new QVBoxLayout(rightPane);
     rightCol->setContentsMargins(4, 0, 0, 0);
     auto* buttons = new QHBoxLayout;
@@ -276,18 +362,21 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     rightCol->addLayout(statusRow);
     rightCol->addStretch(1);
     contentSplitter->addWidget(rightPane);
-    contentSplitter->setStretchFactor(0, 2);
-    contentSplitter->setStretchFactor(1, 3);
-    contentSplitter->setStretchFactor(2, 2);
-    contentSplitter->setSizes({260, 480, 360});
+    // Move controls ahead of the full-width sequence; the hidden internal
+    // list remains a zero-size splitter child.
+    contentSplitter->insertWidget(0, rightPane);
+    contentSplitter->setStretchFactor(0, 0);
+    contentSplitter->setStretchFactor(1, 0);
+    contentSplitter->setStretchFactor(2, 1);
+    contentSplitter->setSizes({92, 0, 260});
     const QByteArray contentState = setupSettings.value(
-        QStringLiteral("layout/transitionContentSplitter")).toByteArray();
+        QStringLiteral("layout/transitionContentSplitterV2")).toByteArray();
     if (!contentState.isEmpty())
         contentSplitter->restoreState(contentState);
     connect(contentSplitter, &QSplitter::splitterMoved, this,
             [contentSplitter] {
                 QSettings().setValue(
-                    QStringLiteral("layout/transitionContentSplitter"),
+                    QStringLiteral("layout/transitionContentSplitterV2"),
                     contentSplitter->saveState());
             });
 
@@ -318,13 +407,24 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
                 updateControls();
                 if (tutorialViewOpen_) refreshTutorialView();
             });
-    connect(preview_, &QTableWidget::itemSelectionChanged, this,
-            &TransitionPanel::updateControls);
+    connect(preview_, &QTableWidget::itemSelectionChanged, this, [this] {
+        announceSelectedEventMarker();
+        updateControls();
+    });
+    connect(humanModeBtn_, &QPushButton::clicked, this, [this] {
+        sequenceViewMode_ = SequenceViewMode::Human;
+        updatePreview();
+    });
+    connect(rawModeBtn_, &QPushButton::clicked, this, [this] {
+        sequenceViewMode_ = SequenceViewMode::Raw;
+        updatePreview();
+    });
     connect(tutorialBtn_, &QPushButton::toggled, this,
             &TransitionPanel::onTutorialViewToggled);
     connect(abortBtn_, &QPushButton::clicked, this, &TransitionPanel::onAbort);
     connect(renameBtn_, &QPushButton::clicked, this, &TransitionPanel::onRename);
     connect(deleteBtn_, &QPushButton::clicked, this, &TransitionPanel::onDelete);
+    connect(editBtn_, &QPushButton::clicked, this, &TransitionPanel::onEdit);
     connect(labelCueBtn_, &QPushButton::clicked, this,
             &TransitionPanel::onLabelCue);
     connect(applySetupBtn_, &QPushButton::clicked, this,
@@ -376,13 +476,24 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     refreshMatches();
 }
 
+void TransitionPanel::setTutorialOverlayAnchor(QWidget* anchor)
+{
+    tutorialOverlayAnchor_ = anchor;
+    if (tutorialViewOpen_) layoutTutorialOverlay();
+}
+
 void TransitionPanel::refreshMatches()
 {
     QScopedValueRollback<bool> refreshing(refreshingMatches_, true);
     const QString restorePath = selectedPath_;
     matches_.clear();
     list_->clear();
+    humanPreviewRows_.clear();
+    previewRowBeats_.clear();
+    tutorialPreviewRow_ = -1;
     preview_->setRowCount(0);
+    static_cast<ProgressTableWidget*>(preview_)->setTimelineProgress(-1, 0.0);
+    configurePreviewColumns();
 
     TrackDataPtr a = engine_->deck(0).track();
     TrackDataPtr b = engine_->deck(1).track();
@@ -452,6 +563,54 @@ void TransitionPanel::refreshMatches()
     updateControls();
 }
 
+void TransitionPanel::selectTransitionFile(const QString& filePath)
+{
+    if (filePath.isEmpty()) {
+        list_->clearSelection();
+        list_->setCurrentRow(-1);
+        selectedPath_.clear();
+        updatePreview();
+        announceEntryMarker();
+        updateSetupStatus();
+        updateControls();
+        return;
+    }
+
+    for (int row = 0; row < static_cast<int>(matches_.size()); ++row) {
+        if (!matches_[static_cast<std::size_t>(row)].file ||
+            matches_[static_cast<std::size_t>(row)].file->filePath != filePath)
+            continue;
+        selectedPath_ = filePath;
+        if (list_->currentRow() == row) {
+            updatePreview();
+            announceEntryMarker();
+            updateSetupStatus();
+            updateControls();
+        } else {
+            list_->setCurrentRow(row);
+        }
+        return;
+    }
+
+    emit statusMessage(
+        tr("The selected transition does not match the tracks currently loaded on the decks"),
+        4500);
+}
+
+void TransitionPanel::editTransitionFile(const QString& filePath)
+{
+    if (!transitionEditingEnabled_ || filePath.isEmpty()) return;
+    const auto found = std::find_if(
+        store_->all().begin(), store_->all().end(),
+        [&filePath](const GvtFile& file) { return file.filePath == filePath; });
+    if (found == store_->all().end()) {
+        emit statusMessage(tr("That transition file is no longer available"),
+                           4500);
+        return;
+    }
+    editTransition(*found);
+}
+
 int TransitionPanel::selectedMatch() const
 {
     int row = list_->currentRow();
@@ -489,11 +648,13 @@ void TransitionPanel::clearReplayLifecycle()
     replayPath_.clear();
     replayFromDeck_ = -1;
     replayLifecycleDetail_.clear();
+    clearSequenceProgress();
 }
 
 void TransitionPanel::setReplayBlocked(const Match& match,
                                        const QString& reason)
 {
+    clearSequenceProgress();
     replayPath_ = match.file ? match.file->filePath : QString();
     replayFromDeck_ = match.fromDeck;
     replayLifecycleDetail_ = reason;
@@ -583,45 +744,53 @@ void TransitionPanel::announceEntryMarker()
         sec = t->secAtBeat(m.file->anchorFromBeat);
     emit entryMarkerChanged(m.fromDeck, sec);
     emit entryMarkerChanged(m.fromDeck == 0 ? 1 : 0, -1.0);
+    announceSelectedEventMarker();
+}
 
-    // Build a compact set of significant moments. Internal crossfader
-    // checkpoints stay in the replay, but only its endpoints become automatic
-    // markers. Explicit user labels always win.
-    std::map<double, QString> cues;
-    cues[0.0] = tr("Transition start");
-    const std::vector<int> summary = summarizedEventIndices(*m.file);
-    int firstCrossfader = -1, lastCrossfader = -1;
-    for (int i : summary) {
-        if (m.file->events[(size_t)i].control != ControlId::Crossfader) continue;
-        if (firstCrossfader < 0) firstCrossfader = i;
-        lastCrossfader = i;
+void TransitionPanel::announceSelectedEventMarker()
+{
+    const int idx = selectedMatch();
+    const int row = preview_ ? preview_->currentRow() : -1;
+    if (idx < 0 || row < 0 || !preview_->item(row, 0)) {
+        emit cueMarkersChanged(0, {}, {});
+        emit cueMarkersChanged(1, {}, {});
+        return;
     }
-    for (int i : summary) {
-        const GvtEvent& event = m.file->events[(size_t)i];
-        QString label = automaticCueLabel(event);
-        if (event.control == ControlId::Crossfader && firstCrossfader != lastCrossfader)
-            label = i == firstCrossfader ? tr("Crossfade start")
-                                          : tr("Crossfade end");
-        if (!label.isEmpty() && cues.find(event.beat) == cues.end())
-            cues[event.beat] = label;
-    }
-    for (const GvtCue& cue : m.file->cues)
-        if (!cue.label.trimmed().isEmpty()) cues[cue.beat] = cue.label.trimmed();
 
-    const int toDeck = m.fromDeck == 0 ? 1 : 0;
-    for (int physicalDeck : {m.fromDeck, toDeck}) {
+    const GvtFile& file = *matches_[static_cast<std::size_t>(idx)].file;
+    const int eventIndex = preview_->item(row, 0)->data(Qt::UserRole).toInt();
+    if (eventIndex < 0 || eventIndex >= static_cast<int>(file.events.size())) {
+        emit cueMarkersChanged(0, {}, {});
+        emit cueMarkersChanged(1, {}, {});
+        return;
+    }
+
+    const Match& match = matches_[static_cast<std::size_t>(idx)];
+    const GvtEvent& event = file.events[static_cast<std::size_t>(eventIndex)];
+    QString label = cueLabelAt(file, event.beat);
+    if (sequenceViewMode_ == SequenceViewMode::Human) {
+        if (label.isEmpty() && preview_->item(row, 4))
+            label = preview_->item(row, 4)->text();
+        if (label.isEmpty() && preview_->item(row, 1))
+            label = preview_->item(row, 1)->text();
+        if (label.isEmpty() && preview_->item(row, 2))
+            label = preview_->item(row, 2)->text();
+    } else if (label.isEmpty() && preview_->item(row, 2)) {
+        label = preview_->item(row, 2)->text();
+    }
+    if (label.isEmpty()) label = automaticCueLabel(event);
+
+    for (int deck = 0; deck < kNumDecks; ++deck) {
         QList<double> seconds;
         QStringList labels;
-        if (TrackDataPtr track = engine_->deck(physicalDeck).track()) {
-            const double anchor = physicalDeck == m.fromDeck
-                                      ? m.file->anchorFromBeat
-                                      : m.file->anchorToBeat;
-            for (const auto& [relativeBeat, label] : cues) {
-                seconds.append(track->secAtBeat(anchor + relativeBeat));
-                labels.append(label);
-            }
+        if (TrackDataPtr track = engine_->deck(deck).track()) {
+            const double anchor = deck == match.fromDeck
+                                      ? file.anchorFromBeat
+                                      : file.anchorToBeat;
+            seconds.append(track->secAtBeat(anchor + event.beat));
+            labels.append(label);
         }
-        emit cueMarkersChanged(physicalDeck, seconds, labels);
+        emit cueMarkersChanged(deck, seconds, labels);
     }
 }
 
@@ -665,19 +834,107 @@ QString TransitionPanel::cueLabelAt(const GvtFile& file, double beat) const
 void TransitionPanel::updatePreview()
 {
     preview_->clearContents();
+    preview_->clearSpans();
     preview_->setRowCount(0);
+    humanPreviewRows_.clear();
+    previewRowBeats_.clear();
+    tutorialPreviewRow_ = -1;
+    static_cast<ProgressTableWidget*>(preview_)->setTimelineProgress(-1, 0.0);
+    configurePreviewColumns();
     const int idx = selectedMatch();
-    if (idx < 0) return;
-    const GvtFile& file = *matches_[(size_t)idx].file;
-    const std::vector<int> summary = summarizedEventIndices(file);
-    preview_->setRowCount((int)summary.size());
-
-    int firstCrossfader = -1, lastCrossfader = -1;
-    for (int i : summary) {
-        if (file.events[(size_t)i].control != ControlId::Crossfader) continue;
-        if (firstCrossfader < 0) firstCrossfader = i;
-        lastCrossfader = i;
+    if (idx < 0) {
+        announceSelectedEventMarker();
+        return;
     }
+    const GvtFile& file = *matches_[(size_t)idx].file;
+    if (sequenceViewMode_ == SequenceViewMode::Human)
+        updateHumanPreview(file);
+    else
+        updateRawPreview(file);
+
+    preview_->clearSelection();
+    preview_->setCurrentCell(-1, -1);
+    announceSelectedEventMarker();
+    updateSequenceProgressOverlay();
+    if (tutorialActive_ && !tutorialPrompts_.empty())
+        setTutorialPreviewEvent(&tutorialPrompts_.front());
+}
+
+void TransitionPanel::configurePreviewColumns()
+{
+    preview_->setColumnCount(5);
+    QHeaderView* header = preview_->horizontalHeader();
+    header->setStretchLastSection(false);
+    for (int column = 0; column < 5; ++column)
+        header->setSectionResizeMode(column, QHeaderView::Interactive);
+
+    if (sequenceViewMode_ == SequenceViewMode::Human) {
+        preview_->setHorizontalHeaderLabels(
+            {tr("Outgoing Beat"), tr("Outgoing Action"),
+             tr("Incoming Action"), tr("Incoming Beat"), tr("Label")});
+        header->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        header->setSectionResizeMode(1, QHeaderView::Stretch);
+        header->setSectionResizeMode(2, QHeaderView::Stretch);
+        header->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        header->setSectionResizeMode(4, QHeaderView::Interactive);
+        preview_->setColumnWidth(0, 88);
+        preview_->setColumnWidth(3, 88);
+        preview_->setColumnWidth(4, 100);
+        return;
+    }
+
+    preview_->setHorizontalHeaderLabels(
+        {tr("Beat"), tr("Target"), tr("Action"), tr("Value"),
+         tr("Cue label")});
+    header->setStretchLastSection(true);
+    preview_->setColumnWidth(0, 52);
+    preview_->setColumnWidth(1, 68);
+    preview_->setColumnWidth(2, 150);
+    preview_->setColumnWidth(3, 72);
+}
+
+void TransitionPanel::addSequenceStartRow(const GvtFile& file)
+{
+    std::array<QTableWidgetItem*, 5> items {};
+    for (int column = 0; column < 5; ++column) {
+        items[static_cast<std::size_t>(column)] = new QTableWidgetItem;
+        preview_->setItem(0, column,
+                          items[static_cast<std::size_t>(column)]);
+        items[static_cast<std::size_t>(column)]->setForeground(
+            themeDimText());
+        QFont font = items[static_cast<std::size_t>(column)]->font();
+        font.setItalic(true);
+        items[static_cast<std::size_t>(column)]->setFont(font);
+        items[static_cast<std::size_t>(column)]->setToolTip(
+            tr("Timing marker only — no control action"));
+    }
+    items[0]->setData(Qt::UserRole, -1);
+    items[0]->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    items[3]->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    if (sequenceViewMode_ == SequenceViewMode::Human) {
+        HumanTransitionAction start;
+        items[0]->setText(humanBeatText(file.anchorFromBeat, start));
+        items[1]->setText(tr("TRANSITION STARTS — no action"));
+        items[3]->setText(humanBeatText(file.anchorToBeat, start));
+        items[4]->setText(tr("Start"));
+        preview_->setSpan(0, 1, 1, 2);
+    } else {
+        items[0]->setText(QStringLiteral("+0.000"));
+        items[1]->setText(tr("Timeline"));
+        items[2]->setText(tr("Transition starts"));
+        items[3]->setText(tr("no action"));
+        items[4]->setText(tr("Start"));
+    }
+    previewRowBeats_.push_back(0.0);
+}
+
+void TransitionPanel::updateRawPreview(const GvtFile& file)
+{
+    const std::vector<int> summary =
+        summarizedTransitionEventIndices(file);
+    preview_->setRowCount(static_cast<int>(summary.size()) + 1);
+    addSequenceStartRow(file);
 
     auto targetText = [this](Role role) {
         switch (role) {
@@ -697,22 +954,38 @@ void TransitionPanel::updatePreview()
     };
 
     for (int row = 0; row < (int)summary.size(); ++row) {
+        const int tableRow = row + 1;
         const int eventIndex = summary[(size_t)row];
         const GvtEvent& event = file.events[(size_t)eventIndex];
         auto* beatItem = new QTableWidgetItem(
             QStringLiteral("+%1").arg(event.beat, 0, 'f', 3));
         beatItem->setData(Qt::UserRole, eventIndex);
-        preview_->setItem(row, 0, beatItem);
-        preview_->setItem(row, 1, new QTableWidgetItem(targetText(event.role)));
+        preview_->setItem(tableRow, 0, beatItem);
+        preview_->setItem(tableRow, 1,
+                          new QTableWidgetItem(targetText(event.role)));
 
         QString action = QString::fromUtf8(controlName(event.control));
         action.replace(QLatin1Char('_'), QLatin1Char(' '));
+        const auto [firstEndpoint, lastEndpoint] =
+            transitionSummaryEndpoints(file, eventIndex);
         if (event.control == ControlId::Crossfader) {
-            action = firstCrossfader == lastCrossfader
+            action = firstEndpoint == lastEndpoint
                          ? tr("crossfade")
-                         : (eventIndex == firstCrossfader
+                         : (eventIndex == firstEndpoint
                                 ? tr("crossfade start")
                                 : tr("crossfade end"));
+        } else if (transitionSummaryIsEq(event.control)) {
+            const QString band = event.control == ControlId::EqLow
+                                     ? tr("low EQ")
+                                 : event.control == ControlId::EqMid
+                                     ? tr("mid EQ")
+                                     : tr("high EQ");
+            action = firstEndpoint == lastEndpoint
+                         ? band
+                         : tr("%1 %2")
+                               .arg(band,
+                                    eventIndex == firstEndpoint
+                                        ? tr("start") : tr("end"));
         }
         if (event.gestureControl >= ControlId::PerformancePad1 &&
             event.gestureControl <= ControlId::PerformancePad8 &&
@@ -728,7 +1001,7 @@ void TransitionPanel::updatePreview()
                          .arg(pad)
                          .arg(action);
         }
-        preview_->setItem(row, 2, new QTableWidgetItem(action));
+        preview_->setItem(tableRow, 2, new QTableWidgetItem(action));
 
         QString value;
         if (controlIsTrigger(event.control)) {
@@ -749,13 +1022,389 @@ void TransitionPanel::updatePreview()
         }
         const QString curve = curveText(event.curve);
         if (!curve.isEmpty()) value += QStringLiteral(" · ") + curve;
-        preview_->setItem(row, 3, new QTableWidgetItem(value));
+        preview_->setItem(tableRow, 3, new QTableWidgetItem(value));
 
         QString label = cueLabelAt(file, event.beat);
+        if (label.isEmpty() && transitionSummaryIsEq(event.control) &&
+            firstEndpoint != lastEndpoint)
+            label = eventIndex == firstEndpoint ? tr("EQ start")
+                                                : tr("EQ end");
         if (label.isEmpty()) label = automaticCueLabel(event);
-        preview_->setItem(row, 4, new QTableWidgetItem(label));
+        preview_->setItem(tableRow, 4, new QTableWidgetItem(label));
+        previewRowBeats_.push_back(event.beat);
     }
-    if (!summary.empty()) preview_->selectRow(0);
+}
+
+void TransitionPanel::updateSequenceProgressOverlay()
+{
+    auto* table = static_cast<ProgressTableWidget*>(preview_);
+    if (!sequenceProgressActive_ || previewRowBeats_.empty()) {
+        table->setTimelineProgress(-1, 0.0);
+        sequenceProgressRow_ = -1;
+        return;
+    }
+    const TransitionSequenceProgress progress = transitionSequenceProgressAt(
+        previewRowBeats_, sequenceBeatsIn_, sequenceBeatsTotal_);
+    const int previousRow = sequenceProgressRow_;
+    sequenceProgressRow_ = progress.row;
+    table->setTimelineProgress(progress.row, progress.fraction);
+    if (progress.row >= 0 && progress.row != previousRow) {
+        if (QTableWidgetItem* beat = preview_->item(progress.row, 0))
+            preview_->scrollToItem(
+                beat, QAbstractItemView::PositionAtCenter);
+    }
+}
+
+void TransitionPanel::clearSequenceProgress()
+{
+    sequenceProgressActive_ = false;
+    sequenceBeatsIn_ = 0.0;
+    sequenceBeatsTotal_ = 0.0;
+    sequenceProgressRow_ = -1;
+    if (preview_)
+        static_cast<ProgressTableWidget*>(preview_)
+            ->setTimelineProgress(-1, 0.0);
+}
+
+QString TransitionPanel::humanBeatText(
+    double anchor, const HumanTransitionAction& action) const
+{
+    const QString start = compactNumber(anchor + action.startBeat, 2);
+    if (std::fabs(action.endBeat - action.startBeat) < 0.0005)
+        return start;
+    return tr("%1 → %2")
+        .arg(start, compactNumber(anchor + action.endBeat, 2));
+}
+
+QString TransitionPanel::humanActionText(
+    const GvtFile& file, const HumanTransitionAction& action) const
+{
+    const auto controlText = [this](ControlId control) {
+        switch (control) {
+        case ControlId::Tempo: return tr("tempo");
+        case ControlId::Fader: return tr("fader");
+        case ControlId::Trim: return tr("trim");
+        case ControlId::EqLow: return tr("LOW EQ");
+        case ControlId::EqMid: return tr("MID EQ");
+        case ControlId::EqHigh: return tr("HIGH EQ");
+        case ControlId::Crossfader: return tr("crossfader");
+        case ControlId::Filter: return tr("filter");
+        case ControlId::FxWet: return tr("FX wet/dry");
+        case ControlId::FxBeats: return tr("FX timing");
+        case ControlId::StemVocals: return tr("vocal stem");
+        case ControlId::StemMelody: return tr("melody stem");
+        case ControlId::StemBass: return tr("bass stem");
+        case ControlId::StemDrums: return tr("drum stem");
+        default: {
+            QString text = QString::fromUtf8(controlName(control));
+            text.replace(QLatin1Char('_'), QLatin1Char(' '));
+            return text;
+        }
+        }
+    };
+    const auto valueText = [this](ControlId control, double value) {
+        if (control == ControlId::Tempo)
+            return QStringLiteral("×%1").arg(compactNumber(value, 3));
+        if (control == ControlId::BeatJump ||
+            control == ControlId::LoopAuto ||
+            control == ControlId::FxBeats)
+            return tr("%1 beats").arg(compactNumber(value, 2));
+        if (control == ControlId::FxType) {
+            const int type = std::clamp(
+                static_cast<int>(std::lround(value)), 0, 2);
+            return QStringList {tr("echo"), tr("reverb"), tr("flanger")}
+                .at(type);
+        }
+        if (control == ControlId::Quantize || control == ControlId::FxOn)
+            return value >= 0.5 ? tr("On") : tr("Off");
+        if (controlIsTrigger(control))
+            return value >= 0.5 ? tr("press") : tr("release");
+        return QStringLiteral("%1%")
+            .arg(compactNumber(value * 100.0, 0));
+    };
+
+    if (action.kind == HumanActionKind::HotCueStart)
+        return tr("Start track using HOT CUE %1").arg(action.hotCuePad);
+
+    const QString control = controlText(action.control);
+    const QString from = valueText(action.control, action.startValue);
+    const QString to = valueText(action.control, action.endValue);
+    const double duration = std::max(0.0, action.endBeat - action.startBeat);
+
+    if (action.kind == HumanActionKind::Continuous) {
+        const QString beats = compactNumber(duration, 1);
+        if (duration < 0.0005)
+            return tr("Set %1 to %2").arg(control, to);
+        if (from == to && duration < 2.0)
+            return tr("Set %1 to %2").arg(control, to);
+        if (action.control == ControlId::Crossfader) {
+            const QString direction = action.endValue >= action.startValue
+                                          ? tr("outgoing → incoming")
+                                          : tr("incoming → outgoing");
+            return duration >= 2.0
+                       ? tr("Slowly crossfade %1: %2 → %3 over %4 beats")
+                             .arg(direction, from, to, beats)
+                       : tr("Move crossfader %1: %2 → %3 over %4 beats")
+                             .arg(direction, from, to, beats);
+        }
+        if (duration < 2.0)
+            return tr("Move %1 %2 → %3 over %4 beats")
+                .arg(control, from, to, beats);
+        if (action.endValue > action.startValue + 0.0005)
+            return tr("Slowly raise %1 %2 → %3 over %4 beats")
+                .arg(control, from, to, beats);
+        if (action.endValue < action.startValue - 0.0005)
+            return tr("Slowly lower %1 %2 → %3 over %4 beats")
+                .arg(control, from, to, beats);
+        return tr("Slowly move %1 from %2 back to %3 over %4 beats")
+            .arg(control, from, to, beats);
+    }
+
+    QString instruction;
+    switch (action.control) {
+    case ControlId::Play: instruction = tr("Press PLAY"); break;
+    case ControlId::Stop: instruction = tr("Press STOP"); break;
+    case ControlId::Cue:
+        instruction = action.endValue >= 0.5 ? tr("Press CUE")
+                                             : tr("Release CUE");
+        break;
+    case ControlId::TempoSync: instruction = tr("Press SYNC"); break;
+    case ControlId::LoopIn: instruction = tr("Set LOOP IN"); break;
+    case ControlId::LoopOut: instruction = tr("Set LOOP OUT"); break;
+    case ControlId::LoopExit: instruction = tr("Exit loop"); break;
+    case ControlId::LoopHalve: instruction = tr("Halve loop"); break;
+    case ControlId::LoopDouble: instruction = tr("Double loop"); break;
+    case ControlId::LoopAuto:
+        instruction = tr("Start %1-beat loop")
+                          .arg(compactNumber(action.endValue, 2));
+        break;
+    case ControlId::BeatJump:
+        instruction = tr("Jump %1 beats")
+                          .arg(compactNumber(action.endValue, 2));
+        break;
+    case ControlId::FxOn:
+        instruction = action.endValue >= 0.5 ? tr("Turn FX on")
+                                             : tr("Turn FX off");
+        break;
+    case ControlId::Quantize:
+        instruction = action.endValue >= 0.5 ? tr("Turn Quantize on")
+                                             : tr("Turn Quantize off");
+        break;
+    default:
+        if (humanTransitionIsHotCue(action.control)) {
+            const int pad = static_cast<int>(action.control) -
+                            static_cast<int>(ControlId::HotCue1) + 1;
+            instruction = action.endValue >= 0.5
+                              ? tr("Press HOT CUE %1").arg(pad)
+                              : tr("Release HOT CUE %1").arg(pad);
+        } else if (humanTransitionIsSavedLoop(action.control)) {
+            const int pad = static_cast<int>(action.control) -
+                            static_cast<int>(ControlId::SavedLoop1) + 1;
+            instruction = action.endValue >= 0.5
+                              ? tr("Press CUSTOM LOOP %1").arg(pad)
+                              : tr("Release CUSTOM LOOP %1").arg(pad);
+        } else if (action.control == ControlId::StemVocals ||
+                   action.control == ControlId::StemMelody ||
+                   action.control == ControlId::StemBass ||
+                   action.control == ControlId::StemDrums) {
+            instruction = action.endValue <= 0.001
+                              ? tr("Mute %1").arg(control)
+                          : action.endValue >= 0.999
+                              ? tr("Restore %1").arg(control)
+                              : tr("Set %1 to %2").arg(control, to);
+        } else if (controlIsTrigger(action.control)) {
+            instruction = action.endValue >= 0.5
+                              ? tr("Press %1").arg(control.toUpper())
+                              : tr("Release %1").arg(control.toUpper());
+        } else {
+            instruction = tr("Set %1 to %2").arg(control, to);
+        }
+        break;
+    }
+
+    if (!action.eventIndices.empty()) {
+        const GvtEvent& event = file.events[static_cast<std::size_t>(
+            action.eventIndices.front())];
+        if (event.gestureControl >= ControlId::PerformancePad1 &&
+            event.gestureControl <= ControlId::PerformancePad8 &&
+            event.gesturePadMode >= 0 &&
+            event.gesturePadMode <
+                static_cast<int>(PerformancePadMode::Count)) {
+            const int pad = static_cast<int>(event.gestureControl) -
+                            static_cast<int>(ControlId::PerformancePad1) + 1;
+            const auto mode =
+                static_cast<PerformancePadMode>(event.gesturePadMode);
+            instruction = tr("%1 PAD %2 — %3")
+                              .arg(QLatin1String(performancePadModeLabel(mode)))
+                              .arg(pad)
+                              .arg(instruction);
+        }
+    }
+    return instruction;
+}
+
+void TransitionPanel::updateHumanPreview(const GvtFile& file)
+{
+    humanPreviewRows_ = humanTransitionRows(file);
+    preview_->setRowCount(static_cast<int>(humanPreviewRows_.size()) + 1);
+    addSequenceStartRow(file);
+
+    for (int humanRow = 0;
+         humanRow < static_cast<int>(humanPreviewRows_.size()); ++humanRow) {
+        const int tableRow = humanRow + 1;
+        const HumanTransitionRow& row =
+            humanPreviewRows_[static_cast<std::size_t>(humanRow)];
+        if (row.eventIndices.empty()) continue;
+        const int anchorEventIndex = row.eventIndices.front();
+        const GvtEvent& anchorEvent =
+            file.events[static_cast<std::size_t>(anchorEventIndex)];
+
+        std::array<QTableWidgetItem*, 5> items {};
+        for (int column = 0; column < 5; ++column) {
+            items[static_cast<std::size_t>(column)] =
+                new QTableWidgetItem;
+            preview_->setItem(tableRow, column,
+                              items[static_cast<std::size_t>(column)]);
+        }
+        items[0]->setData(Qt::UserRole, anchorEventIndex);
+        items[0]->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        items[3]->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        if (row.outgoing) {
+            items[0]->setText(humanBeatText(file.anchorFromBeat,
+                                            *row.outgoing));
+            items[1]->setText(humanActionText(file, *row.outgoing));
+        }
+        if (row.incoming) {
+            items[2]->setText(humanActionText(file, *row.incoming));
+            items[3]->setText(humanBeatText(file.anchorToBeat,
+                                            *row.incoming));
+        }
+        if (row.shared) {
+            items[0]->setText(humanBeatText(file.anchorFromBeat,
+                                            *row.shared));
+            items[1]->setText(humanActionText(file, *row.shared));
+            items[3]->setText(humanBeatText(file.anchorToBeat,
+                                            *row.shared));
+            preview_->setSpan(tableRow, 1, 1, 2);
+        }
+
+        QStringList labels;
+        for (const GvtCue& cue : file.cues) {
+            if (cue.beat + 0.0005 < row.startBeat ||
+                cue.beat - 0.0005 > row.endBeat || labels.contains(cue.label))
+                continue;
+            labels.append(cue.label);
+        }
+        if (labels.isEmpty()) {
+            if ((row.outgoing && row.outgoing->kind ==
+                                     HumanActionKind::HotCueStart) ||
+                (row.incoming && row.incoming->kind ==
+                                     HumanActionKind::HotCueStart)) {
+                labels.append(anchorEvent.role == Role::ToDeck
+                                  ? tr("Bring in track")
+                                  : tr("Start outgoing"));
+            } else {
+                const QString automatic = automaticCueLabel(anchorEvent);
+                if (!automatic.isEmpty()) labels.append(automatic);
+            }
+        }
+        items[4]->setText(labels.join(QStringLiteral(" · ")));
+
+        QStringList rawBeats;
+        for (int eventIndex : row.eventIndices) {
+            rawBeats.append(QStringLiteral("+%1").arg(
+                compactNumber(file.events[static_cast<std::size_t>(eventIndex)]
+                                  .beat,
+                              3)));
+        }
+        const QString rawTip =
+            tr("Covered raw events: %1").arg(rawBeats.join(", "));
+        for (QTableWidgetItem* item : items) {
+            item->setToolTip(item->text().isEmpty()
+                                 ? rawTip
+                                 : item->text() + QLatin1Char('\n') + rawTip);
+        }
+        previewRowBeats_.push_back(row.startBeat);
+    }
+}
+
+int TransitionPanel::summaryRowForEvent(const GvtEvent& event) const
+{
+    const int idx = selectedMatch();
+    if (idx < 0) return -1;
+    const GvtFile& file = *matches_[static_cast<std::size_t>(idx)].file;
+
+    int eventIndex = -1;
+    for (int i = 0; i < static_cast<int>(file.events.size()); ++i) {
+        const GvtEvent& candidate =
+            file.events[static_cast<std::size_t>(i)];
+        if (candidate.control == event.control &&
+            candidate.role == event.role &&
+            std::fabs(candidate.beat - event.beat) < 0.0005 &&
+            std::fabs(candidate.value - event.value) < 0.0005) {
+            eventIndex = i;
+            break;
+        }
+    }
+    if (sequenceViewMode_ == SequenceViewMode::Human) {
+        const int humanRow = eventIndex < 0
+                                 ? -1
+                                 : humanTransitionRowForEventIndex(
+                                       humanPreviewRows_, eventIndex);
+        return humanRow < 0 ? -1 : humanRow + 1;
+    }
+
+    const std::vector<int> summary =
+        summarizedTransitionEventIndices(file);
+
+    int fallbackRow = -1;
+    for (int row = 0; row < static_cast<int>(summary.size()); ++row) {
+        const GvtEvent& candidate =
+            file.events[static_cast<std::size_t>(summary[row])];
+        const bool sameControl = candidate.control == event.control &&
+                                 candidate.role == event.role;
+        if (!sameControl) continue;
+        fallbackRow = row;
+        if (std::fabs(candidate.beat - event.beat) < 0.0005 &&
+            std::fabs(candidate.value - event.value) < 0.0005)
+            return row + 1;
+        // Hidden EQ/crossfader checkpoints map forward to the visible end of
+        // their summarized move, so the highlighted row describes what the DJ
+        // is working toward.
+        if (candidate.beat >= event.beat - 0.0005)
+            return row + 1;
+    }
+    return fallbackRow < 0 ? -1 : fallbackRow + 1;
+}
+
+void TransitionPanel::setTutorialPreviewEvent(const GvtEvent* event)
+{
+    if (tutorialPreviewRow_ >= 0 &&
+        tutorialPreviewRow_ < preview_->rowCount()) {
+        for (int column = 0; column < preview_->columnCount(); ++column) {
+            if (QTableWidgetItem* item =
+                    preview_->item(tutorialPreviewRow_, column)) {
+                item->setBackground(QBrush());
+                item->setForeground(QBrush());
+            }
+        }
+    }
+    tutorialPreviewRow_ = event ? summaryRowForEvent(*event) : -1;
+    if (tutorialPreviewRow_ < 0 ||
+        tutorialPreviewRow_ >= preview_->rowCount())
+        return;
+
+    const QColor highlight(0xf1, 0xc7, 0x5b);
+    for (int column = 0; column < preview_->columnCount(); ++column) {
+        if (QTableWidgetItem* item =
+                preview_->item(tutorialPreviewRow_, column)) {
+            item->setBackground(highlight);
+            item->setForeground(QColor(0x11, 0x13, 0x18));
+        }
+    }
+    if (QTableWidgetItem* beat = preview_->item(tutorialPreviewRow_, 0))
+        preview_->scrollToItem(beat, QAbstractItemView::PositionAtCenter);
 }
 
 bool TransitionPanel::setupMatches(const Match& match,
@@ -879,14 +1528,9 @@ bool TransitionPanel::setupMatches(const Match& match,
 
     compareDeck(true);
     if (complete) compareDeck(false);
-    if (complete && match.file->initialMixerCaptured) {
-        const double wanted = match.fromDeck == 0
-                                  ? match.file->initialCrossfader
-                                  : 1.0 - match.file->initialCrossfader;
-        compare(tr("crossfader"), engine_->crossfader.load(), wanted,
-                kNoDeck, ControlId::Crossfader,
-                SetupToleranceField::Volume);
-    }
+    // The live crossfader is deliberately not a PRIME prerequisite. Its
+    // recorded value is applied at transition beat zero, alongside the replay,
+    // so preparing an incoming deck never forces an audible master change.
     if (differences) *differences = local;
     return local.isEmpty();
 }
@@ -1055,7 +1699,19 @@ void TransitionPanel::updateControls()
     abortBtn_->setEnabled(busy);
     renameBtn_->setEnabled(selected && !busy);
     deleteBtn_->setEnabled(selected && !busy);
-    const bool eventSelected = preview_->currentRow() >= 0;
+    editBtn_->setEnabled(selected && !busy);
+    const bool editingEnabled = !busy;
+    if (editingEnabled != transitionEditingEnabled_) {
+        transitionEditingEnabled_ = editingEnabled;
+        emit transitionEditingEnabled(editingEnabled);
+    }
+    const int selectedPreviewRow = preview_->currentRow();
+    const QTableWidgetItem* selectedPreviewItem =
+        selectedPreviewRow >= 0 ? preview_->item(selectedPreviewRow, 0)
+                                : nullptr;
+    const bool eventSelected =
+        selectedPreviewItem &&
+        selectedPreviewItem->data(Qt::UserRole).toInt() >= 0;
     labelCueBtn_->setEnabled(selected && eventSelected && !busy);
 
     bool setupReady = true;
@@ -1064,7 +1720,9 @@ void TransitionPanel::updateControls()
     closeEnoughCheck_->setEnabled(!busy);
     toleranceBtn_->setEnabled(!busy);
     list_->setEnabled(!busy);
-    preview_->setEnabled(!busy);
+    // Keep the sequence readable and selectable during Perform/Tutorial so
+    // the DJ can anticipate upcoming actions. Recording still owns the panel.
+    preview_->setEnabled(!recording);
 
     if (busy) {
         recBtn_->setToolTip(tr("Finish or abort the current transition first"));
@@ -1093,7 +1751,8 @@ void TransitionPanel::updateControls()
 void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
                                         bool prepareFromTransport,
                                         bool prepareToTransport,
-                                        bool applyFromTempo)
+                                        bool applyFromTempo,
+                                        bool applyCrossfader)
 {
     const auto applyDeck = [&](bool fromRole, bool prepareTransport) {
         const int deckIndex = fromRole ? match.fromDeck : 1 - match.fromDeck;
@@ -1154,7 +1813,8 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
             engine_->deck(incoming).seekSec(
                 track->secAtBeat(match.file->anchorToBeat));
     }
-    if (match.file->initialComplete && match.file->initialMixerCaptured) {
+    if (applyCrossfader && match.file->initialComplete &&
+        match.file->initialMixerCaptured) {
         const double physical = match.fromDeck == 0
                                     ? match.file->initialCrossfader
                                     : 1.0 - match.file->initialCrossfader;
@@ -1292,6 +1952,127 @@ void TransitionPanel::onDelete()
         return;
     }
     emit statusMessage(tr("Deleted transition “%1”").arg(file.name), 4000);
+}
+
+void TransitionPanel::onEdit()
+{
+    const int idx = selectedMatch();
+    if (idx < 0 || !matches_[static_cast<std::size_t>(idx)].file) return;
+    editTransition(*matches_[static_cast<std::size_t>(idx)].file);
+}
+
+void TransitionPanel::editTransition(const GvtFile& original)
+{
+    if (!transitionEditingEnabled_ || original.filePath.isEmpty()) return;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Edit transition — %1").arg(original.name));
+    dialog.resize(820, 620);
+    auto* root = new QVBoxLayout(&dialog);
+
+    auto* explanation = new QLabel(
+        tr("Edit the plain UTF-8 .gvt source below. Save validates it and "
+           "rewrites it in Gravitino's canonical format."),
+        &dialog);
+    explanation->setWordWrap(true);
+    root->addWidget(explanation);
+
+    auto* path = new QLabel(QFileInfo(original.filePath).absoluteFilePath(),
+                            &dialog);
+    path->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    path->setStyleSheet(
+        QStringLiteral("color:%1; font-size:10px;").arg(themeDimText().name()));
+    root->addWidget(path);
+
+    auto* editor = new QPlainTextEdit(&dialog);
+    editor->setLineWrapMode(QPlainTextEdit::NoWrap);
+    editor->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    editor->setPlainText(gvtSerialize(original));
+    root->addWidget(editor, 1);
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    root->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked,
+            &dialog, [this, &dialog, editor, original] {
+                GvtFile edited;
+                QString error;
+                QStringList warnings;
+                if (!gvtParse(editor->toPlainText(), edited, &error,
+                              &warnings)) {
+                    QMessageBox::warning(
+                        &dialog, tr("Invalid .gvt file"),
+                        tr("The transition was not saved:\n\n%1").arg(error));
+                    return;
+                }
+                if (edited.version != 1) {
+                    QMessageBox::warning(
+                        &dialog, tr("Unsupported .gvt version"),
+                        tr("This Gravitino build can edit version 1 files only."));
+                    return;
+                }
+                if (edited.name.trimmed().isEmpty()) {
+                    QMessageBox::warning(
+                        &dialog, tr("Transition needs a name"),
+                        tr("Set a non-empty name under [meta] before saving."));
+                    return;
+                }
+                if (edited.events.empty()) {
+                    QMessageBox::warning(
+                        &dialog, tr("Transition has no events"),
+                        tr("Add at least one valid line under [events] before saving."));
+                    return;
+                }
+                if (std::any_of(
+                        edited.events.begin(), edited.events.end(),
+                        [](const GvtEvent& event) {
+                            return !std::isfinite(event.beat) ||
+                                   !std::isfinite(event.value);
+                        })) {
+                    QMessageBox::warning(
+                        &dialog, tr("Invalid event number"),
+                        tr("Event beats and values must be finite numbers."));
+                    return;
+                }
+                if (!warnings.isEmpty() &&
+                    QMessageBox::warning(
+                        &dialog, tr("Save with parser warnings?"),
+                        tr("Some lines would be skipped or normalized:\n\n• %1\n\n"
+                           "Save the remaining valid transition?")
+                            .arg(warnings.mid(0, 8).join(
+                                QStringLiteral("\n• "))),
+                        QMessageBox::Save | QMessageBox::Cancel,
+                        QMessageBox::Cancel) != QMessageBox::Save) {
+                    return;
+                }
+
+                edited.filePath = original.filePath;
+                QString savedPath = original.filePath;
+                bool saved = false;
+                if (edited.name.trimmed() != original.name.trimmed()) {
+                    savedPath = store_->renameTransition(
+                        edited, edited.name.trimmed(), &error);
+                    saved = !savedPath.isEmpty();
+                } else {
+                    selectedPath_ = original.filePath;
+                    saved = store_->update(edited, &error);
+                }
+                if (!saved) {
+                    QMessageBox::warning(
+                        &dialog, tr("Could not save transition"), error);
+                    return;
+                }
+
+                selectedPath_ = savedPath;
+                refreshMatches();
+                emit statusMessage(
+                    tr("Saved transition “%1”").arg(edited.name), 4000);
+                dialog.accept();
+            });
+
+    editor->setFocus();
+    dialog.exec();
 }
 
 void TransitionPanel::onLabelCue()
@@ -1452,7 +2233,8 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         // deck's transport before validating the result.
         applyInitialSetup(m, false, /*prepareFromTransport=*/false,
                           /*prepareToTransport=*/true,
-                          /*applyFromTempo=*/false);
+                          /*applyFromTempo=*/false,
+                          /*applyCrossfader=*/false);
         const QStringList issues = primeReadinessIssues(m);
         if (!issues.isEmpty()) {
             if (takeoverTrackingActive_) {
@@ -1569,6 +2351,7 @@ void TransitionPanel::onAbort()
         emit statusMessage(tr("Recording cancelled"), 3000);
     }
     progress_->setValue(0);
+    clearSequenceProgress();
     if (banner_) banner_->hide();
     finishTutorialRun();
     updateControls();
@@ -1577,6 +2360,10 @@ void TransitionPanel::onAbort()
 void TransitionPanel::onProgress(double beatsIn, double beatsTotal)
 {
     tutorialBeatsIn_ = beatsIn;
+    sequenceProgressActive_ = true;
+    sequenceBeatsIn_ = beatsIn;
+    sequenceBeatsTotal_ = beatsTotal;
+    updateSequenceProgressOverlay();
     if (replayLifecycle_ == ReplayLifecycle::Armed && beatsIn >= 0.0) {
         replayLifecycle_ = ReplayLifecycle::Running;
         updateSetupStatus();
@@ -1600,6 +2387,13 @@ void TransitionPanel::onFinished(bool completed)
             emit hardwareTakeoverTrackingCancelled();
     }
     progress_->setValue(completed ? 1000 : 0);
+    if (completed) {
+        sequenceProgressActive_ = true;
+        sequenceBeatsIn_ = std::max(sequenceBeatsIn_, sequenceBeatsTotal_);
+        updateSequenceProgressOverlay();
+    } else {
+        clearSequenceProgress();
+    }
     if (banner_) banner_->hide();
     finishTutorialRun();
     if (completed && replayLifecycle_ != ReplayLifecycle::None)
@@ -2016,6 +2810,17 @@ void TransitionPanel::layoutTutorialOverlay()
     if (!tutorialOverlay_) return;
     QWidget* host = window();
     if (!host) return;
+
+    if (tutorialOverlayAnchor_ && tutorialOverlayAnchor_->isVisible()) {
+        const QPoint topLeft =
+            tutorialOverlayAnchor_->mapTo(host, QPoint(0, 0));
+        QRect geometry(topLeft, tutorialOverlayAnchor_->size());
+        geometry = geometry.adjusted(3, 3, -3, -3).intersected(
+            host->rect().adjusted(4, 4, -4, -4));
+        tutorialOverlay_->setGeometry(geometry);
+        tutorialOverlay_->raise();
+        return;
+    }
     if (!tutorialLeftPane_ || !tutorialPreviewPane_) return;
 
     // Cover exactly the transition list + event sequence horizontally. Extend
@@ -2045,6 +2850,7 @@ void TransitionPanel::onTutorialViewToggled(bool open)
             return;
         }
         tutorialViewOpen_ = true;
+        emit tutorialViewChanged(true);
         tutorialGuideLabel_->show();
         refreshTutorialView();
         emit statusMessage(
@@ -2055,6 +2861,7 @@ void TransitionPanel::onTutorialViewToggled(bool open)
         if (tutorialActive_ && player_->isActive())
             player_->abort();
         closeTutorialOverlay();
+        emit tutorialViewChanged(false);
     }
     updateControls();
 }
@@ -2062,6 +2869,7 @@ void TransitionPanel::onTutorialViewToggled(bool open)
 void TransitionPanel::refreshTutorialView()
 {
     if (!tutorialViewOpen_) return;
+    setTutorialPreviewEvent(nullptr);
     ensureTutorialOverlay();
     if (!tutorialOverlay_) return;
 
@@ -2105,6 +2913,7 @@ void TransitionPanel::finishTutorialRun()
 {
     tutorialActive_ = false;
     tutorialPrompts_.clear();
+    setTutorialPreviewEvent(nullptr);
     if (tutorialViewOpen_)
         refreshTutorialView();
     else if (tutorialOverlay_)
@@ -2116,6 +2925,7 @@ void TransitionPanel::closeTutorialOverlay()
     tutorialActive_ = false;
     tutorialViewOpen_ = false;
     tutorialPrompts_.clear();
+    setTutorialPreviewEvent(nullptr);
     if (tutorialBtn_) {
         QSignalBlocker block(tutorialBtn_);
         tutorialBtn_->setChecked(false);
@@ -2207,6 +3017,7 @@ void TransitionPanel::showNextTutorialPrompt()
     if (!tutorialActive_ || !tutorialOverlay_)
         return;
     if (tutorialPrompts_.empty()) {
+        setTutorialPreviewEvent(nullptr);
         tutorialOverlay_->clearExpected();
         tutorialGuideInstruction_ =
             tr("Good — watch for the next highlighted control");
@@ -2217,6 +3028,7 @@ void TransitionPanel::showNextTutorialPrompt()
         return;
     }
     const GvtEvent& event = tutorialPrompts_.front();
+    setTutorialPreviewEvent(&event);
     const int idx = selectedMatch();
     if (idx < 0) return;
     const Match& match = matches_[static_cast<std::size_t>(idx)];

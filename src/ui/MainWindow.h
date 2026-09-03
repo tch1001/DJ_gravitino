@@ -12,6 +12,7 @@ class QLabel;
 class QActionGroup;
 class QMenu;
 class QPushButton;
+class QSplitter;
 class QTimer;
 
 namespace gvt {
@@ -74,10 +75,14 @@ private:
 
     DeckWidget* deckA_ = nullptr;
     DeckWidget* deckB_ = nullptr;
+    QWidget* tutorialRegion_ = nullptr;
     DetailWaveformView* detailWave_ = nullptr;
     MixerWidget* mixer_ = nullptr;
     LibraryWidget* libraryWidget_ = nullptr;
     TransitionPanel* transitionPanel_ = nullptr;
+    QSplitter* lowerWorkspaceSplitter_ = nullptr;
+    QSplitter* lowerSplitter_ = nullptr;
+    QPushButton* libraryToggleBtn_ = nullptr;
     QLabel* midiLabel_ = nullptr;
     QLabel* rateLabel_ = nullptr;
     QLabel* pickupLabel_ = nullptr;

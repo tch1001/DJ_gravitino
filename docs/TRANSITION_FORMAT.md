@@ -14,6 +14,38 @@ tracks as plain UTF-8 text. Design goals, in order:
 File extension: `.gvt`. One transition per file.
 Suggested location: `~/Music/Gravitino/Transitions/`.
 
+## Sharing and portability
+
+A `.gvt` is portable transition data, not a bundle of the music itself. To use
+one from a friend, copy it into Gravitino's Transitions folder and import the
+same two audio tracks into the local library. Matching is strongest when the
+audio fingerprint is identical, which is independent of filename and tags.
+Matching title + artist is the supported fallback when an encoded copy has a
+different fingerprint. Duration by itself is only a diagnostic hint and will
+not authorize playback.
+
+The file carries the role-based deck/mixer starting state, beat anchors,
+hot-cue position checks, cue labels, and the complete beat-timed control event
+stream. It does **not** carry either audio track, analyzed stems, the recipient's
+beatgrid cache, or saved-loop pad contents. Consequently:
+
+- Ordinary fader, EQ, filter, transport, loop, FX, and stem-level events travel
+  with the file. Stem mutes work only after the recipient separates stems for
+  that track; otherwise they degrade harmlessly to the original mix.
+- Referenced HOT CUE pads must exist at the recorded beats on the recipient's
+  machine. The stored mapping is currently used to verify and warn, not to
+  overwrite the recipient's cues.
+- Referenced CUSTOM/saved-loop pads must currently be recreated on the
+  recipient's machine. Their loop definitions are stored in the local track
+  cache, not in v1 `.gvt`.
+- A materially different master/remaster, or a differently corrected beatgrid,
+  can change musical alignment even when title and artist match.
+
+So v1 is directly shareable for the same tracks and ordinary transition moves,
+with explicit setup needed for HOT CUE, CUSTOM-loop, and stem-dependent moves.
+A future fully self-contained exchange format should embed the referenced cue
+and saved-loop definitions (while still leaving copyrighted audio out).
+
 ## Example
 
 ```gvt

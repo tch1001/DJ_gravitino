@@ -1,6 +1,7 @@
 #include "audio/AudioEngine.h"
 #include "control/ControlBus.h"
 #include "transitions/TransitionEngine.h"
+#include "transitions/TransitionEventSummary.h"
 #include "transitions/TransitionPrime.h"
 #include "transitions/TransitionPlayerExt.h"
 
@@ -57,6 +58,27 @@ int main(int argc, char** argv)
         450.0, 470.0, 448.0, 464.0));
     CHECK(!activeLoopCanReachTransitionEntry(
         430.0, 470.0, 448.0, 464.0));
+
+    // The DJ-facing sequence retains endpoints for each role/band while the
+    // replay file keeps all continuous automation checkpoints.
+    GvtFile denseSequence;
+    denseSequence.events = {
+        {0.0, Role::FromDeck, ControlId::EqLow, 0.5, Curve::Step},
+        {0.2, Role::ToDeck, ControlId::EqLow, 0.0, Curve::Step},
+        {1.0, Role::FromDeck, ControlId::EqLow, 0.3, Curve::Linear},
+        {1.2, Role::ToDeck, ControlId::EqLow, 0.2, Curve::Linear},
+        {2.0, Role::FromDeck, ControlId::EqLow, 0.0, Curve::Linear},
+        {2.2, Role::ToDeck, ControlId::EqLow, 0.5, Curve::Linear},
+        {3.0, Role::Mixer, ControlId::Crossfader, 0.0, Curve::Step},
+        {4.0, Role::Mixer, ControlId::Crossfader, 0.5, Curve::Linear},
+        {5.0, Role::Mixer, ControlId::Crossfader, 1.0, Curve::Linear},
+        {6.0, Role::ToDeck, ControlId::Play, 1.0, Curve::Step},
+    };
+    const std::vector<int> compact =
+        summarizedTransitionEventIndices(denseSequence);
+    const std::vector<int> wantedCompact {0, 1, 4, 5, 6, 8, 9};
+    CHECK(compact == wantedCompact);
+    CHECK(denseSequence.events.size() == 10);
     ControlBus bus;
     AudioEngine engine(&bus);
     engine.deck(0).loadTrack(makeTrack());

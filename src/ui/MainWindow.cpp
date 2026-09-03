@@ -124,8 +124,9 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     detailWave_ = new DetailWaveformView(engine_);
     root->addWidget(detailWave_);
 
-    // Lower workspace: transitions now use the full width; the library remains
-    // vertically adjustable so more event rows can be exposed when needed.
+    // Lower workspace: Tutor opens only here, to the left of the three panels
+    // it is allowed to narrow (transition controls, event sequence, library).
+    // Nothing above the detailed waveform participates in this splitter.
     transitionPanel_ =
         new TransitionPanel(bus_, engine_, store_, recorder, player);
 
@@ -133,25 +134,64 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     // in the library's History tab.
     history_ = new History(this);
     libraryWidget_ = new LibraryWidget(library_, engine_, store_, history_);
-    auto* lowerSplitter = new QSplitter(Qt::Vertical);
-    lowerSplitter->setObjectName(QStringLiteral("transitionLibrarySplitter"));
-    lowerSplitter->setChildrenCollapsible(false);
-    lowerSplitter->addWidget(transitionPanel_);
-    lowerSplitter->addWidget(libraryWidget_);
-    lowerSplitter->setStretchFactor(0, 1);
-    lowerSplitter->setStretchFactor(1, 2);
-    lowerSplitter->setSizes({170, 280});
+    lowerWorkspaceSplitter_ = new QSplitter(Qt::Horizontal);
+    lowerWorkspaceSplitter_->setObjectName(
+        QStringLiteral("tutorialWorkspaceSplitter"));
+    lowerWorkspaceSplitter_->setChildrenCollapsible(false);
+
+    tutorialRegion_ = new QWidget(lowerWorkspaceSplitter_);
+    tutorialRegion_->setObjectName(QStringLiteral("tutorialBoardRegion"));
+    tutorialRegion_->setProperty("panel", true);
+    tutorialRegion_->setMinimumSize(500, 260);
+    tutorialRegion_->setSizePolicy(QSizePolicy::Expanding,
+                                   QSizePolicy::Expanding);
+    lowerWorkspaceSplitter_->addWidget(tutorialRegion_);
+    tutorialRegion_->hide();
+
+    auto* lowerRightHost = new QWidget(lowerWorkspaceSplitter_);
+    lowerRightHost->setMinimumWidth(470);
+    auto* lowerRight = new QVBoxLayout(lowerRightHost);
+    lowerRight->setContentsMargins(0, 0, 0, 0);
+    lowerRight->setSpacing(2);
+
+    lowerSplitter_ = new QSplitter(Qt::Vertical, lowerRightHost);
+    lowerSplitter_->setObjectName(QStringLiteral("transitionLibrarySplitter"));
+    lowerSplitter_->setChildrenCollapsible(false);
+    lowerSplitter_->addWidget(transitionPanel_);
+    lowerSplitter_->addWidget(libraryWidget_);
+    lowerSplitter_->setStretchFactor(0, 1);
+    lowerSplitter_->setStretchFactor(1, 2);
+    lowerSplitter_->setSizes({220, 280});
     const QByteArray lowerState = QSettings().value(
         QStringLiteral("layout/transitionLibrarySplitter")).toByteArray();
     if (!lowerState.isEmpty())
-        lowerSplitter->restoreState(lowerState);
-    connect(lowerSplitter, &QSplitter::splitterMoved, this,
-            [lowerSplitter] {
+        lowerSplitter_->restoreState(lowerState);
+    connect(lowerSplitter_, &QSplitter::splitterMoved, this,
+            [this] {
+                if (!libraryWidget_->isVisible()) return;
                 QSettings().setValue(
                     QStringLiteral("layout/transitionLibrarySplitter"),
-                    lowerSplitter->saveState());
+                    lowerSplitter_->saveState());
+    });
+    lowerRight->addWidget(lowerSplitter_, 1);
+
+    lowerWorkspaceSplitter_->addWidget(lowerRightHost);
+    lowerWorkspaceSplitter_->setStretchFactor(0, 3);
+    lowerWorkspaceSplitter_->setStretchFactor(1, 2);
+    lowerWorkspaceSplitter_->setSizes({650, 550});
+    const QByteArray tutorWorkspaceState = QSettings().value(
+        QStringLiteral("layout/tutorialWorkspaceSplitter")).toByteArray();
+    if (!tutorWorkspaceState.isEmpty())
+        lowerWorkspaceSplitter_->restoreState(tutorWorkspaceState);
+    connect(lowerWorkspaceSplitter_, &QSplitter::splitterMoved, this,
+            [this] {
+                if (!tutorialRegion_->isVisible()) return;
+                QSettings().setValue(
+                    QStringLiteral("layout/tutorialWorkspaceSplitter"),
+                    lowerWorkspaceSplitter_->saveState());
             });
-    root->addWidget(lowerSplitter, 2);
+    root->addWidget(lowerWorkspaceSplitter_, 2);
+    transitionPanel_->setTutorialOverlayAnchor(tutorialRegion_);
 
     setCentralWidget(central);
 
@@ -175,6 +215,7 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     // provided — the button is simply never created).
     if (rec_) {
         recBtn_ = new FitPushButton(tr("● REC MASTER"));
+        recBtn_->setObjectName(QStringLiteral("masterRecordButton"));
         recBtn_->setToolTip(
             tr("Record the master output to a WAV file"));
         recBtn_->setCursor(Qt::PointingHandCursor);
@@ -192,6 +233,38 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
         });
         onRecordingChanged(rec_->isRecording(), rec_->currentPath());
     }
+
+    // Keep the library toggle in the same bottom status strip as REC MASTER.
+    // It is added to the permanent right-hand controls below so transient
+    // status messages can never cover it.
+    libraryToggleBtn_ = new FitPushButton(tr("HIDE LIBRARY ▾"));
+    libraryToggleBtn_->setObjectName(QStringLiteral("libraryVisibilityToggle"));
+    libraryToggleBtn_->setFixedHeight(20);
+    libraryToggleBtn_->setToolTip(
+        tr("Show or hide the library without changing the deck or waveform layout"));
+    const bool libraryVisible = QSettings().value(
+        QStringLiteral("layout/libraryVisible"), true).toBool();
+    libraryWidget_->setVisible(libraryVisible);
+    libraryToggleBtn_->setText(libraryVisible ? tr("HIDE LIBRARY ▾")
+                                             : tr("SHOW LIBRARY ▴"));
+    connect(libraryToggleBtn_, &QPushButton::clicked, this, [this] {
+        const bool show = !libraryWidget_->isVisible();
+        if (!show) {
+            QSettings().setValue(
+                QStringLiteral("layout/transitionLibrarySplitter"),
+                lowerSplitter_->saveState());
+        }
+        libraryWidget_->setVisible(show);
+        if (show) {
+            const QByteArray state = QSettings().value(
+                QStringLiteral("layout/transitionLibrarySplitter"))
+                                         .toByteArray();
+            if (!state.isEmpty()) lowerSplitter_->restoreState(state);
+        }
+        libraryToggleBtn_->setText(show ? tr("HIDE LIBRARY ▾")
+                                        : tr("SHOW LIBRARY ▴"));
+        QSettings().setValue(QStringLiteral("layout/libraryVisible"), show);
+    });
 
     // Status bar: MIDI indicator, sample rate, transient messages.
     pickupLabel_ = new QLabel;
@@ -221,8 +294,12 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             if (overlay) overlay->setPulse(setupMismatchPulse_);
     });
     midiLabel_ = new QLabel;
+    midiLabel_->setObjectName(QStringLiteral("midiConnectionStatus"));
     rateLabel_ = new QLabel;
     updateAudioOutputLabel();
+    // Permanent widgets survive QStatusBar::showMessage(). Keep the library
+    // action immediately to the left of the controller connection status.
+    statusBar()->addPermanentWidget(libraryToggleBtn_);
     statusBar()->addPermanentWidget(midiLabel_);
     statusBar()->addPermanentWidget(rateLabel_);
     onMidiConnection(midi_->controllerConnected(), midi_->controllerName());
@@ -275,6 +352,26 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             [this](const QString&, bool) { updateAudioOutputLabel(); });
 
     // Cross-widget wiring.
+    connect(libraryWidget_, &LibraryWidget::transitionSelected,
+            transitionPanel_, &TransitionPanel::selectTransitionFile);
+    connect(libraryWidget_, &LibraryWidget::transitionEditRequested,
+            transitionPanel_, &TransitionPanel::editTransitionFile);
+    connect(transitionPanel_, &TransitionPanel::transitionEditingEnabled,
+            libraryWidget_, &LibraryWidget::setTransitionEditingEnabled);
+    libraryWidget_->setTransitionEditingEnabled(true);
+    connect(transitionPanel_, &TransitionPanel::tutorialViewChanged, this,
+            [this](bool open) {
+                tutorialRegion_->setVisible(open);
+                if (open) {
+                    const QByteArray state = QSettings().value(
+                        QStringLiteral("layout/tutorialWorkspaceSplitter"))
+                                                 .toByteArray();
+                    if (!state.isEmpty())
+                        lowerWorkspaceSplitter_->restoreState(state);
+                    else
+                        lowerWorkspaceSplitter_->setSizes({650, 550});
+                }
+            });
     connect(libraryWidget_, &LibraryWidget::trackLoaded, this,
             [this](int deck) { notifyTrackLoaded(deck); });
     connect(libraryWidget_, &LibraryWidget::statusMessage, this,

@@ -6,6 +6,88 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-03 (codex): **Mouse-only hot-cue latch and platter.** Every deck now
+  shows a rotating 33⅓-RPM-positioned disc. Dragging it in either direction
+  emits the same touch-gated scratch controls as the FLX4, allowing precise
+  positioning and resuming playback on release when it was previously
+  running. A mapped HOT CUE can be held with the left mouse button, dragged to
+  the highlighted PLAY target, and released to reproduce the controller's
+  HOT CUE + PLAY latch. Ordinary release over the pad remains momentary. The
+  UI regression test sends real mouse events through both interactions and
+  checks preview, latch, scratch movement, and transport restoration.
+  Verified: clean build, ctest 23/23, full `--selftest`, and
+  `git diff --check`.
+  Follow-up: mouse platter sensitivity is intentionally fine-only. On a
+  playing deck it now applies direct millisecond-scale phase correction without
+  pausing, including during automated transition replay. It adjusts about
+  45 ms per quarter turn / 180 ms per full turn and leaves paused decks paused.
+  FLX4 touch/scratch behavior is unchanged.
+
+- 2026-09-03 (codex): **Permanent right-side library toggle.** The Show/Hide
+  Library button now sits flush right immediately before the controller
+  connection status. It is a permanent status-bar widget, so opening Tutor
+  View or any other transient message cannot cover it. The offscreen UI test
+  checks both its ordering and its visibility while a message is active.
+
+- 2026-09-03 (codex): **Row-level transition timing guidance.** During both
+  Human and Raw Perform/Tutorial runs, the Event Sequence overlays a
+  translucent progress fill on the most recently reached row and completes it
+  exactly when the next distinct action is due. Equal-beat actions are treated
+  as simultaneous instead of receiving fake countdown time. Every sequence
+  now begins with a derived beat-zero `Transition starts — no action` row,
+  giving the first real action the same visual runway; it cannot be labeled or
+  replayed and is never persisted to `.gvt`. Focused tests cover timing math,
+  both table modes, the synthetic row, and live mode switching. Verified:
+  clean build, ctest 23/23, full `--selftest`, and `git diff --check`.
+
+- 2026-09-03 (codex): **Human event sequence and compact library control.**
+  The library Show/Hide button now shares the status bar with REC MASTER,
+  reclaiming the lower workspace footer. Event Sequence defaults to a
+  five-column Human view with track-relative beats, role-separated actions,
+  values folded into readable instructions, stream-aware continuous ranges,
+  overlap pairing, and HOT CUE → PLAY → release launch recognition. HUMAN/RAW
+  switches views without changing replay data; Raw preserves the previous
+  table and every Human row retains its source indices for tutorial
+  highlighting and cue selection. The `.gvt` v1 format is unchanged. Verified:
+  clean build, ctest 23/23 (including new summary and offscreen widget-layout
+  coverage), full `--selftest`, and `git diff --check`. The macOS Computer Use
+  bridge still times out while reading the live Qt hierarchy, so the automated
+  widget assertions replace—not claim—a screenshot-level visual inspection.
+
+- 2026-09-03 (codex): **Corrected Tutor placement, library toggle, and `.gvt`
+  editing.** TUTOR VIEW now opens a large virtual FLX4 only in the lower-left
+  workspace, below the full-width detailed waveform. The deck/mixer and
+  waveform regions remain unchanged; only the right-hand stack of transition
+  controls, event sequence, and library narrows. The library stays available
+  during Tutor and has a persistent Show/Hide control, subsequently moved into
+  the status bar to save space. Transition rows
+  expose Edit/Rename/Delete on right click with confirmation before deletion,
+  while the event-sequence header has a matching Edit Transition button. The
+  editor validates the plain UTF-8 source before using the existing managed
+  store update/rename paths. `TRANSITION_FORMAT.md` now documents the v1
+  sharing boundary: tracks are not embedded, HOT CUE/CUSTOM setup can remain
+  machine-local, and beatgrid/stem differences matter. Verified: clean build,
+  ctest 21/21, full `--selftest`, and `git diff --check`. The macOS Computer
+  Use bridge timed out while reading the large live Qt hierarchy, so a final
+  human visual smoke test remains appropriate.
+
+- 2026-08-26 (codex): **Compact transition sequence and large Tutor layout.**
+  PRIME no longer checks or prepares the live crossfader; the recorded mixer
+  value remains a beat-zero replay action. Selecting a transition now leaves
+  yellow waveform event markers clear until the DJ explicitly selects an
+  event row. The visible sequence summarizes each outgoing/incoming EQ band
+  and crossfader move to start/end while retaining every checkpoint for exact
+  replay. Library > Transitions is the canonical edge picker, with Rename and
+  Delete beside `Search transition edges…`; the redundant matching list is no
+  longer rendered, and the event sequence is a permanent full-width lower
+  panel. This first placement was superseded on 2026-09-03: Tutor now occupies
+  the lower-left workspace without changing the deck row or waveform. Its next
+  summarized row is highlighted gold and scrolled into view. Normal deck
+  controls place the narrowed pads/mode column beside compact
+  Loop/Jump, FX, and Stems rows. Verified: clean build, ctest 21/21, full
+  `--selftest`, and `git diff --check`. Live Computer Use inspection remains
+  pending because the Mac was locked.
+
 - 2026-08-22 (codex): **PRIME reachability and takeover lifecycle fix.** A
   future outgoing loop no longer blocks PRIME merely because the transition
   entry lies before LOOP IN; readiness now asks whether the live transport can

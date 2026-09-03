@@ -1,13 +1,13 @@
 # Gravitino Agent Handoff
 
-Updated: 2026-08-22 (Asia/Singapore)
+Updated: 2026-09-03 (Asia/Singapore)
 
 ## Current state
 
 The focused beat-grid and overview-cursor checkpoint was committed and pushed
-at `685f5b6` (`Improve transition setup and deck controls`). The subsequent
-PRIME reachability/takeover lifecycle fix is described first below; consult
-`git log -1` for its final checkpoint hash.
+at `685f5b6` (`Improve transition setup and deck controls`), followed by the
+PRIME lifecycle fix at `049a0d5`. The single-picker/event-sequence/Tutor layout
+work described first below is the current uncommitted change set.
 
 The user explicitly permits stopping a running Gravitino process when a
 restart is needed. Always resolve the process narrowly with
@@ -19,6 +19,34 @@ The Git remote is `git@github.com:tch1001/DJ_gravitino.git`; `main` tracks
 
 ## Implemented in this working tree
 
+- **Corrected lower-workspace Tutor and transition editing:** TUTOR VIEW now
+  adds its virtual FLX4 at the bottom left, below the detailed waveform. It
+  never hides or resizes the deck/mixer row or waveform. Only the right-hand
+  stack containing transition controls, the event sequence, and the library is
+  narrowed. The library is no longer forced closed in Tutor mode and has a
+  persistent bottom-edge Show/Hide button. Library > Transitions now exposes
+  Edit/Rename/Delete on right click (Delete retains confirmation), and the
+  event-sequence header has an Edit Transition button. Editing uses an in-app,
+  validated UTF-8 `.gvt` source editor. The format documentation now states the
+  exact v1 sharing boundary, especially HOT CUE, CUSTOM-loop, beatgrid, stem,
+  and audio dependencies.
+- **Single transition picker and compact sequence:** Library >
+  Transitions is now the canonical edge list and preserves click-again-to-
+  unselect behavior. Rename/Delete sit immediately beside its transition
+  search. TransitionPanel keeps only a hidden matching model, renders controls
+  above a permanent full-width event sequence, and accepts canonical file-path
+  selection after the edge loader resolves physical deck direction. The
+  visible sequence retains only start/end rows for each role-specific LOW/MID/
+  HIGH EQ move and the crossfader, without modifying `.gvt` checkpoints or
+  replay. Selecting the transition itself emits no yellow cue markers;
+  selecting one visible event emits exactly that aligned marker. During Tutor,
+  the next summarized action is highlighted gold and centered in the visible
+  sequence. The ordinary deck layout places narrowed pads/modes beside compact
+  Loop/Jump, FX, and Stems controls.
+- **Crossfader-safe PRIME:** setup readiness no longer compares or highlights
+  the live crossfader, and PRIME does not move it while preparing the decks.
+  The recorded initial crossfader is still scheduled at transition beat zero,
+  preserving replay semantics without changing the live master early.
 - **Reliable PRIME reachability and FLX4 lifecycle:** active-loop readiness now
   distinguishes a future loop from one already containing the playhead. A
   transition entry before LOOP IN is reachable and may be armed; an entry

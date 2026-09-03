@@ -20,11 +20,14 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <numbers>
 
 namespace gvt {
 
@@ -65,6 +68,34 @@ static QString formatTime(double sec)
     return QString::asprintf("%d:%02d.%d", total / 60, total % 60,
                              (int)((sec - total) * 10));
 }
+
+class DragLatchButton final : public FitPushButton {
+public:
+    using FitPushButton::FitPushButton;
+    std::function<void(const QPoint&)> dragMoved;
+    std::function<void(const QPoint&)> dragReleased;
+
+protected:
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if (event->buttons().testFlag(Qt::LeftButton)) {
+            if (dragMoved) dragMoved(event->globalPosition().toPoint());
+            // Keep the pad logically held while its captured pointer crosses
+            // other widgets. QAbstractButton would otherwise emit released as
+            // soon as the cursor left its own rectangle.
+            event->accept();
+            return;
+        }
+        FitPushButton::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton && dragReleased)
+            dragReleased(event->globalPosition().toPoint());
+        FitPushButton::mouseReleaseEvent(event);
+    }
+};
 
 // ---------------------------------------------------------------- WaveformView
 
@@ -284,6 +315,152 @@ void WaveformView::mousePressEvent(QMouseEvent* ev)
     update();
 }
 
+// --------------------------------------------------------------- JogWheelWidget
+
+JogWheelWidget::JogWheelWidget(int deckIndex, ControlBus* bus,
+                               QWidget* parent)
+    : QWidget(parent), deckIndex_(deckIndex), bus_(bus)
+{
+    setObjectName(QStringLiteral("deck%1JogWheel").arg(deckIndex_));
+    setFixedSize(72, 72);
+    setCursor(Qt::OpenHandCursor);
+    setToolTip(tr("Fine-adjust platter — drag clockwise or counterclockwise "
+                  "to align the beat by milliseconds without pausing"));
+}
+
+void JogWheelWidget::setPositionSec(double positionSec, bool trackAvailable)
+{
+    const bool availabilityChanged = trackAvailable_ != trackAvailable;
+    trackAvailable_ = trackAvailable;
+    if (!dragging_) {
+        const double next = trackAvailable && std::isfinite(positionSec)
+                                ? std::fmod(positionSec * 200.0, 360.0)
+                                : 0.0;
+        if (availabilityChanged || std::fabs(next - rotationDegrees_) > 0.05) {
+            rotationDegrees_ = next;
+            setProperty("rotationDegrees", rotationDegrees_);
+            update();
+        }
+    } else if (availabilityChanged) {
+        update();
+    }
+}
+
+void JogWheelWidget::paintEvent(QPaintEvent*)
+{
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QColor accent = deckAccent(deckIndex_);
+    const QRectF platter = QRectF(rect()).adjusted(3.0, 3.0, -3.0, -3.0);
+
+    painter.setPen(QPen(dragging_ ? accent.lighter(145)
+                                  : QColor(0x69, 0x70, 0x7d),
+                        dragging_ ? 2.0 : 1.0));
+    painter.setBrush(QColor(0x10, 0x12, 0x16));
+    painter.drawEllipse(platter);
+
+    painter.setBrush(Qt::NoBrush);
+    for (int inset = 7; inset <= 24; inset += 4) {
+        QColor groove = themeDimText();
+        groove.setAlpha(55 + inset);
+        painter.setPen(QPen(groove, 0.7));
+        painter.drawEllipse(platter.adjusted(inset, inset, -inset, -inset));
+    }
+
+    const QPointF center = platter.center();
+    painter.save();
+    painter.translate(center);
+    painter.rotate(rotationDegrees_);
+    painter.setPen(QPen(trackAvailable_ ? accent : themeDimText(), 2.0,
+                        Qt::SolidLine, Qt::RoundCap));
+    painter.drawLine(QPointF(0.0, -11.0), QPointF(0.0, -27.0));
+    painter.setBrush(trackAvailable_ ? accent : themeDimText());
+    painter.setPen(Qt::NoPen);
+    painter.drawEllipse(QPointF(0.0, -27.0), 2.5, 2.5);
+    painter.restore();
+
+    painter.setBrush(QColor(0x24, 0x28, 0x30));
+    painter.setPen(QPen(accent.darker(170), 1.0));
+    painter.drawEllipse(center, 10.0, 10.0);
+    painter.setBrush(accent);
+    painter.setPen(Qt::NoPen);
+    painter.drawEllipse(center, 2.4, 2.4);
+
+    if (!trackAvailable_) {
+        painter.setPen(themeDimText());
+        painter.setFont(QFont(font().family(), 7, QFont::Bold));
+        painter.drawText(platter, Qt::AlignCenter, tr("JOG"));
+    }
+}
+
+double JogWheelWidget::pointerAngle(const QPointF& position) const
+{
+    const QPointF delta = position - rect().center();
+    return std::atan2(delta.x(), -delta.y()) * 180.0 /
+           std::numbers::pi;
+}
+
+void JogWheelWidget::dispatch(ControlId id, double value)
+{
+    if (bus_) bus_->dispatch({deckIndex_, id, value}, Origin::Ui);
+}
+
+void JogWheelWidget::mousePressEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton || !trackAvailable_) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+    dragging_ = true;
+    lastPointerAngle_ = pointerAngle(event->position());
+    setCursor(Qt::ClosedHandCursor);
+    update();
+    event->accept();
+}
+
+void JogWheelWidget::applyDrag(const QPointF& position)
+{
+    double angle = pointerAngle(position);
+    double delta = angle - lastPointerAngle_;
+    if (delta > 180.0) delta -= 360.0;
+    if (delta < -180.0) delta += 360.0;
+    lastPointerAngle_ = angle;
+    if (std::fabs(delta) < 0.05) return;
+
+    rotationDegrees_ = std::fmod(rotationDegrees_ + delta + 360.0, 360.0);
+    setProperty("rotationDegrees", rotationDegrees_);
+    // Mouse use is for fine phase alignment, not coarse set preparation. By
+    // deliberately omitting PlatterTouch, Deck::scratch takes its direct
+    // positional path and leaves PLAY untouched. Twenty angular degrees per
+    // 10 ms tick means about 45 ms per quarter turn. Hardware remains on its
+    // separately touch-gated, substantially coarser mapping.
+    dispatch(ControlId::PlatterScratch, delta / 20.0);
+    update();
+}
+
+void JogWheelWidget::mouseMoveEvent(QMouseEvent* event)
+{
+    if (!dragging_ || !event->buttons().testFlag(Qt::LeftButton)) {
+        QWidget::mouseMoveEvent(event);
+        return;
+    }
+    applyDrag(event->position());
+    event->accept();
+}
+
+void JogWheelWidget::mouseReleaseEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton || !dragging_) {
+        QWidget::mouseReleaseEvent(event);
+        return;
+    }
+    applyDrag(event->position());
+    dragging_ = false;
+    setCursor(Qt::OpenHandCursor);
+    update();
+    event->accept();
+}
+
 // ------------------------------------------------------------------ DeckWidget
 
 DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
@@ -349,6 +526,8 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     // Transport row: PLAY, CUE, one-shot phase SYNC, per-deck QUANTIZE.
     auto* transport = new QHBoxLayout;
     playBtn_ = new FitPushButton(tr("PLAY"));
+    playBtn_->setObjectName(
+        QStringLiteral("deck%1PlayButton").arg(deckIndex_));
     playBtn_->setCheckable(true);
     cueBtn_ = new FitPushButton(tr("CUE")); // hold-to-preview: NOT checkable
     syncBtn_ = new FitPushButton(tr("SYNC"));
@@ -427,8 +606,11 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     gridBtn_->setFixedWidth(54);
     playBtn_->setStyleSheet(
         QStringLiteral("QPushButton:checked { background:%1; color:black; "
+                       "font-weight:bold; } "
+                       "QPushButton[hotCueDropTarget=\"true\"] { "
+                       "border:2px solid %1; background:%2; color:white; "
                        "font-weight:bold; }")
-            .arg(accent.name()));
+            .arg(accent.name(), accent.darker(260).name()));
     quantizeBtn_->setStyleSheet(
         QStringLiteral("QPushButton:checked { background:%1; color:black; "
                        "font-weight:bold; }")
@@ -444,6 +626,10 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     // Eight FLX4-style performance pads. The normal mode keys remain visible
     // next to the pads; shifted modes are in the SHIFT MODES popup. HOT CUE
     // preserves hold-preview and PLAY-latch semantics from the deck engine.
+    auto* performanceArea = new QHBoxLayout;
+    performanceArea->setSpacing(5);
+    auto* auxiliaryControls = new QVBoxLayout;
+    auxiliaryControls->setSpacing(2);
     auto* padsSection = new QVBoxLayout;
     padsSection->setSpacing(2);
     auto* padsAndModes = new QHBoxLayout;
@@ -451,8 +637,11 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     auto* cues = new QGridLayout;
     cues->setSpacing(3);
     for (int i = 0; i < 8; ++i) {
-        auto* b = new FitPushButton(QString::number(i + 1));
-        b->setFixedSize(48, 28);
+        auto* b = new DragLatchButton(QString::number(i + 1));
+        b->setObjectName(QStringLiteral("deck%1PerformancePad%2")
+                             .arg(deckIndex_)
+                             .arg(i + 1));
+        b->setFixedSize(36, 26);
         b->setFocusPolicy(Qt::NoFocus);
         b->setContextMenuPolicy(Qt::CustomContextMenu);
         hotcueBtns_[i] = b;
@@ -461,6 +650,16 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
                 [this, i] { handlePerformancePad(i, true); });
         connect(b, &QPushButton::released, this,
                 [this, i] { handlePerformancePad(i, false); });
+        b->dragMoved = [this, i](const QPoint& globalPosition) {
+            updateHotCuePlayDropTarget(i, globalPosition);
+        };
+        b->dragReleased = [this, i](const QPoint& globalPosition) {
+            finishHotCuePlayDrag(i, globalPosition);
+            // QAbstractButton does not emit released when the pointer leaves
+            // its hit area. Complete the held pad explicitly; the normal
+            // released connection is harmlessly idempotent for in-pad drops.
+            handlePerformancePad(i, false);
+        };
         connect(b, &QPushButton::customContextMenuRequested, this,
                 [this, b, i](const QPoint& pos) {
             configurePerformancePad(i, b->mapToGlobal(pos));
@@ -476,8 +675,8 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     for (int i = 0; i < 4; ++i) {
         auto* b = new FitPushButton(
             QLatin1String(performancePadModeLabel(kNormalModes[i])), this);
-        b->setFixedHeight(24);
-        b->setFixedWidth(58);
+        b->setFixedHeight(19);
+        b->setFixedWidth(48);
         b->setFocusPolicy(Qt::NoFocus);
         b->setToolTip(tr("Select %1 performance pads")
                           .arg(QLatin1String(
@@ -486,7 +685,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
         connect(b, &QPushButton::clicked, this,
                 [this, mode] { setPerformancePadMode(mode); });
         normalModeBtns_[i] = b;
-        modes->addWidget(b, i / 2, i % 2);
+        modes->addWidget(b, i, 0);
     }
 
     shiftedModesBtn_ = new FitToolButton(this);
@@ -495,7 +694,8 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     shiftedModesBtn_->setToolTip(
         tr("Show KEYBOARD, PAD FX2, BEAT LOOP, and KEY SHIFT"));
     shiftedModesBtn_->setFocusPolicy(Qt::NoFocus);
-    shiftedModesBtn_->setFixedHeight(22);
+    shiftedModesBtn_->setFixedHeight(19);
+    shiftedModesBtn_->setFixedWidth(48);
     auto* shiftedMenu = new QMenu(shiftedModesBtn_);
     static constexpr PerformancePadMode kShiftModes[4] = {
         PerformancePadMode::Keyboard, PerformancePadMode::PadFx2,
@@ -507,7 +707,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
                 [this, mode] { setPerformancePadMode(mode); });
     }
     shiftedModesBtn_->setMenu(shiftedMenu);
-    modes->addWidget(shiftedModesBtn_, 2, 0, 1, 2);
+    modes->addWidget(shiftedModesBtn_, 4, 0);
     padsAndModes->addLayout(modes);
     padsAndModes->addStretch(1);
     padsSection->addLayout(padsAndModes);
@@ -517,7 +717,9 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     padStatusLabel_->setStyleSheet(
         QStringLiteral("color:%1; font-size:9px;").arg(themeDimText().name()));
     padsSection->addWidget(padStatusLabel_);
-    mainCol->addLayout(padsSection);
+    jogWheel_ = new JogWheelWidget(deckIndex_, bus_, this);
+    performanceArea->addWidget(jogWheel_, 0, Qt::AlignTop);
+    performanceArea->addLayout(padsSection);
     syncPerformancePadUi();
 
     // Loop / beat-jump section: one compact row below the hot cues.
@@ -526,36 +728,38 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     // the bus; active loop length + IN/OUT state highlighted from refresh().
     auto* loopRow = new QHBoxLayout;
     loopRow->setSpacing(2);
-    auto mkLoopBtn = [&](const QString& text, const QString& tip) {
+    auto mkLoopBtn = [&](QHBoxLayout* row, const QString& text,
+                         const QString& tip) {
         auto* b = new FitPushButton(text, this);
         b->setFixedHeight(18);
-        b->setMinimumWidth(24);
+        b->setMinimumWidth(20);
         b->setStyleSheet(QString::fromLatin1(kLoopBtnBase));
         b->setToolTip(tip);
         b->setFocusPolicy(Qt::NoFocus);
-        loopRow->addWidget(b);
+        row->addWidget(b);
         return b;
     };
-    auto mkGroupLabel = [&](const QString& text) {
+    auto mkGroupLabel = [&](QHBoxLayout* row, const QString& text) {
         auto* l = new QLabel(text, this);
         l->setStyleSheet(QStringLiteral("color:%1; font-size:8px;")
                              .arg(themeDimText().name()));
-        loopRow->addWidget(l);
+        row->addWidget(l);
     };
-    mkGroupLabel(tr("LOOP"));
+    mkGroupLabel(loopRow, tr("LOOP"));
     static const char* kAutoTexts[5] = {"1/2", "1", "2", "4", "8"};
     for (int i = 0; i < 5; ++i) {
         const double beats = kAutoLoopBeats[i];
         autoLoopBtns_[i] = mkLoopBtn(
+            loopRow,
             QLatin1String(kAutoTexts[i]),
             tr("Auto loop %1 beat(s)").arg(beats));
         connect(autoLoopBtns_[i], &QPushButton::pressed, this,
                 [this, beats] { dispatch(ControlId::LoopAuto, beats); });
     }
     loopRow->addSpacing(5);
-    loopInBtn_ = mkLoopBtn(tr("IN"), tr("Set loop in point"));
-    loopOutBtn_ = mkLoopBtn(tr("OUT"), tr("Set loop out point + activate"));
-    loopExitBtn_ = mkLoopBtn(tr("EXIT"), tr("Exit the active loop"));
+    loopInBtn_ = mkLoopBtn(loopRow, tr("IN"), tr("Set loop in point"));
+    loopOutBtn_ = mkLoopBtn(loopRow, tr("OUT"), tr("Set loop out point + activate"));
+    loopExitBtn_ = mkLoopBtn(loopRow, tr("EXIT"), tr("Exit the active loop"));
     connect(loopInBtn_, &QPushButton::pressed, this,
             [this] { dispatch(ControlId::LoopIn); });
     connect(loopOutBtn_, &QPushButton::pressed, this,
@@ -563,28 +767,32 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     connect(loopExitBtn_, &QPushButton::pressed, this,
             [this] { dispatch(ControlId::LoopExit); });
     loopRow->addSpacing(5);
-    auto* halveBtn = mkLoopBtn(QStringLiteral("<½"), tr("Halve loop length"));
-    auto* doubleBtn = mkLoopBtn(QStringLiteral("2×>"),
+    auto* halveBtn = mkLoopBtn(loopRow, QStringLiteral("<½"), tr("Halve loop length"));
+    auto* doubleBtn = mkLoopBtn(loopRow, QStringLiteral("2×>"),
                                 tr("Double loop length"));
     connect(halveBtn, &QPushButton::pressed, this,
             [this] { dispatch(ControlId::LoopHalve); });
     connect(doubleBtn, &QPushButton::pressed, this,
             [this] { dispatch(ControlId::LoopDouble); });
-    loopRow->addSpacing(7);
-    mkGroupLabel(tr("JUMP"));
+    loopRow->addStretch(1);
+    auxiliaryControls->addLayout(loopRow);
+
+    auto* jumpRow = new QHBoxLayout;
+    jumpRow->setSpacing(2);
+    mkGroupLabel(jumpRow, tr("JUMP"));
     static const struct { const char* text; double beats; } kJumps[6] = {
         {"◀8", -8}, {"◀4", -4}, {"◀1", -1},
         {"1▶", 1},  {"4▶", 4},  {"8▶", 8},
     };
     for (const auto& j : kJumps) {
-        auto* b = mkLoopBtn(QString::fromUtf8(j.text),
+        auto* b = mkLoopBtn(jumpRow, QString::fromUtf8(j.text),
                             tr("Beat jump %1 beats").arg(j.beats));
         const double beats = j.beats;
         connect(b, &QPushButton::pressed, this,
                 [this, beats] { dispatch(ControlId::BeatJump, beats); });
     }
-    loopRow->addStretch(1);
-    mainCol->addLayout(loopRow);
+    jumpRow->addStretch(1);
+    auxiliaryControls->addLayout(jumpRow);
 
     // FX strip: one compact ~20 px row below the loop/jump row.
     // FX [ECHO|REVERB|FLANGER] [ON] WET(dial) BEATS [<][1/2][>]
@@ -671,7 +879,7 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     connect(beatsUp, &QPushButton::pressed, this,
             [dispatchBeats] { dispatchBeats(2.0); });
     fxRow->addStretch(1);
-    mainCol->addLayout(fxRow);
+    auxiliaryControls->addLayout(fxRow);
 
     // STEMS row: [STEMS] request button + four checkable pads
     // [VOCAL][MELODY][BASS][DRUMS] + stage/status label. States are driven
@@ -734,8 +942,11 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     stemsRow->addSpacing(4);
     stemsRow->addWidget(stemsStatusLabel_);
     stemsRow->addStretch(1);
-    mainCol->addLayout(stemsRow);
+    auxiliaryControls->addLayout(stemsRow);
     setStemsIdle();
+    auxiliaryControls->addStretch(1);
+    performanceArea->addLayout(auxiliaryControls, 1);
+    mainCol->addLayout(performanceArea);
     mainCol->addStretch(1);
 
     // Narrow vertical tempo slider column.
@@ -1128,8 +1339,8 @@ void DeckWidget::syncPerformancePadUi()
         case PerformancePadAction::HotCue: {
             const bool set = track && track->hotCues[pad] >= 0.0;
             if (set) color = hotCueColor(pad).name();
-            tooltip = tr("Hot cue %1 — hold: preview, PLAY: continue; "
-                         "SHIFT-click or right-click: remove")
+            tooltip = tr("Hot cue %1 — hold to preview; drag and release over "
+                         "PLAY to continue; SHIFT-click or right-click: remove")
                           .arg(pad + 1);
             break;
         }
@@ -1422,6 +1633,53 @@ void DeckWidget::showPadFeedback(const QString& text)
     QTimer::singleShot(3500, this, [this, serial] {
         if (serial == padFeedbackSerial_) padStatusLabel_->clear();
     });
+}
+
+bool DeckWidget::canDragHotCueToPlay(int pad) const
+{
+    if (pad < 0 || pad >= kPerformancePadCount || !padIsPressed_[pad])
+        return false;
+    const PerformancePadMode pressedMode = pressedPadModes_[pad];
+    const auto& assignment =
+        padAssignments_[static_cast<int>(pressedMode)][pad];
+    const TrackDataPtr track = engine_->deck(deckIndex_).track();
+    return assignment.action == PerformancePadAction::HotCue && track &&
+           std::isfinite(track->hotCues[pad]) && track->hotCues[pad] >= 0.0;
+}
+
+void DeckWidget::setPlayDropTargetVisible(bool visible)
+{
+    if (!playBtn_ || playDropTargetVisible_ == visible) return;
+    playDropTargetVisible_ = visible;
+    playBtn_->setProperty("hotCueDropTarget", visible);
+    playBtn_->style()->unpolish(playBtn_);
+    playBtn_->style()->polish(playBtn_);
+    playBtn_->update();
+}
+
+void DeckWidget::updateHotCuePlayDropTarget(
+    int pad, const QPoint& globalPosition)
+{
+    const bool overPlay = canDragHotCueToPlay(pad) && playBtn_ &&
+        playBtn_->rect().contains(playBtn_->mapFromGlobal(globalPosition));
+    if (overPlay && !playDropTargetVisible_)
+        showPadFeedback(tr("Release over PLAY to keep this hot cue playing"));
+    setPlayDropTargetVisible(overPlay);
+}
+
+void DeckWidget::finishHotCuePlayDrag(
+    int pad, const QPoint& globalPosition)
+{
+    const bool latch = canDragHotCueToPlay(pad) && playBtn_ &&
+        playBtn_->rect().contains(playBtn_->mapFromGlobal(globalPosition));
+    setPlayDropTargetVisible(false);
+    if (!latch) return;
+
+    // This executes before the pad button emits released. PLAY therefore
+    // takes ownership of the held hot-cue preview, and the subsequent hot-cue
+    // release is intentionally a no-op in Deck::handleHotCue().
+    dispatch(ControlId::Play);
+    showPadFeedback(tr("Hot cue latched — playback continues"));
 }
 
 void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
@@ -1916,6 +2174,10 @@ void DeckWidget::trackChanged()
         artistLabel_->clear();
         bpmLabel_->setText(tr("BPM —"));
     }
+    if (jogWheel_)
+        jogWheel_->setPositionSec(t ? engine_->deck(deckIndex_).positionSec()
+                                    : 0.0,
+                                  t != nullptr);
     syncHotCueButtons();
     // New track (or unload): back to the request state. MainWindow
     // auto-requests the cheap cached-decode path right after when
@@ -2010,6 +2272,7 @@ void DeckWidget::refresh()
 
     if (t && t->durationSec > 0.0) {
         double pos = deck.positionSec();
+        if (jogWheel_) jogWheel_->setPositionSec(pos, true);
         timeLabel_->setText(formatTime(pos) + " / -" +
                             formatTime(t->durationSec - pos));
         double eff = deck.effectiveBpm();
@@ -2042,6 +2305,7 @@ void DeckWidget::refresh()
     } else {
         lastWaveformPos_ = -1.0;
         timeLabel_->setText(tr("0:00.0 / -0:00.0"));
+        if (jogWheel_) jogWheel_->setPositionSec(0.0, false);
     }
     syncLoopButtons();
     syncFxControls();

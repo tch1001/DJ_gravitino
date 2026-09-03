@@ -7,8 +7,11 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QItemSelectionModel>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QMenu>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -386,6 +389,14 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     search_->setClearButtonEnabled(true);
     topRow->addWidget(search_, 1);
 
+    renameTransitionBtn_ = new FitPushButton(tr("Rename…"));
+    deleteTransitionBtn_ = new FitPushButton(tr("Delete…"));
+    for (QPushButton* button : {renameTransitionBtn_, deleteTransitionBtn_}) {
+        button->setFixedHeight(20);
+        button->hide();
+        topRow->addWidget(button);
+    }
+
     // Serato-style segmented tab control (right side of the chrome row,
     // directly above the table).
     auto* tabs = new QHBoxLayout;
@@ -483,6 +494,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     transitionTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     transitionTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     transitionTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    transitionTable_->setContextMenuPolicy(Qt::CustomContextMenu);
     transitionTable_->verticalHeader()->setVisible(false);
     transitionTable_->horizontalHeader()->setStretchLastSection(false);
     transitionTable_->horizontalHeader()->setSectionResizeMode(
@@ -526,6 +538,15 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             &LibraryWidget::onDoubleClicked);
     connect(transitionTable_, &QTableView::clicked, this,
             &LibraryWidget::onTransitionClicked);
+    connect(transitionTable_->selectionModel(),
+            &QItemSelectionModel::currentChanged, this,
+            [this] { updateTransitionButtons(); });
+    connect(transitionTable_, &QWidget::customContextMenuRequested, this,
+            &LibraryWidget::showTransitionContextMenu);
+    connect(renameTransitionBtn_, &QPushButton::clicked, this,
+            &LibraryWidget::renameSelectedTransition);
+    connect(deleteTransitionBtn_, &QPushButton::clicked, this,
+            &LibraryWidget::deleteSelectedTransition);
     connect(libraryTabBtn_, &QPushButton::clicked, this,
             [this] { showTab(0); });
     connect(historyTabBtn_, &QPushButton::clicked, this,
@@ -589,6 +610,9 @@ void LibraryWidget::showTab(int index)
                     : tr("Search title / artist…"));
     crateTree_->setVisible(lib);
     updateLoadButtons();
+    renameTransitionBtn_->setVisible(transitions);
+    deleteTransitionBtn_->setVisible(transitions);
+    updateTransitionButtons();
 }
 
 void LibraryWidget::rebuildCrates()
@@ -771,12 +795,40 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
     }
     const GvtFile& transition =
         transitions_->all()[static_cast<std::size_t>(source.row())];
+    if (!selectedTransitionPath_.isEmpty() &&
+        selectedTransitionPath_ == transition.filePath) {
+        selectedTransitionPath_.clear();
+        transitionTable_->clearSelection();
+        transitionTable_->setCurrentIndex(QModelIndex());
+        emit transitionSelected(QString());
+        updateTransitionButtons();
+        return;
+    }
+    selectedTransitionPath_ = transition.filePath;
+
+    const auto clearFailedSelection = [this] {
+        selectedTransitionPath_.clear();
+        transitionTable_->clearSelection();
+        transitionTable_->setCurrentIndex(QModelIndex());
+        emit transitionSelected(QString());
+        updateTransitionButtons();
+    };
 
     const bool playingA = engine_->deck(0).playing.load();
     const bool playingB = engine_->deck(1).playing.load();
     const int playingCount = static_cast<int>(playingA) +
                              static_cast<int>(playingB);
     if (playingCount == 2) {
+        const TrackDataPtr a = engine_->deck(0).track();
+        const TrackDataPtr b = engine_->deck(1).track();
+        if (a && b &&
+            ((isReliableTrackMatch(matchTrack(transition.from, *a)) &&
+              isReliableTrackMatch(matchTrack(transition.to, *b))) ||
+             (isReliableTrackMatch(matchTrack(transition.from, *b)) &&
+              isReliableTrackMatch(matchTrack(transition.to, *a)))))
+            emit transitionSelected(transition.filePath);
+        else
+            clearFailedSelection();
         emit statusMessage(
             tr("⚠ Transition not loaded: both decks are playing, so neither track can be replaced"),
             5500);
@@ -787,6 +839,7 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
     const int toRow = trackRowFor(transition.to);
     if (playingCount == 0) {
         if (fromRow < 0 || toRow < 0) {
+            clearFailedSelection();
             emit statusMessage(
                 tr("Transition tracks are not ready in the current library"),
                 5000);
@@ -794,6 +847,7 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
         }
         loadRowTo(fromRow, 0);
         loadRowTo(toRow, 1);
+        emit transitionSelected(transition.filePath);
         emit statusMessage(
             tr("Loaded transition '%1': FROM on deck A, TO on deck B")
                 .arg(transition.name),
@@ -805,12 +859,14 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
     const TrackDataPtr playingTrack = engine_->deck(playingDeck).track();
     if (!playingTrack ||
         !isReliableTrackMatch(matchTrack(transition.from, *playingTrack))) {
+        clearFailedSelection();
         emit statusMessage(
             tr("Transition not loaded: the playing track does not match its FROM track"),
             5500);
         return;
     }
     if (toRow < 0) {
+        clearFailedSelection();
         emit statusMessage(
             tr("Transition TO track is not ready in the current library"),
             5000);
@@ -819,6 +875,7 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
 
     const int toDeck = 1 - playingDeck;
     loadRowTo(toRow, toDeck);
+    emit transitionSelected(transition.filePath);
     emit statusMessage(
         tr("FROM matched deck %1; loaded TO on deck %2")
             .arg(playingDeck == 0 ? QStringLiteral("A")
@@ -826,6 +883,121 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
             .arg(toDeck == 0 ? QStringLiteral("A")
                              : QStringLiteral("B")),
         5000);
+}
+
+int LibraryWidget::selectedTransitionSourceRow() const
+{
+    if (!transitionTable_ || !transitionProxy_) return -1;
+    const QModelIndex current = transitionTable_->currentIndex();
+    if (!current.isValid()) return -1;
+    const QModelIndex source = transitionProxy_->mapToSource(current);
+    if (!source.isValid() || source.row() < 0 || !transitions_ ||
+        source.row() >= static_cast<int>(transitions_->all().size()))
+        return -1;
+    return source.row();
+}
+
+void LibraryWidget::setTransitionEditingEnabled(bool enabled)
+{
+    transitionEditingEnabled_ = enabled;
+    updateTransitionButtons();
+}
+
+void LibraryWidget::showTransitionContextMenu(const QPoint& pos)
+{
+    if (!transitionTable_ || !transitionProxy_ || !transitions_) return;
+    const QModelIndex proxyIndex = transitionTable_->indexAt(pos);
+    if (!proxyIndex.isValid()) return;
+    const QModelIndex source = transitionProxy_->mapToSource(proxyIndex);
+    if (!source.isValid() || source.row() < 0 ||
+        source.row() >= static_cast<int>(transitions_->all().size()))
+        return;
+
+    transitionTable_->selectionModel()->setCurrentIndex(
+        proxyIndex, QItemSelectionModel::ClearAndSelect |
+                        QItemSelectionModel::Rows);
+    const GvtFile file =
+        transitions_->all()[static_cast<std::size_t>(source.row())];
+    selectedTransitionPath_ = file.filePath;
+    updateTransitionButtons();
+
+    QMenu menu(this);
+    QAction* edit = menu.addAction(tr("Edit transition…"));
+    QAction* rename = menu.addAction(tr("Rename transition…"));
+    menu.addSeparator();
+    QAction* remove = menu.addAction(tr("Delete transition…"));
+    for (QAction* action : {edit, rename, remove})
+        action->setEnabled(transitionEditingEnabled_);
+
+    QAction* chosen = menu.exec(transitionTable_->viewport()->mapToGlobal(pos));
+    if (chosen == edit) {
+        emit transitionEditRequested(file.filePath);
+    } else if (chosen == rename) {
+        renameSelectedTransition();
+    } else if (chosen == remove) {
+        deleteSelectedTransition();
+    }
+}
+
+void LibraryWidget::updateTransitionButtons()
+{
+    const bool transitionsPage =
+        stack_ && stack_->currentIndex() == transitionPageIndex_;
+    const bool selected = selectedTransitionSourceRow() >= 0;
+    const bool enabled = transitionsPage && selected &&
+                         transitionEditingEnabled_;
+    renameTransitionBtn_->setEnabled(enabled);
+    deleteTransitionBtn_->setEnabled(enabled);
+    const QString tip = !transitionEditingEnabled_
+                            ? tr("Finish or abort the active transition first")
+                        : !selected ? tr("Select a transition edge first")
+                                    : QString();
+    renameTransitionBtn_->setToolTip(tip);
+    deleteTransitionBtn_->setToolTip(tip);
+}
+
+void LibraryWidget::renameSelectedTransition()
+{
+    const int row = selectedTransitionSourceRow();
+    if (row < 0 || !transitionEditingEnabled_) return;
+    const GvtFile file = transitions_->all()[static_cast<std::size_t>(row)];
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, tr("Rename transition"), tr("New transition name:"),
+        QLineEdit::Normal, file.name, &ok).trimmed();
+    if (!ok || name.isEmpty() || name == file.name) return;
+
+    QString error;
+    const QString path = transitions_->renameTransition(file, name, &error);
+    if (path.isEmpty()) {
+        emit statusMessage(tr("Rename failed: %1").arg(error), 6000);
+        return;
+    }
+    selectedTransitionPath_ = path;
+    emit transitionSelected(path);
+    emit statusMessage(tr("Renamed transition to “%1”").arg(name), 4000);
+}
+
+void LibraryWidget::deleteSelectedTransition()
+{
+    const int row = selectedTransitionSourceRow();
+    if (row < 0 || !transitionEditingEnabled_) return;
+    const GvtFile file = transitions_->all()[static_cast<std::size_t>(row)];
+    if (QMessageBox::question(
+            this, tr("Delete transition"),
+            tr("Delete “%1”? This removes its .gvt file.").arg(file.name),
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel) != QMessageBox::Yes)
+        return;
+
+    QString error;
+    if (!transitions_->deleteTransition(file, &error)) {
+        emit statusMessage(tr("Delete failed: %1").arg(error), 6000);
+        return;
+    }
+    selectedTransitionPath_.clear();
+    emit transitionSelected(QString());
+    emit statusMessage(tr("Deleted transition “%1”").arg(file.name), 4000);
 }
 
 void LibraryWidget::loadRowTo(int sourceRow, int deck)

@@ -48,12 +48,17 @@ cmake --build build
 1. Launch `./build/gravitino` — it scans `~/Music` (File ▸ Open Music Folder to
    change) and analyzes BPM/beatgrids in the background.
 2. Load a track on each deck (Load ▶ A / Load ▶ B or double-click), press PLAY.
+   Without a controller, drag a mapped HOT CUE pad onto PLAY and release to
+   latch it exactly like holding the pad while pressing PLAY on hardware. Drag
+   either deck's rotating platter clockwise/counterclockwise for fine
+   beat-matching: it shifts the playhead by milliseconds without interrupting
+   playback, and provides the same precise positioning while paused.
 3. **Record a transition**: with the outgoing deck playing, hit ● REC, do your
    blend (faders, EQ, crossfader, sync, hot cues — mouse or FLX4), then
    ■ STOP & SAVE and name it. It lands in `~/Music/Gravitino/Transitions/` as
-   a readable `.gvt` text file you can edit or share.
+   a readable `.gvt` text file you can edit in-app or share.
 4. **Replay it**: next time that pair is loaded (matched by audio fingerprint,
-   falling back to title/duration), it appears in the Transitions list —
+   falling back to title + artist), it appears in the Transitions list —
    ▶ PERFORM executes it beat-perfectly at whatever tempo you're running.
 5. **Learn it**: 🎓 TUTORIAL opens a full virtual FLX4, lights each move four
    beats ahead, and scores physical-controller or virtual-control input. It

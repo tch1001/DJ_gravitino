@@ -137,15 +137,34 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
    discontinuous hardware value to audio.
 
 The top workspace is `Deck A | compact FLX4 mixer | Deck B`; the centered mixer
-starts below the overview-waveform baseline, and the transition panel owns the
-full lower width. TUTOR VIEW is persistent UI state, not a replay command:
-opening it creates a compact overlay over the transition list/event sequence
-and the library below while leaving Perform/Prime visible. The overlay is a
-large, full virtual FLX4 that mirrors live controls, pad state, LEDs, and
-channel meters; prose/countdown/reset guidance lives in the right control
-panel above CLOSE ENOUGH. Perform gives the guided run up to eight beats of
-pre-anchor countdown; Prime arms the same guidance against the live outgoing
-deck.
+starts below the overview-waveform baseline, followed by the full-width detail
+waveform. Each deck includes a position-driven rotating platter. A mouse drag
+sends `PlatterScratch` without `PlatterTouch`, selecting the engine's direct
+position-adjustment path without changing PLAY state. This permits
+millisecond-scale beat-matching during automated replay (roughly 45 ms per
+quarter turn). The FLX4's touch-gated mapping is unchanged. A mapped
+HOT CUE pad also remains held while dragged to PLAY; dropping there dispatches
+PLAY before releasing the cue, reusing the engine's hardware latch semantics.
+TUTOR VIEW is persistent UI state, not a replay command: opening it
+does not change either of those upper regions. In the lower workspace it adds a
+large virtual FLX4 at left and narrows only the stacked transition controls,
+event sequence, and library at right. The library remains independently
+showable through a permanent status-bar toggle immediately left of the
+controller connection text; transient messages cannot cover it. Event Sequence
+opens in Human mode: independent role/control streams become start-to-end actions,
+overlapping outgoing/incoming moves share a two-lane row, and common hot-cue
+launch gestures become one instruction. Raw mode retains the prior recorded
+event table; both views derive from the same unchanged `.gvt` event stream.
+During Perform and Tutorial, a translucent bar fills across the most recently
+reached row until the next distinct action beat, so the row change itself is
+the timing cue. A derived, non-actionable beat-zero “Transition starts” row
+provides the first countdown interval; simultaneous actions do not create
+zero-length visual countdowns. Neither the marker nor its progress is written
+to `.gvt`.
+The virtual FLX4 mirrors live controls, pad state, LEDs, and channel meters;
+prose/countdown/reset guidance lives in the transition control panel above
+CLOSE ENOUGH. Perform gives the guided run up to eight beats of pre-anchor
+countdown; Prime arms the same guidance against the live outgoing deck.
 
 ## Testing
 

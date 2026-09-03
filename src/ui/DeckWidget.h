@@ -12,6 +12,7 @@ class QCheckBox;
 class QDial;
 class QLabel;
 class QPoint;
+class QPointF;
 class QPushButton;
 class QSlider;
 class QTimer;
@@ -48,6 +49,34 @@ private:
     double transitionEntrySec_ = -1.0;
     QList<double> transitionCueSecs_;
     QStringList transitionCueLabels_;
+};
+
+// Mouse-operable platter. Its marker follows the track position at a vinyl
+// 33⅓ RPM visual rate; dragging dispatches the same touch/scratch controls as
+// the hardware platter so the engine remains the single source of behavior.
+class JogWheelWidget : public QWidget {
+public:
+    JogWheelWidget(int deckIndex, ControlBus* bus,
+                   QWidget* parent = nullptr);
+    void setPositionSec(double positionSec, bool trackAvailable);
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent*) override;
+
+private:
+    double pointerAngle(const QPointF& position) const;
+    void applyDrag(const QPointF& position);
+    void dispatch(ControlId id, double value);
+
+    int deckIndex_ = 0;
+    ControlBus* bus_ = nullptr;
+    double rotationDegrees_ = 0.0;
+    double lastPointerAngle_ = 0.0;
+    bool trackAvailable_ = false;
+    bool dragging_ = false;
 };
 
 // One deck panel (Serato-style): overview waveform, track info lines,
@@ -123,12 +152,17 @@ private:
     void endPadFx(int pad);
     void showPadFeedback(const QString& text);
     void updateTempoRangeUi();
+    bool canDragHotCueToPlay(int pad) const;
+    void updateHotCuePlayDropTarget(int pad, const QPoint& globalPosition);
+    void finishHotCuePlayDrag(int pad, const QPoint& globalPosition);
+    void setPlayDropTargetVisible(bool visible);
 
     int deckIndex_;
     ControlBus* bus_;
     AudioEngine* engine_;
 
     WaveformView* waveform_ = nullptr;
+    JogWheelWidget* jogWheel_ = nullptr;
     QLabel* titleLabel_ = nullptr;
     QLabel* artistLabel_ = nullptr;
     QLabel* bpmLabel_ = nullptr;
@@ -160,6 +194,7 @@ private:
     std::array<bool, kPerformancePadCount> padIsPressed_ {};
     std::array<bool, kPerformancePadCount> padReleasePending_ {};
     int padFeedbackSerial_ = 0;
+    bool playDropTargetVisible_ = false;
 
     struct PadFxSnapshot {
         bool valid = false;

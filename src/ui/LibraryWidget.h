@@ -5,6 +5,7 @@
 #include "../library/TrackLibrary.h"
 
 class QLineEdit;
+class QPoint;
 class QPushButton;
 class QSplitter;
 class QStackedWidget;
@@ -35,11 +36,14 @@ public:
 signals:
     void trackLoaded(int deck);          // a track was loaded onto deck 0/1
     void statusMessage(const QString& msg, int timeoutMs);
+    void transitionSelected(const QString& filePath);
+    void transitionEditRequested(const QString& filePath);
 
 public slots:
     void browseBy(int rows);             // physical browser encoder
     void confirmBrowseSelection();       // physical browser encoder press
     void loadSelectedTo(int deck);       // physical or on-screen LOAD
+    void setTransitionEditingEnabled(bool enabled);
 
 private slots:
     void onDoubleClicked(const QModelIndex& proxyIndex);
@@ -48,11 +52,16 @@ private slots:
     void onCrateSelected();
     void showTab(int index);             // 0 Library, 1 History, 2 Transitions
     void updateLoadButtons();
+    void updateTransitionButtons();
+    void showTransitionContextMenu(const QPoint& pos);
+    void renameSelectedTransition();
+    void deleteSelectedTransition();
 
 private:
     int sourceRowFor(const QModelIndex& proxyIndex) const;
     int trackRowFor(const GvtTrackRef& ref) const;
     void loadRowTo(int sourceRow, int deck);
+    int selectedTransitionSourceRow() const;
 
     TrackLibrary* library_;
     AudioEngine* engine_;
@@ -76,9 +85,13 @@ private:
     QPushButton* libraryTabBtn_ = nullptr;
     QPushButton* historyTabBtn_ = nullptr;
     QPushButton* transitionTabBtn_ = nullptr;
+    QPushButton* renameTransitionBtn_ = nullptr;
+    QPushButton* deleteTransitionBtn_ = nullptr;
     QPushButton* loadABtn_ = nullptr;
     QPushButton* loadBBtn_ = nullptr;
     QTimer* loadStateTimer_ = nullptr;
+    bool transitionEditingEnabled_ = true;
+    QString selectedTransitionPath_;
 };
 
 } // namespace gvt
