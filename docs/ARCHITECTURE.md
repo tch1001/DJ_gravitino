@@ -27,8 +27,9 @@ Never let a module reach around the bus to poke the audio engine directly
 src/control/      ControlBus, ControlId enum, ControlEvent      (pure, no deps)
 src/audio/        AudioEngine (miniaudio device), Deck, Mixer   (depends: control)
 src/analysis/     TrackData decode, BeatAnalyzer, Metadata      (depends: -)
-src/library/      TrackLibrary (QAbstractTableModel), scan+cache(depends: analysis)
-src/transitions/  GvtFile parse/serialize, Recorder, Player     (depends: control, analysis)
+src/library/      TrackLibrary, SongCatalog, TransitionStore    (depends: analysis)
+src/transitions/  typed model, YAML/legacy readers, Recorder,
+                  Player                                        (depends: control, analysis)
 src/midi/         MidiEngine (RtMidi), Flx4Mapping, LEDs        (depends: control)
 src/ui/           MainWindow, DeckWidget, MixerWidget,
                   LibraryWidget, TransitionPanel                (depends: everything)
@@ -71,7 +72,8 @@ Deck B PCM ─▶ tempo/trim/EQ/filter/FX ─┤─▶ channel fader ─┘
 ```
 
 - Tracks are fully decoded to memory (`TrackData`, mono-summed peaks for UI +
-  stereo f32 PCM). MP3 decode via miniaudio's built-in dr_mp3.
+  stereo f32 PCM). Miniaudio decodes MP3, FLAC, WAV, and AIFF into the engine's
+  common 48 kHz stereo representation.
 - Tempo: ratio = targetBPM/trackBPM. With KEY LOCK off, linear-interpolation
   resampling changes pitch like a turntable. With it on, per-deck Signalsmith
   Stretch time-stretching preserves musical pitch; scratch remains direct.
@@ -101,7 +103,10 @@ Deck B PCM ─▶ tempo/trim/EQ/filter/FX ─┤─▶ channel fader ─┘
 electronic music; variable grids are a TODO). Beat position of a deck at sample
 position `p` = `(p/rate - firstBeatSec) * bpm/60`. "Sync" sets the follower
 deck's tempo ratio so its BPM matches the master and phase-aligns to the
-nearest beat.
+nearest beat. Portable transitions address canonical arrangement beats. A
+confirmed local catalog binding may add one constant offset to this analyzed
+asset beat; legacy `.gvt` coordinates retain their historical asset-local
+interpretation.
 
 ## Transition record/replay
 
@@ -116,11 +121,14 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
 3. Every ControlEvent is logged with a timestamp in **beats relative to anchor**
    (master-deck beats). Beats, not seconds — so a transition recorded at 120 BPM
    replays correctly at 128. When a performance pad caused the audible event,
-   the recorder also stores an optional physical `via=` gesture hint. Replay
+   the recorder also stores an optional physical input hint. Replay
    remains state-based; Tutorial can therefore say “CUSTOM pad 3” instead of
    misleadingly reducing the gesture to its resulting `play` event.
-4. Stop recording → normalize (dedupe, quantize option) → save `.gvt`.
-5. Replay: user loads the same pair (matched by audio fingerprint/title), picks
+4. Stop recording → normalize/thin continuous streams → save a typed v1 YAML
+   `.transition`. Semantic hot cues are allocated into a temporary CUSTOM bank
+   without changing permanent per-track cues.
+5. Replay: user loads the same pair (confirmed catalog binding, encode-tolerant
+   structural fingerprint, checked recording ID, or explicit manual confirmation), picks
    a transition, then uses **Perform** to reconstruct the recorded pre-state
    and roll from the anchor, or **Prime** to prepare it while retaining A's live
    position and wait for A to cross the anchor. The player reasserts incoming
@@ -154,13 +162,14 @@ controller connection text; transient messages cannot cover it. Event Sequence
 opens in Human mode: independent role/control streams become start-to-end actions,
 overlapping outgoing/incoming moves share a two-lane row, and common hot-cue
 launch gestures become one instruction. Raw mode retains the prior recorded
-event table; both views derive from the same unchanged `.gvt` event stream.
+event table; both views derive from the same typed timeline and never alter
+serialized checkpoints.
 During Perform and Tutorial, a translucent bar fills across the most recently
 reached row until the next distinct action beat, so the row change itself is
 the timing cue. A derived, non-actionable beat-zero “Transition starts” row
 provides the first countdown interval; simultaneous actions do not create
 zero-length visual countdowns. Neither the marker nor its progress is written
-to `.gvt`.
+to `.transition` or legacy `.gvt`.
 The virtual FLX4 mirrors live controls, pad state, LEDs, and channel meters;
 prose/countdown/reset guidance lives in the transition control panel above
 CLOSE ENOUGH. Perform gives the guided run up to eight beats of pre-anchor
@@ -168,11 +177,11 @@ countdown; Prime arms the same guidance against the live outgoing deck.
 
 ## Testing
 
-- `ctest` unit tests in `tests/` (gvt round-trip, BPM on synthetic clicks, EQ
-  response, scheduler timing).
-- `./build/gravitino --selftest`: headless offline render — loads two demo MP3s,
-  runs a scripted `.gvt` transition through the *real* engine (offline mode),
-  writes `selftest_out.wav` + prints RMS/beat stats. This is how agents verify
+- `ctest` unit tests in `tests/` (portable/legacy round trips and hostile YAML,
+  multi-format identity, catalog/cue behavior, BPM, EQ, scheduler timing).
+- `./build/gravitino --selftest`: headless offline render — loads two demo tracks,
+  migrates a scripted legacy transition through portable YAML, replays it via
+  the *real* engine (offline mode), and writes `selftest_out.wav` plus beat/RMS stats. This is how agents verify
   audio behavior without ears.
 - Test MP3s on this machine: `~/Music/PioneerDJ/Demo Tracks/Demo Track 1.mp3`
   and `Demo Track 2.mp3` (both ~130 BPM electronic, ideal).

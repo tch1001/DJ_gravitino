@@ -51,6 +51,14 @@ constexpr NameEntry kNames[] = {
     {ControlId::SavedLoop7, "saved_loop_7"},
     {ControlId::SavedLoop8, "saved_loop_8"},
     {ControlId::TempoRange, "tempo_range"},
+    {ControlId::TransitionCue1, "transition_cue_1"},
+    {ControlId::TransitionCue2, "transition_cue_2"},
+    {ControlId::TransitionCue3, "transition_cue_3"},
+    {ControlId::TransitionCue4, "transition_cue_4"},
+    {ControlId::TransitionCue5, "transition_cue_5"},
+    {ControlId::TransitionCue6, "transition_cue_6"},
+    {ControlId::TransitionCue7, "transition_cue_7"},
+    {ControlId::TransitionCue8, "transition_cue_8"},
 };
 } // namespace
 
@@ -75,6 +83,10 @@ bool controlIsTrigger(ControlId id) {
         case ControlId::SavedLoop3: case ControlId::SavedLoop4:
         case ControlId::SavedLoop5: case ControlId::SavedLoop6:
         case ControlId::SavedLoop7: case ControlId::SavedLoop8:
+        case ControlId::TransitionCue1: case ControlId::TransitionCue2:
+        case ControlId::TransitionCue3: case ControlId::TransitionCue4:
+        case ControlId::TransitionCue5: case ControlId::TransitionCue6:
+        case ControlId::TransitionCue7: case ControlId::TransitionCue8:
             return true;
         // LoopAuto/BeatJump carry a beats value; Filter is continuous.
         default:

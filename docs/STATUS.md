@@ -6,6 +6,24 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-04 (codex): **Portable `.transition` YAML, arrangement catalog, and
+  semantic cues.** New recordings use deterministic safe-subset YAML with
+  typed endpoint evidence, canonical fractional beat coordinates, exact
+  timeline/initial state, capability requirements, unknown-field preservation,
+  and transition-owned cues. Legacy `.gvt` remains readable; editing creates a
+  separate UUID-backed portable copy. The local catalog groups MP3/FLAC/WAV/
+  AIFF assets by encode-tolerant structure plus musical assumptions, retains
+  confirmed bindings/constant beat offsets, and rebuilds song↔transition edges
+  without touching audio tags. Portable matching prioritizes confirmed
+  bindings, structural fingerprints, and checked ISRC/MusicBrainz IDs;
+  metadata-only matches require confirmation. Semantic cues occupy an isolated
+  temporary CUSTOM bank and never overwrite permanent track cues. Verification
+  passed with a clean Release configure/build, all 27 CTest targets, the full
+  offline `--selftest`, and `git diff --check`. The codec test covers WAV,
+  FLAC, 96 kbps MP3, AIFF, plus a gain-reduced 44.1 kHz FLAC with 750 ms of
+  leading silence (0.996 structural similarity). A live macOS smoke check
+  confirmed the Human event table and status-bar library-toggle placement.
+
 - 2026-09-03 (codex): **Mouse-only hot-cue latch and platter.** Every deck now
   shows a rotating 33⅓-RPM-positioned disc. Dragging it in either direction
   emits the same touch-gated scratch controls as the FLX4, allowing precise

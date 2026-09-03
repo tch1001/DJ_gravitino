@@ -23,7 +23,9 @@ struct SavedLoopSlot {
 struct TrackData {
     QString filePath;
     QString title, artist, album;
+    QString isrc, musicBrainzRecording;
     double  durationSec = 0.0;
+    double  audibleDurationSec = 0.0;
 
     // Interleaved stereo f32 at kSampleRate.
     std::vector<float> pcm;
@@ -34,9 +36,27 @@ struct TrackData {
     double firstBeatSec = 0.0;
     double beatAtSec(double sec) const { return (sec - firstBeatSec) * bpm / 60.0; }
     double secAtBeat(double beat) const { return firstBeatSec + beat * 60.0 / bpm; }
+    // Local catalog alignment: canonical arrangement beat = analyzed asset
+    // beat + this constant. It is never written into the audio file.
+    double canonicalBeatOffset = 0.0;
+    double canonicalBeatAtSec(double sec) const
+    {
+        return beatAtSec(sec) + canonicalBeatOffset;
+    }
+    double secAtCanonicalBeat(double beat) const
+    {
+        return secAtBeat(beat - canonicalBeatOffset);
+    }
 
     // "gvfp1:<16 hex>" — see docs/TRANSITION_FORMAT.md.
     QString fingerprint;
+    // Encode-tolerant whole-arrangement evidence (currently gvsf2). Unlike
+    // gvfp1, this is based on normalized temporal/spectral block features
+    // after trimming silence.
+    QString structureFingerprint;
+    // Exact bytes identify one asset, never the abstract song arrangement.
+    QString assetSha256;
+    QString songId;
 
     // Musical key in Camelot notation ("8A" = A minor, "8B" = C major...);
     // empty if detection failed. keyName is the traditional name ("Am").
@@ -69,12 +89,15 @@ using StemSetPtr = std::shared_ptr<StemSet>;
 
 // Blocking: decode + tags + fingerprint + BPM analysis. Returns nullptr and
 // sets *error on failure. Thread-safe; call from a worker thread.
-TrackDataPtr loadAndAnalyzeTrack(const QString& mp3Path, QString* error);
+TrackDataPtr loadAndAnalyzeTrack(const QString& audioPath, QString* error);
 
 // Exposed for unit tests: analyze mono 48k samples -> bpm & first beat.
 struct BeatAnalysis { double bpm = 0.0; double firstBeatSec = 0.0; bool ok = false; };
 BeatAnalysis analyzeBeats(const float* mono, int64_t n, int sampleRate);
 
 QString computeFingerprint(const float* stereoPcm, int64_t frames); // "gvfp1:..."
+QString computeStructureFingerprint(const float* stereoPcm, int64_t frames,
+                                    double* audibleDurationSec = nullptr);
+double structureFingerprintSimilarity(const QString& a, const QString& b);
 
 } // namespace gvt

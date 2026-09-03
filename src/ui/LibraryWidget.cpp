@@ -769,20 +769,78 @@ void LibraryWidget::onDoubleClicked(const QModelIndex& proxyIndex)
     loadRowTo(row, deck);
 }
 
-int LibraryWidget::trackRowFor(const GvtTrackRef& ref) const
+int LibraryWidget::trackRowFor(const GvtFile& transition,
+                               bool outgoing) const
 {
-    int bestRow = -1;
-    MatchQuality best = MatchQuality::None;
+    const GvtTrackRef& ref = outgoing ? transition.from : transition.to;
+    std::vector<std::pair<int, MatchQuality>> candidates;
+    std::vector<int> metadataCandidates;
     for (int row = 0; row < library_->trackCount(); ++row) {
         const TrackDataPtr track = library_->trackAt(row);
         if (!track) continue;
         const MatchQuality quality = matchTrack(ref, *track);
-        if (quality > best) {
-            best = quality;
-            bestRow = row;
-        }
+        if (transitions_->matchesEndpoint(transition, outgoing, *track))
+            candidates.push_back({row, quality});
+        else if (transition.sourceFormat == TransitionSourceFormat::PortableYaml &&
+                 quality == MatchQuality::TitleArtist)
+            metadataCandidates.push_back(row);
     }
-    return isReliableTrackMatch(best) ? bestRow : -1;
+    if (candidates.empty() && !metadataCandidates.empty()) {
+        const int row = metadataCandidates.front();
+        const TrackDataPtr track = library_->trackAt(row);
+        if (metadataCandidates.size() > 1) {
+            emit const_cast<LibraryWidget*>(this)->statusMessage(
+                tr("Several metadata-only candidates exist; load and verify the desired asset manually"),
+                5500);
+            return -1;
+        }
+        if (QMessageBox::warning(
+                const_cast<LibraryWidget*>(this), tr("Confirm same arrangement"),
+                tr("“%1” matches only by title and artist. Confirm only if it is "
+                   "the same arrangement—not a radio, extended, clean, or remastered edit.\n\n"
+                   "Bind this local asset to the transition?")
+                    .arg(track->title),
+                QMessageBox::Yes | QMessageBox::Cancel,
+                QMessageBox::Cancel) != QMessageBox::Yes)
+            return -1;
+        QString error;
+        if (!library_->songCatalog()->confirmEndpointBinding(
+                transition.id, outgoing, track->songId, &error)) {
+            emit const_cast<LibraryWidget*>(this)->statusMessage(
+                tr("Could not save the confirmed binding: %1").arg(error), 6000);
+            return -1;
+        }
+        library_->rebuildTransitionGraph(*transitions_);
+        return row;
+    }
+    if (candidates.empty()) return -1;
+    std::stable_sort(candidates.begin(), candidates.end(),
+                     [](const auto& left, const auto& right) {
+                         return left.second > right.second;
+                     });
+    if (candidates.size() == 1) return candidates.front().first;
+
+    QStringList choices;
+    for (const auto& [row, quality] : candidates) {
+        const TrackDataPtr track = library_->trackAt(row);
+        const QFileInfo info(track->filePath);
+        const QString evidence = quality == MatchQuality::Fingerprint
+                                     ? tr("exact asset")
+                                 : quality == MatchQuality::Identifier
+                                     ? tr("recording ID")
+                                     : tr("same arrangement");
+        choices.append(tr("%1 — %2 [%3, %4]")
+                           .arg(track->title, info.fileName(),
+                                info.suffix().toUpper(), evidence));
+    }
+    bool accepted = false;
+    const QString selected = QInputDialog::getItem(
+        const_cast<LibraryWidget*>(this), tr("Choose audio asset"),
+        tr("Several local files can play “%1”. Choose the asset to load:")
+            .arg(ref.title),
+        choices, 0, false, &accepted);
+    if (!accepted) return -1;
+    return candidates[static_cast<std::size_t>(choices.indexOf(selected))].first;
 }
 
 void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
@@ -822,10 +880,10 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
         const TrackDataPtr a = engine_->deck(0).track();
         const TrackDataPtr b = engine_->deck(1).track();
         if (a && b &&
-            ((isReliableTrackMatch(matchTrack(transition.from, *a)) &&
-              isReliableTrackMatch(matchTrack(transition.to, *b))) ||
-             (isReliableTrackMatch(matchTrack(transition.from, *b)) &&
-              isReliableTrackMatch(matchTrack(transition.to, *a)))))
+            ((transitions_->matchesEndpoint(transition, true, *a) &&
+              transitions_->matchesEndpoint(transition, false, *b)) ||
+             (transitions_->matchesEndpoint(transition, true, *b) &&
+              transitions_->matchesEndpoint(transition, false, *a))))
             emit transitionSelected(transition.filePath);
         else
             clearFailedSelection();
@@ -835,8 +893,8 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
         return;
     }
 
-    const int fromRow = trackRowFor(transition.from);
-    const int toRow = trackRowFor(transition.to);
+    const int fromRow = trackRowFor(transition, true);
+    const int toRow = trackRowFor(transition, false);
     if (playingCount == 0) {
         if (fromRow < 0 || toRow < 0) {
             clearFailedSelection();
@@ -858,7 +916,7 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
     const int playingDeck = playingA ? 0 : 1;
     const TrackDataPtr playingTrack = engine_->deck(playingDeck).track();
     if (!playingTrack ||
-        !isReliableTrackMatch(matchTrack(transition.from, *playingTrack))) {
+        !transitions_->matchesEndpoint(transition, true, *playingTrack)) {
         clearFailedSelection();
         emit statusMessage(
             tr("Transition not loaded: the playing track does not match its FROM track"),
@@ -985,7 +1043,7 @@ void LibraryWidget::deleteSelectedTransition()
     const GvtFile file = transitions_->all()[static_cast<std::size_t>(row)];
     if (QMessageBox::question(
             this, tr("Delete transition"),
-            tr("Delete “%1”? This removes its .gvt file.").arg(file.name),
+            tr("Delete “%1”? This removes its transition file.").arg(file.name),
             QMessageBox::Yes | QMessageBox::Cancel,
             QMessageBox::Cancel) != QMessageBox::Yes)
         return;

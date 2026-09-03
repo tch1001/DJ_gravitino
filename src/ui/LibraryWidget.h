@@ -59,7 +59,7 @@ private slots:
 
 private:
     int sourceRowFor(const QModelIndex& proxyIndex) const;
-    int trackRowFor(const GvtTrackRef& ref) const;
+    int trackRowFor(const GvtFile& transition, bool outgoing) const;
     void loadRowTo(int sourceRow, int deck);
     int selectedTransitionSourceRow() const;
 

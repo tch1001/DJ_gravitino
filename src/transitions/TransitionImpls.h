@@ -167,8 +167,14 @@ struct TransitionPlayer::Impl {
 
     double currentRel() {
         Deck& d = engine->deck(fromDeck);
+        const auto deckTrackBeat = [this, &d] {
+            const TrackDataPtr track = d.track();
+            return track ? transitionBeatAtSec(file, *track,
+                                                d.positionSec())
+                         : d.beatPosition();
+        };
         if (!timelineStarted) {
-            const double raw = d.beatPosition() - anchorFrom;
+            const double raw = deckTrackBeat() - anchorFrom;
             if (raw < 0.0) return raw;
             timelineStarted = true;
             timelineRunning = d.playing.load();
@@ -176,7 +182,7 @@ struct TransitionPlayer::Impl {
             lastBeat = raw;
             wallBeat = raw;
             deckBeat = raw;
-            lastDeckTrackBeat = d.beatPosition();
+            lastDeckTrackBeat = deckTrackBeat();
             haveDeckTrackBeat = true;
             timelineBpm = d.effectiveBpm() > 0.0
                               ? d.effectiveBpm() : file.masterBpm;
@@ -198,7 +204,7 @@ struct TransitionPlayer::Impl {
             if (!timelineRunning) wallBeat = lastBeat;
             haveLastBeat = true;
             timelineRunning = true;
-            const double currentTrackBeat = d.beatPosition();
+            const double currentTrackBeat = deckTrackBeat();
             if (haveDeckTrackBeat) {
                 const double delta = currentTrackBeat - lastDeckTrackBeat;
                 double forward = 0.0;
@@ -212,9 +218,11 @@ struct TransitionPlayer::Impl {
                     const TrackDataPtr track = d.track();
                     if (track) {
                         const double loopStart =
-                            track->beatAtSec(d.loopStartSec.load());
+                            transitionBeatAtSec(file, *track,
+                                                d.loopStartSec.load());
                         const double loopEnd =
-                            track->beatAtSec(d.loopEndSec.load());
+                            transitionBeatAtSec(file, *track,
+                                                d.loopEndSec.load());
                         const double wrapped =
                             (loopEnd - lastDeckTrackBeat) +
                             (currentTrackBeat - loopStart);
@@ -267,6 +275,8 @@ struct TransitionPlayer::Impl {
         const bool previewControl =
             id == ControlId::Cue ||
             (id >= ControlId::HotCue1 && id <= ControlId::HotCue8) ||
+            (id >= ControlId::TransitionCue1 &&
+             id <= ControlId::TransitionCue8) ||
             (id >= ControlId::SavedLoop1 && id <= ControlId::SavedLoop8);
         if (role == Role::ToDeck && previewControl) {
             if (value >= 0.5 && engine->deck(toDeck).previewActive())
@@ -291,6 +301,14 @@ struct TransitionPlayer::Impl {
             case ControlId::HotCue6:
             case ControlId::HotCue7:
             case ControlId::HotCue8:
+            case ControlId::TransitionCue1:
+            case ControlId::TransitionCue2:
+            case ControlId::TransitionCue3:
+            case ControlId::TransitionCue4:
+            case ControlId::TransitionCue5:
+            case ControlId::TransitionCue6:
+            case ControlId::TransitionCue7:
+            case ControlId::TransitionCue8:
             case ControlId::SavedLoop1:
             case ControlId::SavedLoop2:
             case ControlId::SavedLoop3:
@@ -301,7 +319,13 @@ struct TransitionPlayer::Impl {
             case ControlId::SavedLoop8:
             case ControlId::BeatJump:
             case ControlId::PlatterScratch:
-                lastDeckTrackBeat = engine->deck(fromDeck).beatPosition();
+                if (const TrackDataPtr track = engine->deck(fromDeck).track())
+                    lastDeckTrackBeat = transitionBeatAtSec(
+                        file, *track,
+                        engine->deck(fromDeck).positionSec());
+                else
+                    lastDeckTrackBeat =
+                        engine->deck(fromDeck).beatPosition();
                 haveDeckTrackBeat = engine->deck(fromDeck).playing.load();
                 wallBeat = std::max(wallBeat, lastBeat);
                 break;
@@ -329,7 +353,8 @@ struct TransitionPlayer::Impl {
                 incoming.previewActive();
             if (!latchingPreview) {
                 if (TrackDataPtr t = incoming.track())
-                    incoming.seekSec(t->secAtBeat(file.anchorToBeat));
+                    incoming.seekSec(transitionSecAtBeat(
+                        file, *t, file.anchorToBeat));
             }
             dispatch(s.e.role, s.e.control, s.e.value);
             incomingPreviewControl = ControlId::Count;
@@ -339,13 +364,16 @@ struct TransitionPlayer::Impl {
     }
 
     void restorePreStateTransportAtAnchor() {
-        const auto restoreCueAndLoop = [](Deck& deck,
+        const auto restoreCueAndLoop = [this](Deck& deck,
                                           const GvtInitialState& state) {
             const TrackDataPtr track = deck.track();
             if (!track) return;
-            deck.cuePointSec.store(track->secAtBeat(state.cueBeat));
-            deck.loopStartSec.store(track->secAtBeat(state.loopStartBeat));
-            deck.loopEndSec.store(track->secAtBeat(state.loopEndBeat));
+            deck.cuePointSec.store(transitionSecAtBeat(
+                file, *track, state.cueBeat));
+            deck.loopStartSec.store(transitionSecAtBeat(
+                file, *track, state.loopStartBeat));
+            deck.loopEndSec.store(transitionSecAtBeat(
+                file, *track, state.loopEndBeat));
             deck.loopActive.store(state.loopActive &&
                                   state.loopEndBeat > state.loopStartBeat);
             if (state.quantizeCaptured)
@@ -356,7 +384,8 @@ struct TransitionPlayer::Impl {
         bus->dispatch({toDeck, ControlId::Stop, 1.0}, Origin::Replay);
         if (file.initialComplete && file.initialTo.captured) {
             if (TrackDataPtr track = incoming.track())
-                incoming.seekSec(track->secAtBeat(file.initialTo.positionBeat));
+                incoming.seekSec(transitionSecAtBeat(
+                    file, *track, file.initialTo.positionBeat));
             restoreCueAndLoop(incoming, file.initialTo);
             restoreCueAndLoop(engine->deck(fromDeck), file.initialFrom);
             // If the incoming track was already rolling when recording
@@ -365,7 +394,8 @@ struct TransitionPlayer::Impl {
             if (file.initialTo.playing)
                 bus->dispatch({toDeck, ControlId::Play, 1.0}, Origin::Replay);
         } else if (TrackDataPtr track = incoming.track()) {
-            incoming.seekSec(track->secAtBeat(file.anchorToBeat));
+            incoming.seekSec(transitionSecAtBeat(
+                file, *track, file.anchorToBeat));
         }
     }
 };

@@ -52,6 +52,10 @@ enum class ControlId : uint8_t {
     SavedLoop1, SavedLoop2, SavedLoop3, SavedLoop4,
     SavedLoop5, SavedLoop6, SavedLoop7, SavedLoop8,
     TempoRange, // per-deck selected fader range; 0 cycles 8% -> 16% -> 50%
+    // Transition-owned temporary CUSTOM cues. Unlike HotCue*, these never
+    // read or write TrackData::hotCues.
+    TransitionCue1, TransitionCue2, TransitionCue3, TransitionCue4,
+    TransitionCue5, TransitionCue6, TransitionCue7, TransitionCue8,
     Count
 };
 

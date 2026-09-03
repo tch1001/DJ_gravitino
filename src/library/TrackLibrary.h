@@ -3,10 +3,11 @@
 #include <QAbstractTableModel>
 #include "../analysis/TrackData.h"
 #include "../transitions/Transition.h"
+#include "SongCatalog.h"
 
 namespace gvt {
 
-// Scans a folder for .mp3, analyzes in background threads, caches analysis
+// Scans MP3/FLAC/WAV/AIFF audio, analyzes in background threads, caches analysis
 // (bpm/grid/fingerprint/hotcues) as JSON in ~/.gravitino/cache/.
 // Columns: Title, Artist, BPM, Key, Duration, Status.
 class TrackLibrary : public QAbstractTableModel {
@@ -17,6 +18,10 @@ public:
     int  trackCount() const;
     TrackDataPtr trackAt(int row) const;     // null while still analyzing
     QString pathAt(int row) const;
+    QStringList compatibleAssetPaths(int row) const;
+    std::vector<CatalogTransitionLink> transitionsForTrack(int row) const;
+    void rebuildTransitionGraph(const class TransitionStore& transitions);
+    SongCatalog* songCatalog();
 
     // Persist corrected bpm/firstBeatSec into the existing analysis cache.
     // `corrected` must be a ready track in this library. The shared live
@@ -37,7 +42,7 @@ signals:
     void scanProgress(int analyzed, int total);
 };
 
-// All .gvt files in ~/Music/Gravitino/Transitions/.
+// Portable .transition files and readable legacy .gvt files.
 class TransitionStore : public QObject {
     Q_OBJECT
 public:
@@ -46,12 +51,16 @@ public:
     void reload();
     QString directory() const;
     const std::vector<GvtFile>& all() const;
+    void setSongCatalog(SongCatalog* catalog);
+    bool matchesEndpoint(const GvtFile& file, bool outgoing,
+                         const TrackData& track) const;
     // Transitions matching an ordered (from, to) pair, best match first.
     std::vector<const GvtFile*> matching(const TrackData& from, const TrackData& to) const;
     QString save(GvtFile& f, QString* error);  // names file from f.name; returns path
     // Update metadata/cues without changing the managed file name.
     bool update(const GvtFile& f, QString* error);
-    // Rename updates both [meta].name and the sanitized .gvt filename.
+    // Rename updates metadata and the sanitized portable filename. Renaming a
+    // legacy file creates a portable copy and leaves the source untouched.
     QString renameTransition(const GvtFile& f, const QString& newName,
                              QString* error);
     bool deleteTransition(const GvtFile& f, QString* error);

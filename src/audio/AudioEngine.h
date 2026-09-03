@@ -2,6 +2,7 @@
 #pragma once
 #include <QList>
 #include <QObject>
+#include <array>
 #include <atomic>
 #include <memory>
 #include "../analysis/TrackData.h"
@@ -30,6 +31,9 @@ public:
     bool previewActive() const;              // CUE/hot-cue held without PLAY latch
     void handleCue(bool pressed);           // press/hold-preview/release semantics
     void handleHotCue(int i, bool pressed); // hold: play; release: stop + return
+    void setTransitionCues(const std::array<double, 8>& seconds);
+    void clearTransitionCues();
+    void handleTransitionCue(int i, bool pressed);
     void handleSavedLoop(int i, bool pressed); // same hold/PLAY-latch contract
     void cueJump();                         // jump to the stored deck cue point
     void setHotCue(int i);                   // store current pos

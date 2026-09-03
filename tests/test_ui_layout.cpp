@@ -106,11 +106,16 @@ int main(int argc, char** argv)
     gvt::GvtFile sample;
     sample.name = QStringLiteral("Progress UI fixture");
     sample.from.title = QStringLiteral("Outgoing fixture");
-    sample.from.fingerprint = QStringLiteral("outgoing-fingerprint");
+    sample.from.fingerprint = QStringLiteral("gvfp1:outgoing-fingerprint");
+    sample.from.bpm = 120.0;
+    sample.from.durationSec = 16.0;
     sample.to.title = QStringLiteral("Incoming fixture");
-    sample.to.fingerprint = QStringLiteral("incoming-fingerprint");
+    sample.to.fingerprint = QStringLiteral("gvfp1:incoming-fingerprint");
+    sample.to.bpm = 120.0;
+    sample.to.durationSec = 16.0;
     sample.anchorFromBeat = 100.0;
     sample.anchorToBeat = 200.0;
+    sample.masterBpm = 120.0;
     sample.events = {
         {2.0, gvt::Role::ToDeck, gvt::ControlId::Play, 1.0,
          gvt::Curve::Step},

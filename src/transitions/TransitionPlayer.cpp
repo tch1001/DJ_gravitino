@@ -6,6 +6,8 @@
 #include "TransitionPlayerExt.h"
 
 #include <cmath>
+#include <algorithm>
+#include <array>
 #include <map>
 
 namespace gvt {
@@ -197,6 +199,11 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
         if (error) *error = QStringLiteral("player already active");
         return false;
     }
+    if (!f.unsupportedRequirements.isEmpty()) {
+        if (error) *error = QStringLiteral("unsupported transition capabilities: %1")
+                                .arg(f.unsupportedRequirements.join(", "));
+        return false;
+    }
     const int toDeck = (fromDeck == 0) ? 1 : 0;
     if (!im.engine->deck(toDeck).track()) {
         if (error) *error =
@@ -207,8 +214,15 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     im.file = f;
     im.fromDeck = fromDeck;
     im.toDeck = toDeck;
-    im.anchorFrom = startNow ? im.engine->deck(fromDeck).beatPosition()
-                             : f.anchorFromBeat;
+    if (startNow) {
+        const Deck& outgoing = im.engine->deck(fromDeck);
+        const TrackDataPtr track = outgoing.track();
+        im.anchorFrom = track
+            ? transitionBeatAtSec(f, *track, outgoing.positionSec())
+            : outgoing.beatPosition();
+    } else {
+        im.anchorFrom = f.anchorFromBeat;
+    }
 
     auto it = modeTable().find(this);
     im.mode = (it != modeTable().end()) ? it->second : PlayerMode::Perform;
@@ -225,6 +239,41 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
                      // longer applied as part of a transition.
                      return event.control != ControlId::Trim;
                  });
+    const auto prepareCues = [&](Role role, int physicalDeck,
+                                  const TrackDataPtr& track) {
+        std::array<double, 8> seconds {
+            -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+        const auto cueSlots = transitionCueSlots(f, role);
+        for (int slot = 0; slot < 8; ++slot)
+            if (cueSlots[static_cast<std::size_t>(slot)] && track)
+                seconds[static_cast<std::size_t>(slot)] = transitionSecAtBeat(
+                    f, *track,
+                    cueSlots[static_cast<std::size_t>(slot)]->trackBeat);
+        im.engine->deck(physicalDeck).setTransitionCues(seconds);
+        return cueSlots;
+    };
+    const auto fromCueSlots = prepareCues(
+        Role::FromDeck, fromDeck, im.engine->deck(fromDeck).track());
+    const auto toCueSlots = prepareCues(
+        Role::ToDeck, toDeck, im.engine->deck(toDeck).track());
+    for (GvtEvent& event : events) {
+        if (event.cueId.isEmpty() || event.role == Role::Mixer) continue;
+        const auto& cueSlots = event.role == Role::FromDeck
+                                ? fromCueSlots : toCueSlots;
+        const auto found = std::find_if(
+            cueSlots.begin(), cueSlots.end(), [&event](const TransitionHotCue* cue) {
+                return cue && cue->id == event.cueId;
+            });
+        if (found == cueSlots.end()) {
+            if (error) *error = QStringLiteral("timeline refers to unallocated cue '%1'")
+                                    .arg(event.cueId);
+            return false;
+        }
+        const int slot = static_cast<int>(
+            std::distance(cueSlots.begin(), found));
+        event.control = static_cast<ControlId>(
+            static_cast<int>(ControlId::TransitionCue1) + slot);
+    }
     // A library re-scan or manual regrid can change the loaded track's native
     // BPM after recording. Preserve every recorded effective BPM, including
     // later tempo moves, rather than blindly replaying a now-wrong ratio.
@@ -284,7 +333,11 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
         im.timelineStarted = true;
         im.timelineRunning = outgoing.playing.load();
         im.haveLastBeat = im.timelineRunning;
-        im.lastDeckTrackBeat = outgoing.beatPosition();
+        if (const TrackDataPtr track = outgoing.track())
+            im.lastDeckTrackBeat = transitionBeatAtSec(
+                f, *track, outgoing.positionSec());
+        else
+            im.lastDeckTrackBeat = outgoing.beatPosition();
         im.haveDeckTrackBeat = true;
         const double effective = outgoing.effectiveBpm();
         if (effective > 0.0) im.timelineBpm = effective;

@@ -5,6 +5,7 @@
 // file-local registry keyed by the model pointer (cleaned up on destroyed()).
 
 #include "TrackLibrary.h"
+#include "SongCatalog.h"
 #include "../analysis/AnalysisInternal.h"
 #include "../analysis/BeatGridEditor.h"
 
@@ -41,6 +42,7 @@ struct Row {
 
 struct LibState {
     QThreadPool pool;
+    SongCatalog catalog;
     std::vector<Row> rows;
     int total = 0;
     int analyzed = 0;               // GUI thread only
@@ -93,11 +95,17 @@ bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
     o[QStringLiteral("title")]        = t.title;
     o[QStringLiteral("artist")]       = t.artist;
     o[QStringLiteral("album")]        = t.album;
+    o[QStringLiteral("isrc")] = t.isrc;
+    o[QStringLiteral("musicBrainzRecording")] = t.musicBrainzRecording;
     o[QStringLiteral("durationSec")]  = t.durationSec;
     o[QStringLiteral("bpm")] = gridOverride ? gridOverride->bpm : t.bpm;
     o[QStringLiteral("firstBeatSec")] = gridOverride
         ? gridOverride->firstBeatSec : t.firstBeatSec;
     o[QStringLiteral("fingerprint")]  = t.fingerprint;
+    o[QStringLiteral("structureFingerprint")] = t.structureFingerprint;
+    o[QStringLiteral("assetSha256")] = t.assetSha256;
+    o[QStringLiteral("audibleDurationSec")] = t.audibleDurationSec;
+    o[QStringLiteral("songId")] = t.songId;
     o[QStringLiteral("camelotKey")]   = t.camelotKey;
     o[QStringLiteral("keyName")]      = t.keyName;
     const TrackData& performance = performanceOverride
@@ -148,19 +156,32 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs, QString* error)
     if (!doc.isObject()) return nullptr;
     const QJsonObject o = doc.object();
     if ((qint64)o.value(QStringLiteral("mtime")).toDouble(-1) != mtimeMs) return nullptr;
-    // Entries written before key detection existed lack "camelotKey" — treat
-    // them as a miss so the track re-analyzes once and the cache is upgraded.
-    if (!o.contains(QStringLiteral("camelotKey"))) return nullptr;
+    // Entries written before portable structural identity existed re-analyze
+    // once so alternate encodes can be grouped safely.
+    if (!o.contains(QStringLiteral("camelotKey")) ||
+        !o.contains(QStringLiteral("isrc")) ||
+        !o.contains(QStringLiteral("musicBrainzRecording")) ||
+        !o.value(QStringLiteral("structureFingerprint")).toString()
+             .startsWith(QStringLiteral("gvsf2:"))) return nullptr;
 
     auto t = std::make_shared<TrackData>();
     t->filePath = path;
-    if (!detail::decodeMp3Stereo48k(path, t->pcm, error)) return nullptr;
+    if (!detail::decodeAudioStereo48k(path, t->pcm, error)) return nullptr;
     t->title        = o.value(QStringLiteral("title")).toString();
     t->artist       = o.value(QStringLiteral("artist")).toString();
     t->album        = o.value(QStringLiteral("album")).toString();
+    t->isrc = o.value(QStringLiteral("isrc")).toString();
+    t->musicBrainzRecording =
+        o.value(QStringLiteral("musicBrainzRecording")).toString();
     t->bpm          = o.value(QStringLiteral("bpm")).toDouble();
     t->firstBeatSec = o.value(QStringLiteral("firstBeatSec")).toDouble();
     t->fingerprint  = o.value(QStringLiteral("fingerprint")).toString();
+    t->structureFingerprint =
+        o.value(QStringLiteral("structureFingerprint")).toString();
+    t->assetSha256 = o.value(QStringLiteral("assetSha256")).toString();
+    t->audibleDurationSec =
+        o.value(QStringLiteral("audibleDurationSec")).toDouble();
+    t->songId = o.value(QStringLiteral("songId")).toString();
     t->camelotKey   = o.value(QStringLiteral("camelotKey")).toString();
     t->keyName      = o.value(QStringLiteral("keyName")).toString();
     t->durationSec  = (double)t->frameCount() / (double)kSampleRate;
@@ -217,7 +238,11 @@ void TrackLibrary::scanFolder(const QString& dirIn)
                                             : dirIn;
     // Recursive scan, skipping hidden directories.
     QStringList files;
-    QDirIterator it(dirPath, {QStringLiteral("*.mp3")}, QDir::Files | QDir::Readable,
+    QDirIterator it(dirPath,
+                    {QStringLiteral("*.mp3"), QStringLiteral("*.flac"),
+                     QStringLiteral("*.wav"), QStringLiteral("*.aif"),
+                     QStringLiteral("*.aiff")},
+                    QDir::Files | QDir::Readable,
                     QDirIterator::Subdirectories);
     while (it.hasNext()) {
         const QString p = it.next();
@@ -249,6 +274,11 @@ void TrackLibrary::scanFolder(const QString& dirIn)
             QMetaObject::invokeMethod(obj, [st, self, gen, i, t] {
                 TrackLibrary* m = self.data();
                 if (!m || gen != st->generation || i >= (int)st->rows.size()) return;
+                if (t) {
+                    t->songId = st->catalog.registerAsset(*t);
+                    t->canonicalBeatOffset =
+                        st->catalog.canonicalBeatOffsetForAsset(t->filePath);
+                }
                 st->rows[(size_t)i].track = t;
                 st->rows[(size_t)i].status = t ? QStringLiteral("ready")
                                                : QStringLiteral("error");
@@ -279,6 +309,31 @@ QString TrackLibrary::pathAt(int row) const
     auto st = state(this);
     if (row < 0 || row >= (int)st->rows.size()) return {};
     return st->rows[(size_t)row].path;
+}
+
+QStringList TrackLibrary::compatibleAssetPaths(int row) const
+{
+    const TrackDataPtr track = trackAt(row);
+    return track ? state(this)->catalog.assetsForSong(track->songId)
+                 : QStringList{};
+}
+
+std::vector<CatalogTransitionLink>
+TrackLibrary::transitionsForTrack(int row) const
+{
+    const TrackDataPtr track = trackAt(row);
+    return track ? state(this)->catalog.transitionsForSong(track->songId)
+                 : std::vector<CatalogTransitionLink>{};
+}
+
+void TrackLibrary::rebuildTransitionGraph(const TransitionStore& transitions)
+{
+    state(this)->catalog.rebuildTransitionGraph(transitions.all());
+}
+
+SongCatalog* TrackLibrary::songCatalog()
+{
+    return &state(this)->catalog;
 }
 
 bool TrackLibrary::persistBeatGrid(const TrackData& corrected, QString* error)

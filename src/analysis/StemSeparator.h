@@ -42,7 +42,7 @@ private:
     struct Job {
         QString fingerprint; // full "gvfp1:..." string
         QString fpHex;       // hex part → cache dir name
-        QString filePath;    // source mp3
+        QString filePath;    // source audio asset
         int64_t frameCount = 0;
     };
 

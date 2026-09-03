@@ -1,13 +1,13 @@
 # Gravitino Agent Handoff
 
-Updated: 2026-09-03 (Asia/Singapore)
+Updated: 2026-09-04 (Asia/Singapore)
 
 ## Current state
 
-The focused beat-grid and overview-cursor checkpoint was committed and pushed
-at `685f5b6` (`Improve transition setup and deck controls`), followed by the
-PRIME lifecycle fix at `049a0d5`. The single-picker/event-sequence/Tutor layout
-work described first below is the current uncommitted change set.
+The Tutor/progress/mouse-control work is committed and pushed at `00fe760`
+(`Improve tutor workflow and mouse deck controls`). The current change set
+introduces the portable `.transition` YAML model, permanent `.gvt` adapter,
+multi-format arrangement catalog/matching, and transition-owned temporary cues.
 
 The user explicitly permits stopping a running Gravitino process when a
 restart is needed. Always resolve the process narrowly with
@@ -15,9 +15,28 @@ restart is needed. Always resolve the process narrowly with
 audio programs are never touched.
 
 The Git remote is `git@github.com:tch1001/DJ_gravitino.git`; `main` tracks
-`origin/main`. Do not commit or push this working tree until the user asks.
+`origin/main`. The user explicitly requested that the completed work be
+committed and pushed after validation. Never include the untracked `tmp/` tree.
 
 ## Implemented in this working tree
+
+- **Portable transition foundation:** new recordings save deterministic,
+  safe-subset UTF-8 YAML as `.transition`; `.gvt` remains readable forever and
+  conversion creates a UUID-backed portable copy without changing its source.
+  The typed model preserves endpoint identities/assumptions, exact fractional
+  events, initial state, labels, semantic cues, input hints, requirements, and
+  unknown mapping/extension fields. Unknown required capabilities block replay.
+- **Arrangement catalog and matching:** library discovery/decoding now covers
+  MP3, FLAC, WAV, and AIFF. A versioned local catalog groups multiple encodes by
+  an encode-tolerant `gvsf2` signature plus BPM/duration, stores exact hashes,
+  confirmed endpoint bindings and constant beat offsets, and rebuilds reverse
+  transition edges by scanning both extensions. ISRC/MusicBrainz IDs are an
+  additional checked tier; metadata-only candidates require confirmation.
+- **Transition-owned cues:** timeline cue actions use semantic IDs allocated
+  into an isolated eight-slot CUSTOM bank per endpoint. Permanent track cues
+  are untouched, pair colors/input hints travel with the edge, and replay,
+  mouse controls, Tutor highlighting, setup, and waveform markers consume the
+  typed cue/coordinate model.
 
 - **Corrected lower-workspace Tutor and transition editing:** TUTOR VIEW now
   adds its virtual FLX4 at the bottom left, below the detailed waveform. It

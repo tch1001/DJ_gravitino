@@ -1,6 +1,8 @@
 // PINNED INTERFACE — see docs/ARCHITECTURE.md + docs/TRANSITION_FORMAT.md.
 #pragma once
+#include <QJsonObject>
 #include <QString>
+#include <QStringList>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -26,11 +28,37 @@ struct GvtEvent {
     // (for example CUSTOM pad 3 rather than the resulting generic PLAY state).
     ControlId gestureControl = ControlId::Count;
     int       gesturePadMode = -1; // PerformancePadMode value, when relevant
+    // Portable files can address a semantic transition-owned cue instead of
+    // baking a physical pad number into the musical timeline.
+    QString   cueId;
+    QJsonObject extraYaml;
+    QJsonObject inputExtraYaml;
+};
+
+struct TransitionFingerprint {
+    QString algorithm;
+    QString value;
+    QJsonObject extraYaml;
 };
 
 struct GvtTrackRef {
     QString title, artist, fingerprint;
     double bpm = 0.0, durationSec = 0.0;
+    QStringList artists;
+    QString versionName;
+    QString isrc;
+    QString musicBrainzRecording;
+    std::map<QString, QString> providerIds;
+    double durationBeats = 0.0;
+    QString meter = QStringLiteral("4/4");
+    double referenceDownbeatSec = 0.0;
+    std::vector<TransitionFingerprint> fingerprints;
+    QString notes;
+    QJsonObject extraYaml;
+    QJsonObject identityExtraYaml;
+    QJsonObject identifiersExtraYaml;
+    QJsonObject providersExtraYaml;
+    QJsonObject assumptionsExtraYaml;
 };
 
 // Snapshot of one deck when recording begins.  The core gain/EQ fields are
@@ -60,6 +88,7 @@ struct GvtInitialState {
     double fxWet = 0.5, fxBeats = 0.5;
     double stemVocals = 1.0, stemMelody = 1.0;
     double stemBass = 1.0, stemDrums = 1.0;
+    QJsonObject extraYaml;
 };
 
 // A user-editable label at a beat relative to the transition anchor.  Cues are
@@ -68,7 +97,25 @@ struct GvtInitialState {
 struct GvtCue {
     double beat = 0.0;
     QString label;
+    QJsonObject extraYaml;
 };
+
+struct TransitionHotCue {
+    QString id;
+    Role role = Role::FromDeck;
+    double trackBeat = 0.0;
+    QString label;
+    QString purpose;
+    QString color;
+    QString pairingGroup;
+    QString preferredBank = QStringLiteral("custom");
+    int preferredPad = -1; // zero based; -1 lets the host allocate a slot
+    QString preferredKey;
+    QJsonObject extraYaml;
+    QJsonObject inputExtraYaml;
+};
+
+enum class TransitionSourceFormat : uint8_t { Unsaved, LegacyGvt, PortableYaml };
 
 // Missing hot-cue mappings need a non-numeric sentinel because valid beat
 // grids can extend below zero when a track has audio before its first downbeat.
@@ -83,6 +130,10 @@ struct GvtFile {
     int version = 1;
     // [meta]
     QString name, author, created, description;
+    QString id, license;
+    QStringList tags;
+    QStringList requirements;
+    QStringList unsupportedRequirements;
     std::map<QString, QString> extraMeta;  // unknown keys, preserved
     // [from] [to] [sync]
     GvtTrackRef from, to;
@@ -107,10 +158,31 @@ struct GvtFile {
         kUnmappedHotCueBeat, kUnmappedHotCueBeat};
     // [cues], sorted by beat
     std::vector<GvtCue> cues;
+    // Transition-owned performance cues. These are loaded into the temporary
+    // CUSTOM bank and never replace a track's permanent hot cues.
+    std::vector<TransitionHotCue> transitionCues;
     // [events], sorted by beat
     std::vector<GvtEvent> events;
 
     QString filePath; // where it was loaded from / last saved ("" if unsaved)
+    TransitionSourceFormat sourceFormat = TransitionSourceFormat::Unsaved;
+    // Set on a portable copy migrated from legacy. The copy has a UUID, while
+    // this stable source identity suppresses a duplicate UI entry as the
+    // original .gvt remains untouched.
+    QString legacySourceId;
+
+    // Unknown YAML fields are retained at their containing object so a newer
+    // producer can safely round-trip through this version of Gravitino.
+    QJsonObject extraYaml;
+    QJsonObject metadataExtraYaml;
+    QJsonObject endpointsExtraYaml;
+    QJsonObject performanceExtraYaml;
+    QJsonObject anchorsExtraYaml;
+    QJsonObject outgoingAnchorExtraYaml;
+    QJsonObject incomingAnchorExtraYaml;
+    QJsonObject initialStateExtraYaml;
+    QJsonObject mixerInitialExtraYaml;
+    QJsonObject extensions;
 };
 
 // Parse/serialize. Unknown controls are skipped with a warning appended to
@@ -121,12 +193,43 @@ QString gvtSerialize(const GvtFile& f);
 bool gvtLoadFile(const QString& path, GvtFile& out, QString* error, QStringList* warnings);
 bool gvtSaveFile(const GvtFile& f, const QString& path, QString* error);
 
+// Portable `.transition` YAML. The parser accepts a deliberately small,
+// deterministic and safe YAML subset and preserves unknown mapping fields.
+bool transitionParse(const QString& text, GvtFile& out, QString* error,
+                     QStringList* warnings = nullptr);
+QString transitionSerialize(const GvtFile& f);
+bool transitionLoadFile(const QString& path, GvtFile& out, QString* error,
+                        QStringList* warnings = nullptr);
+bool transitionSaveFile(const GvtFile& f, const QString& path, QString* error);
+
+// Format-neutral file entry points. Saving always writes portable YAML;
+// loading selects legacy or portable syntax from the extension/content.
+bool loadTransitionFile(const QString& path, GvtFile& out, QString* error,
+                        QStringList* warnings = nullptr);
+bool saveTransitionFile(const GvtFile& f, const QString& path, QString* error);
+QString stableLegacyTransitionId(const GvtFile& f);
+std::array<const TransitionHotCue*, 8>
+transitionCueSlots(const GvtFile& file, Role role);
+// Portable coordinates are canonical arrangement beats. Legacy coordinates
+// remain tied to the original analyzed grid for permanent compatibility.
+double transitionBeatAtSec(const GvtFile& file, const struct TrackData& track,
+                           double seconds);
+double transitionSecAtBeat(const GvtFile& file, const struct TrackData& track,
+                           double beat);
+
 // Track matching tiers for offering transitions (see format doc).
-enum class MatchQuality { None, DurationOnly, TitleArtist, Fingerprint };
+enum class MatchQuality {
+    None, DurationOnly, TitleArtist, Identifier, Structure, Fingerprint
+};
 MatchQuality matchTrack(const GvtTrackRef& ref, const struct TrackData& t);
+bool transitionTrackMatchReliable(const GvtFile& file,
+                                  const GvtTrackRef& ref,
+                                  const struct TrackData& track);
 constexpr bool isReliableTrackMatch(MatchQuality quality) noexcept
 {
     return quality == MatchQuality::Fingerprint ||
+           quality == MatchQuality::Structure ||
+           quality == MatchQuality::Identifier ||
            quality == MatchQuality::TitleArtist;
 }
 

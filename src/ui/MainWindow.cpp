@@ -352,12 +352,29 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             [this](const QString&, bool) { updateAudioOutputLabel(); });
 
     // Cross-widget wiring.
+    store_->setSongCatalog(library_->songCatalog());
     connect(libraryWidget_, &LibraryWidget::transitionSelected,
             transitionPanel_, &TransitionPanel::selectTransitionFile);
     connect(libraryWidget_, &LibraryWidget::transitionEditRequested,
             transitionPanel_, &TransitionPanel::editTransitionFile);
     connect(transitionPanel_, &TransitionPanel::transitionEditingEnabled,
             libraryWidget_, &LibraryWidget::setTransitionEditingEnabled);
+    connect(transitionPanel_, &TransitionPanel::temporaryCueBankChanged, this,
+            [this](int deck, const QList<double>& seconds,
+                   const QStringList& labels, const QStringList& colors) {
+                if (deck != 0 && deck != 1) return;
+                DeckWidget* widget = deckWidget(deck);
+                if (seconds.isEmpty()) {
+                    widget->clearTemporaryTransitionCues();
+                    return;
+                }
+                std::array<double, 8> cueSeconds {
+                    -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+                for (int i = 0; i < 8 && i < seconds.size(); ++i)
+                    cueSeconds[static_cast<std::size_t>(i)] = seconds.at(i);
+                widget->setTemporaryTransitionCues(
+                    cueSeconds, labels, colors);
+            });
     libraryWidget_->setTransitionEditingEnabled(true);
     connect(transitionPanel_, &TransitionPanel::tutorialViewChanged, this,
             [this](bool open) {
@@ -374,6 +391,11 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             });
     connect(libraryWidget_, &LibraryWidget::trackLoaded, this,
             [this](int deck) { notifyTrackLoaded(deck); });
+    connect(store_, &TransitionStore::changed, this,
+            [this] { library_->rebuildTransitionGraph(*store_); });
+    connect(library_, &TrackLibrary::trackReady, this,
+            [this](int) { library_->rebuildTransitionGraph(*store_); });
+    library_->rebuildTransitionGraph(*store_);
     connect(libraryWidget_, &LibraryWidget::statusMessage, this,
             [this](const QString& msg, int timeoutMs) {
                 statusBar()->showMessage(msg, timeoutMs);
@@ -427,6 +449,8 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
         const ControlId cueControl = static_cast<ControlId>(
             static_cast<int>(ControlId::HotCue1) + pad);
         for (const GvtFile& file : store_->all()) {
+            if (file.sourceFormat == TransitionSourceFormat::PortableYaml)
+                continue; // portable cues live in the isolated CUSTOM bank
             const auto roleUsesCue = [&](Role role) {
                 return std::any_of(
                     file.events.begin(), file.events.end(),

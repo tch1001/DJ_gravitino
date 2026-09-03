@@ -154,6 +154,8 @@ static QString qualityBadge(MatchQuality q)
 {
     switch (q) {
     case MatchQuality::Fingerprint:  return QStringLiteral("● exact");
+    case MatchQuality::Structure:    return QStringLiteral("● same arrangement");
+    case MatchQuality::Identifier:   return QStringLiteral("● recording ID");
     case MatchQuality::TitleArtist:  return QStringLiteral("◐ title/artist");
     case MatchQuality::DurationOnly: return QStringLiteral("○ duration");
     case MatchQuality::None:         return QStringLiteral("✕ none");
@@ -245,7 +247,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     editBtn_ = new FitPushButton(tr("EDIT TRANSITION…"));
     editBtn_->setFixedHeight(18);
     editBtn_->setToolTip(
-        tr("Edit and validate the selected transition's .gvt source"));
+        tr("Edit and validate the selected transition's portable YAML"));
     previewHeaderRow->addWidget(editBtn_);
     labelCueBtn_ = new FitPushButton(tr("LABEL CUE…"));
     labelCueBtn_->setFixedHeight(18);
@@ -736,14 +738,33 @@ void TransitionPanel::announceEntryMarker()
         emit entryMarkerChanged(1, -1.0);
         emit cueMarkersChanged(0, {}, {});
         emit cueMarkersChanged(1, {}, {});
+        emit temporaryCueBankChanged(0, {}, {}, {});
+        emit temporaryCueBankChanged(1, {}, {}, {});
         return;
     }
     const Match& m = matches_[(size_t)idx];
     double sec = -1.0;
     if (TrackDataPtr t = engine_->deck(m.fromDeck).track())
-        sec = t->secAtBeat(m.file->anchorFromBeat);
+        sec = transitionSecAtBeat(*m.file, *t, m.file->anchorFromBeat);
     emit entryMarkerChanged(m.fromDeck, sec);
     emit entryMarkerChanged(m.fromDeck == 0 ? 1 : 0, -1.0);
+    for (Role role : {Role::FromDeck, Role::ToDeck}) {
+        const int deck = role == Role::FromDeck ? m.fromDeck : 1 - m.fromDeck;
+        const TrackDataPtr track = engine_->deck(deck).track();
+        QList<double> seconds;
+        QStringList labels;
+        QStringList colors;
+        const auto cueSlots = transitionCueSlots(*m.file, role);
+        for (const TransitionHotCue* cue : cueSlots) {
+            seconds.append(cue && track
+                               ? transitionSecAtBeat(*m.file, *track,
+                                                     cue->trackBeat)
+                               : -1.0);
+            labels.append(cue ? cue->label : QString());
+            colors.append(cue ? cue->color : QString());
+        }
+        emit temporaryCueBankChanged(deck, seconds, labels, colors);
+    }
     announceSelectedEventMarker();
 }
 
@@ -787,7 +808,8 @@ void TransitionPanel::announceSelectedEventMarker()
             const double anchor = deck == match.fromDeck
                                       ? file.anchorFromBeat
                                       : file.anchorToBeat;
-            seconds.append(track->secAtBeat(anchor + event.beat));
+            seconds.append(transitionSecAtBeat(
+                file, *track, anchor + event.beat));
             labels.append(label);
         }
         emit cueMarkersChanged(deck, seconds, labels);
@@ -1512,16 +1534,19 @@ bool TransitionPanel::setupMatches(const Match& match,
             local.append(tr("%1 loop on/off").arg(deckName));
         if (expected.loopActive) {
             compare(tr("%1 loop start").arg(deckName),
-                    track->beatAtSec(deck.loopStartSec.load()),
+                    transitionBeatAtSec(*match.file, *track,
+                                        deck.loopStartSec.load()),
                     expected.loopStartBeat, physical, ControlId::Count,
                     SetupToleranceField::Other, 0.02);
             compare(tr("%1 loop end").arg(deckName),
-                    track->beatAtSec(deck.loopEndSec.load()),
+                    transitionBeatAtSec(*match.file, *track,
+                                        deck.loopEndSec.load()),
                     expected.loopEndBeat, physical, ControlId::Count,
                     SetupToleranceField::Other, 0.02);
         }
         compare(tr("%1 cue").arg(deckName),
-                track->beatAtSec(deck.cuePointSec.load()),
+                transitionBeatAtSec(*match.file, *track,
+                                    deck.cuePointSec.load()),
                 expected.cueBeat, physical, ControlId::Count,
                 SetupToleranceField::Other, 0.02);
     };
@@ -1556,7 +1581,11 @@ QStringList TransitionPanel::primeReadinessIssues(const Match& match) const
     setupMatches(match, &issues);
 
     const Deck& outgoing = engine_->deck(match.fromDeck);
-    const double currentBeat = outgoing.beatPosition();
+    const TrackDataPtr outgoingTrack = outgoing.track();
+    const double currentBeat = outgoingTrack
+        ? transitionBeatAtSec(*match.file, *outgoingTrack,
+                              outgoing.positionSec())
+        : outgoing.beatPosition();
     if (currentBeat > match.file->anchorFromBeat + 0.05)
         issues.append(tr("entry beat has already passed"));
     if (!outgoing.playing.load() &&
@@ -1565,8 +1594,10 @@ QStringList TransitionPanel::primeReadinessIssues(const Match& match) const
     if (outgoing.loopActive.load()) {
         const TrackDataPtr track = outgoing.track();
         if (track) {
-            const double start = track->beatAtSec(outgoing.loopStartSec.load());
-            const double end = track->beatAtSec(outgoing.loopEndSec.load());
+            const double start = transitionBeatAtSec(
+                *match.file, *track, outgoing.loopStartSec.load());
+            const double end = transitionBeatAtSec(
+                *match.file, *track, outgoing.loopEndSec.load());
             if (!activeLoopCanReachTransitionEntry(
                     currentBeat, match.file->anchorFromBeat, start, end))
                 issues.append(tr("outgoing loop cannot reach the entry beat"));
@@ -1581,7 +1612,12 @@ QStringList TransitionPanel::primeReadinessIssues(const Match& match) const
                                         match.file->initialTo.captured
                                     ? match.file->initialTo.positionBeat
                                     : match.file->anchorToBeat;
-    if (std::fabs(incoming.beatPosition() - expectedBeat) > 0.05)
+    const TrackDataPtr incomingTrack = incoming.track();
+    const double incomingBeat = incomingTrack
+        ? transitionBeatAtSec(*match.file, *incomingTrack,
+                              incoming.positionSec())
+        : incoming.beatPosition();
+    if (std::fabs(incomingBeat - expectedBeat) > 0.05)
         issues.append(tr("incoming cue position is not prepared"));
     return issues;
 }
@@ -1686,7 +1722,11 @@ void TransitionPanel::updateControls()
     if (selected && !busy) {
         const Match& match = matches_[(size_t)selectedMatch()];
         const Deck& outgoing = engine_->deck(match.fromDeck);
-        const double beat = outgoing.beatPosition();
+        const TrackDataPtr track = outgoing.track();
+        const double beat = track
+            ? transitionBeatAtSec(*match.file, *track,
+                                  outgoing.positionSec())
+            : outgoing.beatPosition();
         primeTimingReady = outgoing.playing.load()
                                ? beat <= match.file->anchorFromBeat + 0.05
                                : beat < match.file->anchorFromBeat - 0.05;
@@ -1793,13 +1833,17 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
                             setup.quantize ? 1.0 : 0.0}, Origin::System);
 
         if (TrackDataPtr track = deck.track()) {
-            deck.cuePointSec.store(track->secAtBeat(setup.cueBeat));
-            deck.loopStartSec.store(track->secAtBeat(setup.loopStartBeat));
-            deck.loopEndSec.store(track->secAtBeat(setup.loopEndBeat));
+            deck.cuePointSec.store(transitionSecAtBeat(
+                *match.file, *track, setup.cueBeat));
+            deck.loopStartSec.store(transitionSecAtBeat(
+                *match.file, *track, setup.loopStartBeat));
+            deck.loopEndSec.store(transitionSecAtBeat(
+                *match.file, *track, setup.loopEndBeat));
             deck.loopActive.store(setup.loopActive &&
                                   setup.loopEndBeat > setup.loopStartBeat);
             if (prepareTransport)
-                deck.seekSec(track->secAtBeat(setup.positionBeat));
+                deck.seekSec(transitionSecAtBeat(
+                    *match.file, *track, setup.positionBeat));
         }
     };
 
@@ -1810,8 +1854,8 @@ void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
         const int incoming = 1 - match.fromDeck;
         bus_->dispatch({incoming, ControlId::Stop, 1.0}, Origin::System);
         if (TrackDataPtr track = engine_->deck(incoming).track())
-            engine_->deck(incoming).seekSec(
-                track->secAtBeat(match.file->anchorToBeat));
+            engine_->deck(incoming).seekSec(transitionSecAtBeat(
+                *match.file, *track, match.file->anchorToBeat));
     }
     if (applyCrossfader && match.file->initialComplete &&
         match.file->initialMixerCaptured) {
@@ -1941,7 +1985,7 @@ void TransitionPanel::onDelete()
     const GvtFile file = *matches_[(size_t)idx].file;
     if (QMessageBox::question(
             this, tr("Delete transition"),
-            tr("Delete “%1”? This removes its .gvt file.").arg(file.name),
+            tr("Delete “%1”? This removes its transition file.").arg(file.name),
             QMessageBox::Yes | QMessageBox::Cancel,
             QMessageBox::Cancel) != QMessageBox::Yes)
         return;
@@ -1971,8 +2015,8 @@ void TransitionPanel::editTransition(const GvtFile& original)
     auto* root = new QVBoxLayout(&dialog);
 
     auto* explanation = new QLabel(
-        tr("Edit the plain UTF-8 .gvt source below. Save validates it and "
-           "rewrites it in Gravitino's canonical format."),
+        tr("Edit the portable UTF-8 YAML below. Beats may be fractional. "
+           "Saving a legacy .gvt creates a separate .transition file."),
         &dialog);
     explanation->setWordWrap(true);
     root->addWidget(explanation);
@@ -1987,7 +2031,7 @@ void TransitionPanel::editTransition(const GvtFile& original)
     auto* editor = new QPlainTextEdit(&dialog);
     editor->setLineWrapMode(QPlainTextEdit::NoWrap);
     editor->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    editor->setPlainText(gvtSerialize(original));
+    editor->setPlainText(transitionSerialize(original));
     root->addWidget(editor, 1);
 
     auto* buttons = new QDialogButtonBox(
@@ -1999,29 +2043,36 @@ void TransitionPanel::editTransition(const GvtFile& original)
                 GvtFile edited;
                 QString error;
                 QStringList warnings;
-                if (!gvtParse(editor->toPlainText(), edited, &error,
-                              &warnings)) {
+                if (!transitionParse(editor->toPlainText(), edited, &error,
+                                     &warnings)) {
                     QMessageBox::warning(
-                        &dialog, tr("Invalid .gvt file"),
+                        &dialog, tr("Invalid .transition file"),
                         tr("The transition was not saved:\n\n%1").arg(error));
                     return;
                 }
                 if (edited.version != 1) {
                     QMessageBox::warning(
-                        &dialog, tr("Unsupported .gvt version"),
+                        &dialog, tr("Unsupported .transition version"),
                         tr("This Gravitino build can edit version 1 files only."));
                     return;
                 }
                 if (edited.name.trimmed().isEmpty()) {
                     QMessageBox::warning(
                         &dialog, tr("Transition needs a name"),
-                        tr("Set a non-empty name under [meta] before saving."));
+                        tr("Set metadata.name before saving."));
                     return;
                 }
                 if (edited.events.empty()) {
                     QMessageBox::warning(
                         &dialog, tr("Transition has no events"),
-                        tr("Add at least one valid line under [events] before saving."));
+                        tr("Add at least one valid performance.timeline event before saving."));
+                    return;
+                }
+                if (!edited.unsupportedRequirements.isEmpty()) {
+                    QMessageBox::warning(
+                        &dialog, tr("Unsupported transition capabilities"),
+                        tr("This build cannot safely edit or replay: %1")
+                            .arg(edited.unsupportedRequirements.join(", ")));
                     return;
                 }
                 if (std::any_of(
@@ -2057,6 +2108,16 @@ void TransitionPanel::editTransition(const GvtFile& original)
                 } else {
                     selectedPath_ = original.filePath;
                     saved = store_->update(edited, &error);
+                    if (saved) {
+                        const auto migrated = std::find_if(
+                            store_->all().begin(), store_->all().end(),
+                            [&edited](const GvtFile& candidate) {
+                                return candidate.id == edited.id ||
+                                       candidate.legacySourceId == edited.id;
+                            });
+                        if (migrated != store_->all().end())
+                            savedPath = migrated->filePath;
+                    }
                 }
                 if (!saved) {
                     QMessageBox::warning(
@@ -2096,9 +2157,8 @@ void TransitionPanel::onLabelCue()
             .arg(event.beat, 0, 'f', 3),
         QLineEdit::Normal, current, &ok).trimmed();
     if (!ok) return;
-    if (label.contains(QLatin1Char('#')) || label.contains(QLatin1Char(';')) ||
-        label.contains(QLatin1Char('\n')) || label.contains(QLatin1Char('\r'))) {
-        emit statusMessage(tr("Cue labels cannot contain #, ;, or line breaks"),
+    if (label.contains(QLatin1Char('\n')) || label.contains(QLatin1Char('\r'))) {
+        emit statusMessage(tr("Cue labels cannot contain line breaks"),
                            5000);
         return;
     }
@@ -2120,6 +2180,16 @@ void TransitionPanel::onLabelCue()
     if (!store_->update(file, &error)) {
         emit statusMessage(tr("Could not save cue label: %1").arg(error), 6000);
         return;
+    }
+    if (QFileInfo(file.filePath).suffix().compare(
+            QStringLiteral("gvt"), Qt::CaseInsensitive) == 0) {
+        const auto migrated = std::find_if(
+            store_->all().begin(), store_->all().end(),
+            [&file](const GvtFile& candidate) {
+                return candidate.legacySourceId == file.id;
+            });
+        if (migrated != store_->all().end())
+            selectedPath_ = migrated->filePath;
     }
     emit statusMessage(label.isEmpty() ? tr("Cleared transition cue label")
                                        : tr("Labeled cue “%1”").arg(label),
@@ -2258,12 +2328,14 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
             // Guided Perform starts eight beats before the entry whenever the
             // track has that much runway. This makes button countdowns useful
             // even for a recorded action at transition beat zero.
+            const double earliestBeat = transitionBeatAtSec(
+                *m.file, *track, 0.0);
             const double startBeat = mode == PlayerMode::Tutorial
-                                         ? std::max(0.0,
+                                         ? std::max(earliestBeat,
                                              m.file->anchorFromBeat - 8.0)
                                          : m.file->anchorFromBeat;
-            engine_->deck(m.fromDeck).seekSec(
-                track->secAtBeat(startBeat));
+            engine_->deck(m.fromDeck).seekSec(transitionSecAtBeat(
+                *m.file, *track, startBeat));
         }
     }
 
@@ -2478,6 +2550,7 @@ QString TransitionPanel::tutorialWarningForEvent(
 
     if (event.gestureControl >= ControlId::PerformancePad1 &&
         event.gestureControl <= ControlId::PerformancePad8 &&
+        event.cueId.isEmpty() &&
         (event.gesturePadMode == static_cast<int>(PerformancePadMode::Sampler) ||
          event.gesturePadMode == static_cast<int>(PerformancePadMode::SavedLoop))) {
         if (event.role == Role::Mixer)
@@ -2494,6 +2567,7 @@ QString TransitionPanel::tutorialWarningForEvent(
         }
     }
 
+    if (!event.cueId.isEmpty()) return {};
     if (event.control < ControlId::HotCue1 ||
         event.control > ControlId::HotCue8)
         return {};
@@ -2522,7 +2596,8 @@ QString TransitionPanel::tutorialWarningForEvent(
             .arg(deckName).arg(pad + 1);
     }
 
-    const double actualBeat = track->beatAtSec(track->hotCues[pad]);
+    const double actualBeat = transitionBeatAtSec(
+        *match.file, *track, track->hotCues[pad]);
     if (!std::isfinite(actualBeat) ||
         std::fabs(actualBeat - expectedBeat) > 0.05) {
         return tr("Deck %1 HOT CUE %2 is at beat %3; recording expects %4")
@@ -2553,6 +2628,7 @@ bool TransitionPanel::tutorialEventCanActivate(
     if (!tutorialMappingForEvent(event)) return false;
     if (event.gestureControl >= ControlId::PerformancePad1 &&
         event.gestureControl <= ControlId::PerformancePad8 &&
+        event.cueId.isEmpty() &&
         (event.gesturePadMode == static_cast<int>(PerformancePadMode::Sampler) ||
          event.gesturePadMode == static_cast<int>(PerformancePadMode::SavedLoop))) {
         if (event.role == Role::Mixer) return false;
@@ -2563,6 +2639,7 @@ bool TransitionPanel::tutorialEventCanActivate(
         const TrackDataPtr track = engine_->deck(deck).track();
         if (!track || !track->savedLoops[pad].isSet()) return false;
     }
+    if (!event.cueId.isEmpty()) return true;
     if (event.control < ControlId::HotCue1 ||
         event.control > ControlId::HotCue8)
         return true;
@@ -2583,7 +2660,9 @@ bool TransitionPanel::tutorialEventCanActivate(
     // A legacy transition is allowed after warning when the pad exists; a
     // known mismatch is disabled because clicking it would teach the wrong cue.
     return !hotCueBeatIsMapped(expectedBeat) ||
-           std::fabs(track->beatAtSec(track->hotCues[pad]) - expectedBeat) <= 0.05;
+           std::fabs(transitionBeatAtSec(
+                         *match.file, *track, track->hotCues[pad]) -
+                     expectedBeat) <= 0.05;
 }
 
 std::optional<Flx4TutorialMapping>
@@ -2637,7 +2716,9 @@ QString TransitionPanel::tutorialInstruction(
              (event.control >= ControlId::HotCue1 &&
               event.control <= ControlId::HotCue8) ||
              (event.control >= ControlId::SavedLoop1 &&
-              event.control <= ControlId::SavedLoop8)) &&
+              event.control <= ControlId::SavedLoop8) ||
+             (event.control >= ControlId::TransitionCue1 &&
+              event.control <= ControlId::TransitionCue8)) &&
             event.value < 0.5;
         if (release)
             return tr("Release %1 pad %2 on %3")
@@ -2681,6 +2762,16 @@ QString TransitionPanel::tutorialInstruction(
         return event.value >= 0.5
                    ? tr("Hold CUSTOM loop %1 on %2").arg(pad).arg(deck)
                    : tr("Release CUSTOM loop %1 on %2").arg(pad).arg(deck);
+    }
+    case ControlId::TransitionCue1: case ControlId::TransitionCue2:
+    case ControlId::TransitionCue3: case ControlId::TransitionCue4:
+    case ControlId::TransitionCue5: case ControlId::TransitionCue6:
+    case ControlId::TransitionCue7: case ControlId::TransitionCue8: {
+        const int pad = static_cast<int>(event.control) -
+                        static_cast<int>(ControlId::TransitionCue1) + 1;
+        return event.value >= 0.5
+                   ? tr("Hold transition CUE %1 on %2").arg(pad).arg(deck)
+                   : tr("Release transition CUE %1 on %2").arg(pad).arg(deck);
     }
     case ControlId::LoopIn: return tr("Press LOOP IN on %1").arg(deck);
     case ControlId::LoopOut: return tr("Press LOOP OUT on %1").arg(deck);

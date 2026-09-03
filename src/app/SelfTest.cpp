@@ -1,12 +1,14 @@
-// Headless end-to-end check: loads the demo tracks, performs a scripted .gvt
-// transition through the real engine in offline mode, writes selftest_out.wav.
-// Run: ./build/gravitino --selftest [trackA.mp3 trackB.mp3]
+// Headless end-to-end check: loads the demo tracks, migrates a scripted legacy
+// transition to portable YAML, and performs it through the real engine.
+// Run: ./build/gravitino --selftest [trackA trackB]
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <QtGlobal>
+#include <QUuid>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -48,11 +50,21 @@ double rmsRange(const std::vector<float>& b, size_t beginFrame, size_t endFrame)
 
 int runSelfTest(const QStringList& args) {
     std::printf("== Gravitino selftest ==\n");
+    QTemporaryDir transitionScratch;
+    if (!transitionScratch.isValid()) {
+        std::printf("FAIL: create selftest transition scratch directory\n");
+        return 1;
+    }
     QString pathA = QDir::homePath() + "/Music/PioneerDJ/Demo Tracks/Demo Track 1.mp3";
     QString pathB = QDir::homePath() + "/Music/PioneerDJ/Demo Tracks/Demo Track 2.mp3";
     QStringList extra;
-    for (const QString& a : args)
-        if (a.endsWith(".mp3", Qt::CaseInsensitive)) extra << a;
+    for (const QString& a : args) {
+        const QString suffix = QFileInfo(a).suffix().toLower();
+        if (suffix == QLatin1String("mp3") || suffix == QLatin1String("flac") ||
+            suffix == QLatin1String("wav") || suffix == QLatin1String("aif") ||
+            suffix == QLatin1String("aiff"))
+            extra << a;
+    }
     if (extra.size() >= 2) { pathA = extra[0]; pathB = extra[1]; }
 
     QString err;
@@ -77,8 +89,8 @@ int runSelfTest(const QStringList& args) {
     const QString gvtText = QStringLiteral(
         "gravitino-transition 1\n"
         "[meta]\nname = selftest blend\nauthor = selftest\n"
-        "[from]\ntitle = %1\nbpm = %2\n"
-        "[to]\ntitle = %3\nbpm = %4\n"
+        "[from]\ntitle = %1\nbpm = %2\nduration = %5\n"
+        "[to]\ntitle = %3\nbpm = %4\nduration = %6\n"
         "[sync]\nanchor_from = 16.0\nanchor_to = 0.0\nmaster_bpm = %2\n"
         "[events]\n"
         "0.0   b  tempo_sync\n"
@@ -89,7 +101,10 @@ int runSelfTest(const QStringList& args) {
         "12.0  x  xfader 1.0 linear\n"
         "12.0  b  eq_low 0.5 linear\n"
         "14.0  a  stop\n")
-        .arg(ta->title).arg(ta->bpm, 0, 'f', 2).arg(tb->title).arg(tb->bpm, 0, 'f', 2);
+        .arg(ta->title).arg(ta->bpm, 0, 'f', 6)
+        .arg(tb->title).arg(tb->bpm, 0, 'f', 6)
+        .arg(ta->durationSec, 0, 'f', 6)
+        .arg(tb->durationSec, 0, 'f', 6);
 
     GvtFile file;
     QStringList warnings;
@@ -99,12 +114,22 @@ int runSelfTest(const QStringList& args) {
     for (const QString& w : warnings) std::printf("warn: %s\n", qPrintable(w));
     if (file.events.size() != 8) { std::printf("FAIL: expected 8 events, got %zu\n", file.events.size()); return 1; }
 
-    // Round-trip through the serializer to a real file and back.
-    const QString gvtPath = "selftest_transition.gvt";
+    // Read legacy forever, then exercise the new portable serializer/reader.
+    const QString gvtPath = transitionScratch.filePath("selftest_transition.gvt");
     if (!gvtSaveFile(file, gvtPath, &err)) { std::printf("FAIL: gvtSaveFile: %s\n", qPrintable(err)); return 1; }
     GvtFile file2;
-    if (!gvtLoadFile(gvtPath, file2, &err, nullptr) || file2.events.size() != file.events.size()) {
+    if (!loadTransitionFile(gvtPath, file2, &err, nullptr) ||
+        file2.events.size() != file.events.size()) {
         std::printf("FAIL: round-trip load: %s\n", qPrintable(err)); return 1;
+    }
+    file2.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    file2.sourceFormat = TransitionSourceFormat::PortableYaml;
+    const QString portablePath = transitionScratch.filePath("selftest_transition.transition");
+    if (!saveTransitionFile(file2, portablePath, &err) ||
+        !loadTransitionFile(portablePath, file2, &err, nullptr) ||
+        file2.sourceFormat != TransitionSourceFormat::PortableYaml) {
+        std::printf("FAIL: portable round-trip: %s\n", qPrintable(err));
+        return 1;
     }
 
     ControlBus& busRef = bus;
@@ -195,17 +220,18 @@ int runSelfTest(const QStringList& args) {
     }
     if (recd.masterBpm < 60 || recd.masterBpm > 200) { std::printf("FAIL: recorder bpm\n"); return 1; }
     recd.name = "selftest recorded";
-    if (!gvtSaveFile(recd, "selftest_recorded.gvt", &err)) {
+    const QString recordedPath = transitionScratch.filePath("selftest_recorded.transition");
+    if (!saveTransitionFile(recd, recordedPath, &err)) {
         std::printf("FAIL: save recorded: %s\n", qPrintable(err)); return 1;
     }
     GvtFile recd2;
-    if (!gvtLoadFile("selftest_recorded.gvt", recd2, &err, nullptr) ||
+    if (!loadTransitionFile(recordedPath, recd2, &err, nullptr) ||
         recd2.events.size() != recd.events.size() ||
         !recd2.initialComplete || !recd2.initialTo.captured ||
         !recd2.initialMixerCaptured) {
         std::printf("FAIL: recorded round-trip\n"); return 1;
     }
-    std::printf("OK: recorder round-trip (selftest_recorded.gvt)\n");
+    std::printf("OK: recorder round-trip (selftest_recorded.transition)\n");
 
     // ---- Loop + beat-jump sanity through the real render path -------------
     Deck& da = engine.deck(0);

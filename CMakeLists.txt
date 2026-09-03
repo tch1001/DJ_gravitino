@@ -13,6 +13,8 @@ find_library(RTMIDI_LIB rtmidi PATHS /opt/homebrew/opt/rtmidi/lib REQUIRED)
 find_path(RTMIDI_INCLUDE rtmidi/RtMidi.h PATHS /opt/homebrew/opt/rtmidi/include REQUIRED)
 find_library(TAGLIB_LIB tag PATHS /opt/homebrew/opt/taglib/lib REQUIRED)
 find_path(TAGLIB_INCLUDE taglib/fileref.h PATHS /opt/homebrew/opt/taglib/include REQUIRED)
+find_library(YAML_LIB yaml PATHS /opt/homebrew/opt/libyaml/lib /opt/homebrew/lib REQUIRED)
+find_path(YAML_INCLUDE yaml.h PATHS /opt/homebrew/opt/libyaml/include /opt/homebrew/include REQUIRED)
 
 # miniaudio compiled once as C to keep C++ TUs fast
 add_library(miniaudio STATIC third_party/miniaudio_impl.c)
@@ -31,10 +33,12 @@ add_library(gvtcore STATIC
     src/analysis/BeatGridEditor.cpp
     src/analysis/KeyAnalyzer.cpp
     src/library/TrackLibrary.cpp
+    src/library/SongCatalog.cpp
     src/library/History.cpp
     src/library/TransitionStore.cpp
     src/performance/PerformancePads.cpp
     src/transitions/GvtFormat.cpp
+    src/transitions/TransitionFormat.cpp
     src/transitions/TransitionRecorder.cpp
     src/transitions/TransitionPlayer.cpp
     src/midi/MidiEngine.cpp
@@ -43,9 +47,11 @@ add_library(gvtcore STATIC
     src/midi/SoftTakeover.cpp
 )
 target_include_directories(gvtcore PUBLIC
-    src third_party/signalsmith-stretch ${RTMIDI_INCLUDE} ${TAGLIB_INCLUDE})
+    src third_party/signalsmith-stretch ${RTMIDI_INCLUDE} ${TAGLIB_INCLUDE}
+    ${YAML_INCLUDE})
 target_link_libraries(gvtcore PUBLIC
     Qt6::Core Qt6::Gui Qt6::Concurrent miniaudio ${RTMIDI_LIB} ${TAGLIB_LIB}
+    ${YAML_LIB}
     "-framework CoreAudio" "-framework CoreMIDI" "-framework CoreFoundation")
 
 add_executable(gravitino MACOSX_BUNDLE

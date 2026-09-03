@@ -751,6 +751,19 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
         target.handleHotCue(index, event.value >= 0.5);
         break;
     }
+    case ControlId::TransitionCue1:
+    case ControlId::TransitionCue2:
+    case ControlId::TransitionCue3:
+    case ControlId::TransitionCue4:
+    case ControlId::TransitionCue5:
+    case ControlId::TransitionCue6:
+    case ControlId::TransitionCue7:
+    case ControlId::TransitionCue8: {
+        const int index = static_cast<int>(event.id) -
+                          static_cast<int>(ControlId::TransitionCue1);
+        target.handleTransitionCue(index, event.value >= 0.5);
+        break;
+    }
     case ControlId::SavedLoop1:
     case ControlId::SavedLoop2:
     case ControlId::SavedLoop3:

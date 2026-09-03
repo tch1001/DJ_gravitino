@@ -1,250 +1,309 @@
-# The `.gvt` Transition File Format (v1)
+# The portable `.transition` format (v1)
 
-A Gravitino Transition file captures one rehearsed transition between a pair of
-tracks as plain UTF-8 text. Design goals, in order:
+A transition is a directed, reusable performance edge between two canonical
+song arrangements: `outgoing → incoming`. The file contains no copyrighted
+audio. Instead it describes which arrangements it expects, the musical beat
+coordinates used by the author, transition-owned cues, initial state, labels,
+and the exact control timeline.
 
-1. **Human-readable and hand-editable** — a DJ can open it in any editor,
-   understand it, tweak a fader curve by changing a number.
-2. **Tempo-independent** — timestamps are in *beats*, so the same transition
-   works when the set runs faster or slower than the rehearsal.
-3. **Shareable** — self-describing: carries enough metadata to match tracks in
-   someone else's library (title/artist/duration/BPM + audio fingerprint).
-4. **Diff-friendly** — line-oriented, one event per line, stable ordering.
+New recordings are one UTF-8 YAML document with the extension `.transition`.
+Legacy `.gvt` files remain readable indefinitely; editing or converting one
+creates a separate `.transition` and never overwrites or removes the source.
 
-File extension: `.gvt`. One transition per file.
-Suggested location: `~/Music/Gravitino/Transitions/`.
+## Portability boundary
 
-## Sharing and portability
+MP3, FLAC, WAV, and AIFF assets may all satisfy an endpoint when they contain
+the same arrangement. Container, bitrate, gain, sample rate, tags, and small
+leading-silence/encoder offsets are not musical identity. Radio edits,
+extended mixes, clean edits, and structurally changed remasters are distinct
+arrangements in v1. Gravitino never guesses a nonlinear or piecewise warp.
 
-A `.gvt` is portable transition data, not a bundle of the music itself. To use
-one from a friend, copy it into Gravitino's Transitions folder and import the
-same two audio tracks into the local library. Matching is strongest when the
-audio fingerprint is identical, which is independent of filename and tags.
-Matching title + artist is the supported fallback when an encoded copy has a
-different fingerprint. Duration by itself is only a diagnostic hint and will
-not authorize playback.
+Beats are authoritative coordinates and may be negative or fractional. A
+knob movement at beat `296.452345678` remains between beats; snapping is an
+editor affordance, never a storage restriction. Seconds and the reference
+downbeat describe the author's source asset and help matching, but do not bind
+replay to that encode's timestamps.
 
-The file carries the role-based deck/mixer starting state, beat anchors,
-hot-cue position checks, cue labels, and the complete beat-timed control event
-stream. It does **not** carry either audio track, analyzed stems, the recipient's
-beatgrid cache, or saved-loop pad contents. Consequently:
+A confirmed local binding may provide one constant beat offset:
 
-- Ordinary fader, EQ, filter, transport, loop, FX, and stem-level events travel
-  with the file. Stem mutes work only after the recipient separates stems for
-  that track; otherwise they degrade harmlessly to the original mix.
-- Referenced HOT CUE pads must exist at the recorded beats on the recipient's
-  machine. The stored mapping is currently used to verify and warn, not to
-  overwrite the recipient's cues.
-- Referenced CUSTOM/saved-loop pads must currently be recreated on the
-  recipient's machine. Their loop definitions are stored in the local track
-  cache, not in v1 `.gvt`.
-- A materially different master/remaster, or a differently corrected beatgrid,
-  can change musical alignment even when title and artist match.
-
-So v1 is directly shareable for the same tracks and ordinary transition moves,
-with explicit setup needed for HOT CUE, CUSTOM-loop, and stem-dependent moves.
-A future fully self-contained exchange format should embed the referenced cue
-and saved-loop definitions (while still leaving copyrighted audio out).
-
-## Example
-
-```gvt
-gravitino-transition 1
-
-[meta]
-name        = Slam on the drop
-author      = fish
-created     = 2026-08-15
-description = Kill the lows, slam the crossfader on A's last drop.
-
-[from]
-title       = Demo Track 1
-artist      = PioneerDJ
-bpm         = 130.00
-duration    = 121.36
-fingerprint = gvfp1:9f83a2c11d40be77
-
-[to]
-title       = Demo Track 2
-artist      = PioneerDJ
-bpm         = 128.00
-duration    = 118.02
-fingerprint = gvfp1:31b0cc04a9e15df2
-
-[sync]
-anchor_from = 224.0     ; beat in FROM track where the transition begins
-anchor_to   = 32.0      ; beat in TO track aligned to transition beat 0
-master_bpm  = 130.00    ; tempo the mix runs at during the transition
-
-[initial]
-complete    = 1         ; full two-deck + mixer snapshot
-crossfader  = 0.000     ; role space: outgoing -> incoming
-playing     = 1         ; unprefixed keys describe the outgoing deck
-position_beat = 224.000
-cue_beat    = 224.000
-tempo_ratio = 1.000
-fader       = 1.000
-eq_low      = 0.500
-eq_mid      = 0.500
-eq_high     = 0.500
-filter      = 0.500
-quantize    = 1         ; hot-cue/manual-loop snapping state
-loop_active = 0
-loop_start_beat = 224.000
-loop_end_beat = 224.000
-fx_type     = 0
-fx_on       = 0
-fx_wet      = 0.500
-fx_beats    = 0.500
-stem_vocals = 1.000
-stem_melody = 1.000
-stem_bass   = 1.000
-stem_drums  = 1.000
-to_playing  = 0         ; to_* keys describe the incoming deck
-to_position_beat = 32.000
-to_cue_beat = 32.000
-to_tempo_ratio = 1.000
-to_fader    = 0.000
-to_eq_low   = 0.500
-to_eq_mid   = 0.500
-to_eq_high  = 0.500
-to_filter   = 0.500
-to_quantize = 1
-to_loop_active = 0
-to_loop_start_beat = 32.000
-to_loop_end_beat = 32.000
-to_fx_type  = 0
-to_fx_on    = 0
-to_fx_wet   = 0.500
-to_fx_beats = 0.500
-to_stem_vocals = 1.000
-to_stem_melody = 1.000
-to_stem_bass = 1.000
-to_stem_drums = 1.000
-
-[hotcues]
-; role+pad = track-relative beat used by the recorded transition
-b1          = 32.000
-
-[cues]
-0.000       = Start beatmatch
-24.000      = Exit outgoing
-
-[events]
-; beat | target | control | value | curve
-0.000    b        load
-0.000    b        tempo_sync
-0.000    b        eq_low      0.00
-0.000    b        fader       1.00
-0.000    b        play
-0.031    x        xfader      0.00
-8.000    x        xfader      0.50   scurve
-16.000   b        eq_low      1.00   linear
-16.000   a        eq_low      0.00   linear
-24.000   x        xfader      1.00   scurve
-32.000   a        stop
+```
+canonical beat = local analyzed beat + offset
 ```
 
-## Grammar
+This handles a fixed leading-silence/grid-origin difference. If alignment
+drifts or needs multiple offsets, the arrangement is rejected in v1.
 
-- **Line 1**: `gravitino-transition <version>` — required magic.
-- `;` or `#` starts a comment (whole line or trailing). Blank lines ignored.
-- **Sections** `[meta] [from] [to] [sync] [initial]` hold `key = value` pairs.
-  Unknown keys are preserved on load and rewritten on save (forward compat).
-- **`[initial]`** is optional for compatibility with older v1 files. New
-  recordings set `complete = 1` and snapshot both role-based decks plus the
-  mixer crossfader. Unprefixed keys are the outgoing deck; `to_*` keys are the
-  incoming deck. The snapshot covers transport/cue position, tempo, channel
-  level, EQ, filter, Quantize, loops, FX, and stem levels. TRIM is intentionally
-  not part of new transition state: it is input gain and must remain under the
-  DJ's current control. Perform
-  reconstructs it before rolling; Prime prepares it immediately and reasserts
-  transport state at the entry boundary. Older partial sections containing
-  only the outgoing tempo/gain/EQ/filter keys remain supported. Legacy `trim`
-  and `to_trim` keys still parse but are ignored by setup/replay.
-- **`[cues]`** is optional and holds user labels as `beat = label`. Labels are
-  annotations only: they populate the event preview and waveform markers.
-  `#`, `;`, and line breaks are reserved because they delimit comments/lines.
-- **`[hotcues]`** is optional and records the track-relative beat assigned to
-  every hot-cue pad referenced by the transition. Keys use role + pad (`a1` is
-  outgoing pad 1, `b8` incoming pad 8). Tutorial mode compares these positions
-  with the loaded tracks and warns about missing, unverifiable, or mismatched
-  assignments. Negative values are valid for cues in audio before the detected
-  first downbeat; an omitted key, rather than a negative number, means that the
-  mapping is unavailable. Legacy files without this section still load normally.
-- **`[events]`** holds one event per line, whitespace-separated columns:
+## Document shape
 
-  `beat  target  control  [value]  [curve]  [via=gesture@mode]`
+```yaml
+format: "gravitino.transition"
+version: 1
+id: "d7f55bd5-618d-4f74-ad35-6d55a1a5f963"
 
-  - `beat` — decimal beats since transition start (anchor). Sorted ascending.
-  - `target` — `a` (outgoing deck), `b` (incoming deck), `x` (mixer/global).
-    Decks are *roles*, not physical decks: on replay, "a" is wherever the
-    outgoing track sits.
-  - `control` — see table below.
-  - `value` — normalized number (most controls 0..1; tempo in ratio; jog in
-    signed ticks). Omitted for ordinary trigger controls. `cue`,
-    `hotcue_1..8`, and `saved_loop_1..8` retain `1` press / `0` release values
-    for hold-preview.
-  - `curve` — optional: `step` (default), `linear`, `scurve`. Non-step means
-    "glide from this control's previous value, arriving at `value` on `beat`,
-    starting where the previous event for the same (target, control) ended."
-  - `via` — optional physical gesture that produced the state change. Replay
-    still executes `control`; Tutorial uses `via` for accurate coaching. For
-    example, `saved_loop_3 1 via=performance_pad_3@custom` means CUSTOM pad 3
-    started a captured loop, so the tutor highlights that pad instead of PLAY.
-    Stable pad
-    mode names are `hot_cue`, `pad_fx1`, `beat_jump`, `custom`, `keyboard`,
-    `pad_fx2`, `beat_loop`, and `key_shift`. Files without `via` remain fully
-    compatible and are taught from their state control as before.
+metadata:
+  name: "Whistle → Turn Down for What"
+  author: ""
+  created_at: "2026-08-21T00:00:00Z"
+  description: ""
+  license: ""
+  tags: []
 
-## Controls (v1)
+requires:
+  - "timeline.v1"
+  - "temporary-cues.v1"
 
-| control      | targets | value                          |
-|--------------|---------|--------------------------------|
-| `play`,`stop` | a,b | (trigger)                         |
-| `cue`        | a,b     | 1 press / 0 release (hold-preview) |
-| `load`       | b       | (trigger; load the TO track)   |
-| `tempo_sync` | a,b     | (trigger; match master bpm)    |
-| `tempo`      | a,b     | playback ratio, 1.0 = native   |
-| `quantize`   | a,b     | per-deck hot-cue/manual-loop snapping, 0 or 1 |
-| `fader`      | a,b     | 0..1 channel fader             |
-| `trim`       | a,b     | legacy only; parsed but no longer recorded/applied |
-| `eq_low`,`eq_mid`,`eq_high` | a,b | 0..1 (0.5 = flat, 0 = kill) |
-| `xfader`     | x       | 0 = outgoing ... 1 = incoming (role space) |
-| `hotcue_1..8`| a,b     | 1 press: play from cue; 0 release: stop and return |
-| `saved_loop_1..8` | a,b | 1 press: preview stored loop; 0 release: stop and return unless PLAY latched |
-| `jog`        | a,b     | signed nudge ticks (not recorded) |
-| `loop_auto`  | a,b     | loop length in beats (starts beat-snapped loop) |
-| `loop_in`,`loop_out`,`loop_exit`,`loop_halve`,`loop_double` | a,b | (trigger) |
-| `beat_jump`  | a,b     | signed beats to jump, beat-aligned |
-| `filter`     | a,b     | 0.5 = off, <0.5 LPF sweep, >0.5 HPF sweep |
-| `fx_type`    | a,b     | 0 = echo, 1 = reverb, 2 = flanger |
-| `fx_on`      | a,b     | state: >0.5 engaged, <=0.5 off |
-| `fx_wet`     | a,b     | 0..1 dry/wet |
-| `fx_beats`   | a,b     | echo/flanger time base in beats (0.25..4) |
-| `stem_vocals` | a,b    | 0..1 vocal stem level (0 = muted) |
-| `stem_melody` | a,b    | 0..1 melody stem level (0 = muted) |
-| `stem_bass`  | a,b     | 0..1 bass stem level (0 = muted) |
-| `stem_drums` | a,b     | 0..1 drums stem level (0 = muted) |
+endpoints:
+  outgoing:
+    identity:
+      title: "Whistle"
+      artists: ["Flo Rida"]
+      version: "Original"
+      identifiers:
+        isrc: ""
+        musicbrainz_recording: ""
+        providers: {}
+    assumptions:
+      native_bpm: 104.016667
+      duration_seconds: 225.59
+      duration_beats: 391.2
+      meter: "4/4"
+      reference_downbeat_seconds: 0.42
+      fingerprints:
+        - algorithm: "gravitino-structure-2"
+          value: "gvsf2:..."
+        - algorithm: "gvfp1"
+          value: "gvfp1:..."
+    notes: ""
+  incoming:
+    identity:
+      title: "Turn Down for What"
+      artists: ["DJ Snake", "Lil Jon"]
+      version: "Original"
+      identifiers:
+        isrc: ""
+        musicbrainz_recording: ""
+        providers:
+          spotify: ""
+    assumptions:
+      native_bpm: 104.016667
+      duration_seconds: 213.0
+      duration_beats: 369.3
+      meter: "4/4"
+      reference_downbeat_seconds: 0.18
+      fingerprints: []
+    notes: ""
 
-`stem_*` levels only audibly apply when the replaying machine has separated
-stems attached to that deck (separation is per-machine, cached under
-`~/.gravitino/stems/`). Without stems the events still set the deck's stem
-atomics harmlessly — the engine keeps playing the original PCM whenever no
-stems are attached (and also short-circuits back to plain PCM while all four
-gains are >= 0.99) — so such transitions replay gracefully, just without the
-stem mutes.
+performance:
+  master_bpm: 104.016667
+  anchors:
+    outgoing: {track_beat: 283.195058}
+    incoming: {track_beat: 96.0}
+  initial_state:
+    complete: true
+    mixer: {captured: true, crossfader: 0.0}
+    outgoing:
+      captured: true
+      playing: true
+      position_beat: 283.195058
+      cue_beat: 283.195058
+      tempo_ratio: 1.0
+      fader: 1.0
+      eq_low: 0.5
+      eq_mid: 0.5
+      eq_high: 0.5
+      filter: 0.5
+      quantize: true
+      loop_active: false
+      loop_start_beat: 283.195058
+      loop_end_beat: 283.195058
+      fx_type: 0
+      fx_on: false
+      fx_wet: 0.5
+      fx_beats: 0.5
+      stem_vocals: 1.0
+      stem_melody: 1.0
+      stem_bass: 1.0
+      stem_drums: 1.0
+    incoming:
+      captured: true
+      playing: false
+      position_beat: 96.0
+      cue_beat: 96.0
+      tempo_ratio: 1.0
+      fader: 0.0
+      eq_low: 0.5
+      eq_mid: 0.5
+      eq_high: 0.5
+      filter: 0.5
+      quantize: true
+      loop_active: false
+      loop_start_beat: 96.0
+      loop_end_beat: 96.0
+      fx_type: 0
+      fx_on: false
+      fx_wet: 0.5
+      fx_beats: 0.5
+      stem_vocals: 1.0
+      stem_melody: 1.0
+      stem_bass: 1.0
+      stem_drums: 1.0
+  cues:
+    - id: "incoming-launch"
+      endpoint: "incoming"
+      track_beat: 96.125
+      label: "Launch"
+      purpose: "start-track"
+      color: "#55b9df"
+      pairing_group: "launch"
+      preferred_input: {bank: "custom", pad: 3, key: "3"}
+  labels:
+    - at_beat: 0.0
+      label: "Start beatmatch"
+  timeline:
+    - at_beat: 0.125
+      target: "incoming"
+      control: "deck.transition_cue"
+      cue_id: "incoming-launch"
+      value: 1.0
+      curve: "step"
+      input_hint:
+        control: "host.performance_pad_3"
+        pad_mode: "custom"
+    - at_beat: 0.25
+      target: "incoming"
+      control: "deck.play"
+      value: 1.0
+      curve: "step"
+    - at_beat: 0.375
+      target: "incoming"
+      control: "deck.transition_cue"
+      cue_id: "incoming-launch"
+      value: 0.0
+      curve: "step"
+    - at_beat: 16.625
+      target: "mixer"
+      control: "mixer.xfader"
+      value: 1.0
+      curve: "scurve"
 
-Parsers must **skip unknown controls with a warning**, never fail — future
-versions add controls, old players still perform the rest of the blend.
+extensions: {}
+```
 
-## Track matching & fingerprint
+The serializer is deterministic, quotes strings, and keeps double precision.
+Human/Raw event summaries and tutorial progress rows are derived UI data and
+are never serialized.
 
-`fingerprint = gvfp1:<16 hex>` — FNV-1a 64-bit hash over the first 30 s of
-mono PCM decimated to 11025 Hz, 8-bit quantized. Cheap, robust to
-tag/filename edits, not robust to remasters — so matching is tiered:
-exact fingerprint ▸ (title+artist, case-folded) ▸ duration within ±1.5 s.
-Fingerprint or title+artist identity is required for every operational action:
-Perform, Tutorial, transition auto-loading, hot-cue dependency checks, and
-playing-track prioritization. Duration-only similarity is a weak discovery hint
-and must never authorize a transition for a loaded track by itself.
+## Identity and matching
+
+Endpoint identity is evidence, not a remote playback dependency. Provider IDs
+live under `identity.identifiers.providers`; a future Spotify or other catalog
+adapter can add an ID without changing cues, timeline, or local playback.
+
+An imported endpoint resolves in this order:
+
+1. A previously confirmed local endpoint-to-song binding.
+2. A strong algorithm-tagged structural fingerprint, checked against BPM and
+   duration assumptions.
+3. A matching ISRC or MusicBrainz recording ID, still checked against BPM,
+   duration, and beat-count assumptions.
+4. Matching title and artists, shown only for explicit manual confirmation.
+
+Metadata-only matches never enable playback automatically. Duration alone is
+only a discovery hint. Multiple local assets may belong to the same canonical
+song; the DJ chooses among them when more than one compatible encode is
+available.
+
+`gvfp1` is exact decoded-audio evidence retained for legacy matching.
+`gravitino-structure-2`/`gvsf2` stores normalized temporal and spectral block
+features after trimming silence. It is designed to survive transcoding, gain,
+sample-rate conversion, and small encoder offsets. Fingerprints are an array
+so stronger algorithms can be added without invalidating older evidence.
+
+The versioned local catalog is stored separately from transition files. It
+contains canonical local song IDs, asset paths and hashes, analyzed beatgrids,
+fingerprints, constant offsets, and confirmed bindings. It never modifies
+audio tags. The reverse graph from songs to incoming/outgoing transitions is
+rebuilt by scanning `.transition` and `.gvt`, so rename/delete cannot leave an
+authoritative stale edge. Missing asset paths remain local history but are not
+offered for loading.
+
+## Transition-owned cues
+
+Timeline events refer to stable semantic `cue_id` values, not serialized pad
+numbers. Each cue declares an endpoint and canonical track beat, with optional
+label, purpose, teaching color, pairing group, and preferred key/pad. A shared
+pairing group lets outgoing and incoming cues use the same teaching color.
+
+On selection/replay, Gravitino allocates at most eight cues per endpoint in an
+isolated temporary `CUSTOM` bank. Preferred controls are hints; the host owns
+the actual controller mapping. Permanent per-track hot cues are never replaced
+or saved over. Clearing/changing the selected transition restores the normal
+CUSTOM bank. More than eight cues, an unknown cue reference, or an unsupported
+bank is a validation error rather than a silent truncation.
+
+## Timeline semantics
+
+`at_beat` is measured from transition start in master beats. `target` is the
+role (`outgoing`, `incoming`, or `mixer`), never a physical deck number.
+Controls use stable namespaces. Current portable timeline controls are:
+
+- Deck transport/state: `deck.play`, `deck.stop`, `deck.cue`,
+  `deck.tempo_sync`, `deck.quantize`, `deck.transition_cue`.
+- Deck movement: `deck.tempo` (ratio `0.01..4`), `deck.fader`,
+  `deck.eq_low`, `deck.eq_mid`, `deck.eq_high`, `deck.filter` (`0..1`).
+- Loops/jumps: `deck.loop_in`, `deck.loop_out`, `deck.loop_exit`,
+  `deck.loop_halve`, `deck.loop_double`, `deck.loop_auto`
+  (`0.03125..64` beats), and `deck.beat_jump` (`-1024..1024` beats).
+- FX/stems: `deck.fx_type` (integer `0..2`), `deck.fx_on`,
+  `deck.fx_wet` (`0..1`), `deck.fx_beats` (`0.25..4`), and
+  `deck.stem_vocals`, `deck.stem_melody`, `deck.stem_bass`,
+  `deck.stem_drums` (`0..1`).
+- Mixer: `mixer.xfader` (`0..1` in role space: outgoing to incoming).
+
+Trigger/state values use `1` for press/on and `0` for release/off. Curves are
+`step`, `linear`, or `scurve`; trigger controls must be `step`. A non-step
+event is the destination of a glide from the preceding event/value in the same
+`(role, control)` stream. Interleaved controls do not split that stream.
+
+`input_hint` records how a state change was produced or should preferably be
+taught. Replay executes `control`; input hints never make a controller model a
+playback dependency.
+
+## Compatibility and safe parsing
+
+`requires` declares semantics necessary for correct playback. This build
+supports `timeline.v1` and `temporary-cues.v1`. Unknown required capabilities
+allow inspection but block Perform/Tutorial with a clear compatibility error.
+
+Additive optional fields may be introduced within version 1. Unknown mapping
+fields and namespaced `extensions` are preserved at their containing level on
+load/save. A breaking semantic change requires a new integer `version` and an
+explicit migration reader.
+
+The reader accepts a deliberately safe YAML subset:
+
+- exactly one document, at most 2 MiB, 32 levels deep, 100,000 YAML nodes,
+  20,000 timeline events, and 1,000 labels;
+- no aliases, anchors, custom tags, merge keys, duplicate mapping keys, or NUL;
+- scalar mapping keys only;
+- finite, bounded numeric fields and validated roles, controls, curves,
+  cue references, pad slots, and control values.
+
+Malformed known fields fail the document rather than being guessed. Unknown
+timeline controls also fail: a future producer must pair new behavior with an
+appropriate `requires` capability instead of letting an older player perform
+an incomplete transition.
+
+## Legacy `.gvt`
+
+The original line-based `gravitino-transition 1` reader remains part of the
+compatibility boundary. It adapts legacy anchors, negative/fractional beats,
+events, curves, initial state, loops, labels, gesture hints, and hot-cue
+positions into the typed in-memory model. Legacy hot-cue pad references become
+semantic temporary cues during adaptation.
+
+Until conversion, a legacy document receives a stable content-derived identity
+(`legacy-…`). Its first portable save receives a persistent UUID and records
+the legacy source identity under `extensions.gravitino.legacy.source_id`.
+Scanning uses that link to show the portable copy instead of a duplicate while
+leaving the `.gvt` intact.

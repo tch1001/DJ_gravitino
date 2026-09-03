@@ -2,8 +2,10 @@
 // against the outgoing deck's beatgrid. Owner: claude-transitions.
 #include "TransitionEngine.h"
 #include "TransitionImpls.h"
+#include "../performance/PerformancePads.h"
 
-#include <QDate>
+#include <QDateTime>
+#include <QUuid>
 #include <cmath>
 #include <vector>
 
@@ -26,10 +28,10 @@ GvtInitialState captureDeckState(const Deck& deck) {
 
     state.captured = true;
     state.playing = deck.playing.load();
-    state.positionBeat = deck.beatPosition();
+    state.positionBeat = track->canonicalBeatAtSec(deck.positionSec());
     const double cueSec = deck.cuePointSec.load();
     state.cueBeat = std::isfinite(cueSec) && cueSec >= 0.0
-                        ? track->beatAtSec(cueSec)
+                        ? track->canonicalBeatAtSec(cueSec)
                         : state.positionBeat;
     state.tempoRatio = deck.tempoRatio.load();
     state.fader = deck.fader.load();
@@ -44,10 +46,10 @@ GvtInitialState captureDeckState(const Deck& deck) {
     const double loopStart = deck.loopStartSec.load();
     const double loopEnd = deck.loopEndSec.load();
     state.loopStartBeat = std::isfinite(loopStart) && loopStart >= 0.0
-                              ? track->beatAtSec(loopStart)
+                              ? track->canonicalBeatAtSec(loopStart)
                               : state.positionBeat;
     state.loopEndBeat = std::isfinite(loopEnd) && loopEnd >= 0.0
-                            ? track->beatAtSec(loopEnd)
+                            ? track->canonicalBeatAtSec(loopEnd)
                             : state.positionBeat;
     state.fxType = deck.fxType.load();
     state.fxOn = deck.fxOn.load();
@@ -80,7 +82,12 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
             const bool playEvent = (e.deck == im.toDeck &&
                                     e.id == ControlId::Play && e.value >= 0.5);
             if (playEvent || im.engine->deck(im.toDeck).playing.load()) {
-                im.toAnchorBeat = im.engine->deck(im.toDeck).beatPosition();
+                const TrackDataPtr track =
+                    im.engine->deck(im.toDeck).track();
+                im.toAnchorBeat = track
+                    ? track->canonicalBeatAtSec(
+                          im.engine->deck(im.toDeck).positionSec())
+                    : im.engine->deck(im.toDeck).beatPosition();
                 im.toAnchorSet = true;
             }
         }
@@ -133,7 +140,7 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
                 if (!hotCueBeatIsMapped(
                         mappings[static_cast<std::size_t>(pad)]))
                     mappings[static_cast<std::size_t>(pad)] =
-                        track->beatAtSec(track->hotCues[pad]);
+                        track->canonicalBeatAtSec(track->hotCues[pad]);
             }
         }
 
@@ -187,7 +194,11 @@ void TransitionRecorder::start(int fromDeck) {
     Impl& im = *impl_;
     im.fromDeck = fromDeck;
     im.toDeck = (fromDeck == 0) ? 1 : 0;
-    im.anchorBeat = im.engine->deck(fromDeck).beatPosition();
+    const TrackDataPtr fromTrack = im.engine->deck(fromDeck).track();
+    im.anchorBeat = fromTrack
+        ? fromTrack->canonicalBeatAtSec(
+              im.engine->deck(fromDeck).positionSec())
+        : im.engine->deck(fromDeck).beatPosition();
     im.masterBpm = im.engine->deck(fromDeck).effectiveBpm();
     im.initialFrom = captureDeckState(im.engine->deck(fromDeck));
     im.initialTo = captureDeckState(im.engine->deck(im.toDeck));
@@ -199,7 +210,11 @@ void TransitionRecorder::start(int fromDeck) {
     // If the incoming deck is already rolling, its anchor is NOW — waiting for
     // the first bus event would record it beats late.
     if (im.engine->deck(im.toDeck).playing.load()) {
-        im.toAnchorBeat = im.engine->deck(im.toDeck).beatPosition();
+        const TrackDataPtr toTrack = im.engine->deck(im.toDeck).track();
+        im.toAnchorBeat = toTrack
+            ? toTrack->canonicalBeatAtSec(
+                  im.engine->deck(im.toDeck).positionSec())
+            : im.engine->deck(im.toDeck).beatPosition();
         im.toAnchorSet = true;
     }
     im.haveLastBeat = im.engine->deck(fromDeck).playing.load();
@@ -236,23 +251,45 @@ GvtFile TransitionRecorder::finish() {
 
     GvtFile f;
     f.version = 1;
-    f.created = QDate::currentDate().toString(Qt::ISODate);
+    f.sourceFormat = TransitionSourceFormat::PortableYaml;
+    f.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    f.created = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    f.requirements = {QStringLiteral("timeline.v1"),
+                      QStringLiteral("temporary-cues.v1")};
 
     auto fillRef = [&](GvtTrackRef& ref, int deckIdx) {
         if (TrackDataPtr t = im.engine->deck(deckIdx).track()) {
             ref.title = t->title;
             ref.artist = t->artist;
+            if (!t->artist.isEmpty()) ref.artists.append(t->artist);
             ref.bpm = t->bpm;
             ref.durationSec = t->durationSec;
+            ref.durationBeats = t->bpm > 0.0
+                                    ? t->durationSec * t->bpm / 60.0 : 0.0;
+            ref.referenceDownbeatSec = t->firstBeatSec;
+            ref.isrc = t->isrc;
+            ref.musicBrainzRecording = t->musicBrainzRecording;
             ref.fingerprint = t->fingerprint;
+            if (!t->structureFingerprint.isEmpty())
+                ref.fingerprints.push_back(
+                    {QStringLiteral("gravitino-structure-2"),
+                     t->structureFingerprint, {}});
+            if (!t->fingerprint.isEmpty())
+                ref.fingerprints.push_back(
+                    {QStringLiteral("gvfp1"), t->fingerprint, {}});
         }
     };
     fillRef(f.from, im.fromDeck);
     fillRef(f.to, im.toDeck);
 
     f.anchorFromBeat = im.anchorBeat;
-    if (!im.toAnchorSet) // fall back: TO-deck position at finish
-        im.toAnchorBeat = im.engine->deck(im.toDeck).beatPosition();
+    if (!im.toAnchorSet) { // fall back: TO-deck position at finish
+        const TrackDataPtr toTrack = im.engine->deck(im.toDeck).track();
+        im.toAnchorBeat = toTrack
+            ? toTrack->canonicalBeatAtSec(
+                  im.engine->deck(im.toDeck).positionSec())
+            : im.engine->deck(im.toDeck).beatPosition();
+    }
     f.anchorToBeat = im.toAnchorBeat;
     f.masterBpm = im.masterBpm;
     f.initialComplete = true;
@@ -343,7 +380,8 @@ GvtFile TransitionRecorder::finish() {
         auto& mappings = event.role == Role::FromDeck
                              ? f.fromHotCueBeats : f.toHotCueBeats;
         if (!hotCueBeatIsMapped(mappings[static_cast<std::size_t>(pad)]))
-            mappings[static_cast<std::size_t>(pad)] = track->beatAtSec(sec);
+            mappings[static_cast<std::size_t>(pad)] =
+                track->canonicalBeatAtSec(sec);
     }
 
     // Keep timing and tempo at the precision produced by the audio engine.
@@ -389,6 +427,46 @@ GvtFile TransitionRecorder::finish() {
         e.beat = q(e.beat, kPrecise);
         e.value = q(e.value,
                     e.control == ControlId::Tempo ? kPrecise : 0.001);
+    }
+
+    static const QStringList cueColors {
+        QStringLiteral("#e85d75"), QStringLiteral("#f09a4a"),
+        QStringLiteral("#e4cb58"), QStringLiteral("#66c783"),
+        QStringLiteral("#55b9df"), QStringLiteral("#7089ed"),
+        QStringLiteral("#9a72e8"), QStringLiteral("#df70bc")};
+    const auto addCues = [&f](Role role, const std::array<double, 8>& beats,
+                              const QString& side) {
+        for (int pad = 0; pad < 8; ++pad) {
+            const double beat = beats[static_cast<std::size_t>(pad)];
+            if (!hotCueBeatIsMapped(beat)) continue;
+            TransitionHotCue cue;
+            cue.id = QStringLiteral("%1-cue-%2").arg(side).arg(pad + 1);
+            cue.role = role;
+            cue.trackBeat = beat;
+            cue.label = QStringLiteral("CUE %1").arg(pad + 1);
+            cue.purpose = QStringLiteral("hot-cue");
+            cue.color = cueColors.at(pad);
+            cue.pairingGroup = QStringLiteral("pad-%1").arg(pad + 1);
+            cue.preferredPad = pad;
+            f.transitionCues.push_back(cue);
+        }
+    };
+    addCues(Role::FromDeck, f.fromHotCueBeats, QStringLiteral("outgoing"));
+    addCues(Role::ToDeck, f.toHotCueBeats, QStringLiteral("incoming"));
+    for (GvtEvent& event : f.events) {
+        if (event.role == Role::Mixer || event.control < ControlId::HotCue1 ||
+            event.control > ControlId::HotCue8)
+            continue;
+        const int pad = static_cast<int>(event.control) -
+                        static_cast<int>(ControlId::HotCue1);
+        event.cueId = QStringLiteral("%1-cue-%2")
+                          .arg(event.role == Role::FromDeck
+                                   ? QStringLiteral("outgoing")
+                                   : QStringLiteral("incoming"))
+                          .arg(pad + 1);
+        event.gestureControl = static_cast<ControlId>(
+            static_cast<int>(ControlId::PerformancePad1) + pad);
+        event.gesturePadMode = static_cast<int>(PerformancePadMode::Sampler);
     }
 
     im.events.clear();

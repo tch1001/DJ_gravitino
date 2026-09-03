@@ -6,9 +6,10 @@
 
 namespace gvt::detail {
 
-// Decode an MP3 to interleaved stereo f32 at kSampleRate (48 kHz).
+// Decode supported audio to interleaved stereo f32 at kSampleRate (48 kHz).
 // Returns false and sets *error on failure.
-bool decodeMp3Stereo48k(const QString& path, std::vector<float>& pcmOut, QString* error);
+bool decodeAudioStereo48k(const QString& path, std::vector<float>& pcmOut,
+                          QString* error);
 
 // Read title/artist/album via TagLib; title falls back to the filename stem.
 void readTags(const QString& path, QString& title, QString& artist, QString& album);

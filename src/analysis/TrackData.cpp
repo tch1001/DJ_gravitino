@@ -10,10 +10,16 @@
 
 #include <taglib/fileref.h>
 #include <taglib/tag.h>
+#include <taglib/tpropertymap.h>
 
 #include <QFileInfo>
+#include <QCryptographicHash>
+#include <QFile>
+#include <QByteArray>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 
@@ -21,7 +27,8 @@ namespace gvt {
 
 namespace detail {
 
-bool decodeMp3Stereo48k(const QString& path, std::vector<float>& pcmOut, QString* error)
+bool decodeAudioStereo48k(const QString& path, std::vector<float>& pcmOut,
+                          QString* error)
 {
     pcmOut.clear();
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, (ma_uint32)kSampleRate);
@@ -47,15 +54,30 @@ bool decodeMp3Stereo48k(const QString& path, std::vector<float>& pcmOut, QString
     return true;
 }
 
-void readTags(const QString& path, QString& title, QString& artist, QString& album)
+void readTags(const QString& path, QString& title, QString& artist,
+              QString& album, QString& isrc, QString& musicBrainzRecording)
 {
-    title.clear(); artist.clear(); album.clear();
+    title.clear(); artist.clear(); album.clear(); isrc.clear();
+    musicBrainzRecording.clear();
     const TagLib::FileRef f(path.toUtf8().constData());
     if (!f.isNull() && f.tag()) {
         const TagLib::Tag* t = f.tag();
         title  = QString::fromUtf8(t->title().toCString(true)).trimmed();
         artist = QString::fromUtf8(t->artist().toCString(true)).trimmed();
         album  = QString::fromUtf8(t->album().toCString(true)).trimmed();
+        const TagLib::PropertyMap properties = f.properties();
+        const auto property = [&properties](const char* key) {
+            const TagLib::StringList values = properties.value(
+                TagLib::String(key, TagLib::String::Latin1));
+            return values.isEmpty()
+                       ? QString()
+                       : QString::fromUtf8(
+                             values.toString().toCString(true)).trimmed();
+        };
+        isrc = property("ISRC");
+        musicBrainzRecording = property("MUSICBRAINZ_TRACKID");
+        if (musicBrainzRecording.isEmpty())
+            musicBrainzRecording = property("MUSICBRAINZ_RECORDINGID");
     }
     if (title.isEmpty())
         title = QFileInfo(path).completeBaseName();
@@ -160,19 +182,145 @@ QString computeFingerprint(const float* stereoPcm, int64_t frames)
     return QString::fromLatin1(buf);
 }
 
-TrackDataPtr loadAndAnalyzeTrack(const QString& mp3Path, QString* error)
+QString computeStructureFingerprint(const float* stereoPcm, int64_t frames,
+                                    double* audibleDurationSec)
+{
+    // gvsf2 is a compact sequence of normalized block features. Unlike the
+    // older 128-bit gvsf1 SimHash, it retains enough absolute spectral shape
+    // to distinguish similarly arranged but different audio while remaining
+    // tolerant of gain, lossy encoding and a small leading encoder delay.
+    constexpr int kBlockFrames = kSampleRate / 4; // 250 ms
+    constexpr int kSlots = 64;
+    struct Feature { double rms = 0.0, zcr = 0.0, low = 0.0, high = 0.0; };
+    const int blocks = static_cast<int>((frames + kBlockFrames - 1) /
+                                        kBlockFrames);
+    std::vector<Feature> raw(static_cast<size_t>(std::max(0, blocks)));
+    double maxRms = 0.0;
+    for (int block = 0; block < blocks; ++block) {
+        const int64_t begin = static_cast<int64_t>(block) * kBlockFrames;
+        const int64_t end = std::min<int64_t>(frames, begin + kBlockFrames);
+        double square = 0.0, lowEnergy = 0.0, highEnergy = 0.0;
+        double slow = 0.0;
+        float previous = 0.0f;
+        int crossings = 0;
+        for (int64_t frame = begin; frame < end; ++frame) {
+            const float mono = 0.5f * (stereoPcm[2 * frame] +
+                                        stereoPcm[2 * frame + 1]);
+            slow += 0.02 * (static_cast<double>(mono) - slow);
+            const double high = static_cast<double>(mono) - slow;
+            square += static_cast<double>(mono) * mono;
+            lowEnergy += slow * slow;
+            highEnergy += high * high;
+            if (frame > begin && ((mono >= 0.0f) != (previous >= 0.0f)))
+                ++crossings;
+            previous = mono;
+        }
+        const double count = std::max<int64_t>(1, end - begin);
+        Feature& feature = raw[static_cast<size_t>(block)];
+        feature.rms = std::sqrt(square / count);
+        feature.zcr = crossings / count;
+        const double total = lowEnergy + highEnergy + 1e-15;
+        feature.low = lowEnergy / total;
+        feature.high = highEnergy / total;
+        maxRms = std::max(maxRms, feature.rms);
+    }
+
+    int first = 0, last = blocks;
+    const double audibleThreshold = std::max(1e-5, maxRms * 0.015);
+    while (first < last && raw[static_cast<size_t>(first)].rms < audibleThreshold)
+        ++first;
+    while (last > first && raw[static_cast<size_t>(last - 1)].rms < audibleThreshold)
+        --last;
+    if (audibleDurationSec)
+        *audibleDurationSec = (last - first) *
+                              (static_cast<double>(kBlockFrames) / kSampleRate);
+    if (last - first < 4)
+        return QStringLiteral("gvsf2:") + QString(512, QLatin1Char('0'));
+
+    std::array<Feature, kSlots> sampled {};
+    for (int slot = 0; slot < kSlots; ++slot) {
+        const double position = first +
+            (slot + 0.5) * static_cast<double>(last - first) / kSlots;
+        const int index = std::clamp(static_cast<int>(position), first, last - 1);
+        sampled[static_cast<size_t>(slot)] = raw[static_cast<size_t>(index)];
+    }
+    double meanRms = 0.0;
+    for (const Feature& feature : sampled) meanRms += feature.rms;
+    meanRms = std::max(1e-12, meanRms / kSlots);
+    for (Feature& feature : sampled) feature.rms /= meanRms;
+
+    QByteArray descriptor;
+    descriptor.reserve(kSlots * 4);
+    const auto byte = [](double value) {
+        return static_cast<char>(std::clamp(
+            static_cast<int>(std::lround(value)), 0, 255));
+    };
+    for (const Feature& feature : sampled) {
+        descriptor.append(byte(feature.rms * 64.0));
+        descriptor.append(byte(feature.zcr * 12000.0));
+        descriptor.append(byte(feature.low * 255.0));
+        descriptor.append(byte(feature.high * 255.0));
+    }
+    return QStringLiteral("gvsf2:") +
+           QString::fromLatin1(descriptor.toHex());
+}
+
+double structureFingerprintSimilarity(const QString& a, const QString& b)
+{
+    if (a.startsWith(QStringLiteral("gvsf2:")) &&
+        b.startsWith(QStringLiteral("gvsf2:"))) {
+        const QByteArray left = QByteArray::fromHex(a.mid(6).toLatin1());
+        const QByteArray right = QByteArray::fromHex(b.mid(6).toLatin1());
+        if (left.size() != 256 || right.size() != left.size()) return 0.0;
+        double score = 0.0;
+        constexpr double tolerances[4] = {48.0, 32.0, 80.0, 80.0};
+        for (qsizetype index = 0; index < left.size(); ++index) {
+            const int x = static_cast<unsigned char>(left[index]);
+            const int y = static_cast<unsigned char>(right[index]);
+            const double distance = std::fabs(static_cast<double>(x - y));
+            score += 1.0 - std::min(1.0, distance /
+                tolerances[static_cast<std::size_t>(index % 4)]);
+        }
+        return score / left.size();
+    }
+    if (a.startsWith(QStringLiteral("gvsf1:")) &&
+        b.startsWith(QStringLiteral("gvsf1:")) && a.size() == 38 &&
+        b.size() == 38) {
+        int different = 0;
+        for (int offset : {6, 22}) {
+            bool okA = false, okB = false;
+            const uint64_t wordA = a.mid(offset, 16).toULongLong(&okA, 16);
+            const uint64_t wordB = b.mid(offset, 16).toULongLong(&okB, 16);
+            if (!okA || !okB) return 0.0;
+            different += std::popcount(wordA ^ wordB);
+        }
+        return 1.0 - static_cast<double>(different) / 128.0;
+    }
+    return 0.0;
+}
+
+TrackDataPtr loadAndAnalyzeTrack(const QString& audioPath, QString* error)
 {
     auto t = std::make_shared<TrackData>();
-    t->filePath = mp3Path;
+    t->filePath = audioPath;
 
-    if (!detail::decodeMp3Stereo48k(mp3Path, t->pcm, error))
+    if (!detail::decodeAudioStereo48k(audioPath, t->pcm, error))
         return nullptr;
 
-    detail::readTags(mp3Path, t->title, t->artist, t->album);
+    detail::readTags(audioPath, t->title, t->artist, t->album,
+                     t->isrc, t->musicBrainzRecording);
     t->durationSec = (double)t->frameCount() / (double)kSampleRate;
     t->overviewPeaks = detail::computeOverviewPeaks(t->pcm);
     detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh);
     t->fingerprint = computeFingerprint(t->pcm.data(), t->frameCount());
+    t->structureFingerprint = computeStructureFingerprint(
+        t->pcm.data(), t->frameCount(), &t->audibleDurationSec);
+    QFile asset(audioPath);
+    if (asset.open(QIODevice::ReadOnly)) {
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        while (!asset.atEnd()) hash.addData(asset.read(1 << 20));
+        t->assetSha256 = QString::fromLatin1(hash.result().toHex());
+    }
 
     const std::vector<float> mono = detail::monoMixdown(t->pcm);
     const BeatAnalysis ba = analyzeBeats(mono.data(), (int64_t)mono.size(), kSampleRate);

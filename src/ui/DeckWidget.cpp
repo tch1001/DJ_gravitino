@@ -1059,6 +1059,35 @@ void DeckWidget::setTransitionCues(const QList<double>& seconds,
     waveform_->setTransitionCues(seconds, labels);
 }
 
+void DeckWidget::setTemporaryTransitionCues(
+    const std::array<double, 8>& seconds, const QStringList& labels,
+    const QStringList& colors)
+{
+    temporaryTransitionCueSecs_ = seconds;
+    temporaryTransitionCueLabels_ = labels;
+    temporaryTransitionCueColors_ = colors;
+    temporaryTransitionCuesActive_ = std::any_of(
+        seconds.begin(), seconds.end(), [](double sec) {
+            return std::isfinite(sec) && sec >= 0.0;
+        });
+    engine_->deck(deckIndex_).setTransitionCues(seconds);
+    syncPerformancePadUi();
+}
+
+void DeckWidget::clearTemporaryTransitionCues()
+{
+    for (int pad = 0; pad < kPerformancePadCount; ++pad)
+        if (padIsPressed_[pad] &&
+            pressedPadModes_[pad] == PerformancePadMode::Sampler)
+            handlePerformancePad(pad, false);
+    temporaryTransitionCuesActive_ = false;
+    temporaryTransitionCueSecs_.fill(-1.0);
+    temporaryTransitionCueLabels_.clear();
+    temporaryTransitionCueColors_.clear();
+    engine_->deck(deckIndex_).clearTransitionCues();
+    syncPerformancePadUi();
+}
+
 QWidget* DeckWidget::controlWidget(ControlId control) const
 {
     switch (control) {
@@ -1239,6 +1268,13 @@ unsigned int DeckWidget::performancePadLedMask(
     const TrackDataPtr track = engine_->deck(deckIndex_).track();
     unsigned int mask = 0;
     for (int pad = 0; pad < kPerformancePadCount; ++pad) {
+        if (mode == PerformancePadMode::Sampler &&
+            temporaryTransitionCuesActive_) {
+            if (std::isfinite(temporaryTransitionCueSecs_[pad]) &&
+                temporaryTransitionCueSecs_[pad] >= 0.0)
+                mask |= 1U << static_cast<unsigned int>(pad);
+            continue;
+        }
         const auto& assignment = padAssignments_[modeIndex][pad];
         bool enabled = false;
         switch (assignment.action) {
@@ -1335,6 +1371,32 @@ void DeckWidget::syncPerformancePadUi()
 
         QString color;
         QString tooltip;
+        if (padMode_ == PerformancePadMode::Sampler &&
+            temporaryTransitionCuesActive_) {
+            const bool set = std::isfinite(temporaryTransitionCueSecs_[pad]) &&
+                             temporaryTransitionCueSecs_[pad] >= 0.0;
+            const QString label = temporaryTransitionCueLabels_.value(pad);
+            button->setText(label.isEmpty() ? tr("T%1").arg(pad + 1)
+                                            : label.left(8));
+            color = temporaryTransitionCueColors_.value(pad);
+            if (color.isEmpty() && set) color = hotCueColor(pad).name();
+            tooltip = set
+                ? tr("Temporary transition cue %1 — hold to preview; drag to PLAY to continue. Permanent track cues are unchanged")
+                      .arg(pad + 1)
+                : tr("Unused temporary transition cue slot %1").arg(pad + 1);
+            button->setToolTip(tooltip);
+            if (color.isEmpty()) {
+                button->setStyleSheet(QStringLiteral(
+                    "QPushButton { font-size:9px; font-weight:bold; }"));
+            } else {
+                button->setStyleSheet(QStringLiteral(
+                    "QPushButton { border:1px solid %1; color:%1; font-size:9px; "
+                    "font-weight:bold; background:%2; } "
+                    "QPushButton:pressed { background:%1; color:black; }")
+                    .arg(color, QColor(color).darker(330).name()));
+            }
+            continue;
+        }
         switch (assignment.action) {
         case PerformancePadAction::HotCue: {
             const bool set = track && track->hotCues[pad] >= 0.0;
@@ -1445,6 +1507,17 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
     if (!pressed) {
         if (!padIsPressed_[pad]) return;
         const PerformancePadMode pressedMode = pressedPadModes_[pad];
+        if (pressedMode == PerformancePadMode::Sampler &&
+            temporaryTransitionCuesActive_) {
+            dispatchPerformancePadGesture(pressedMode, pad);
+            const auto id = static_cast<ControlId>(
+                static_cast<int>(ControlId::TransitionCue1) + pad);
+            dispatch(id, 0.0);
+            padReleasePending_[pad] = false;
+            padIsPressed_[pad] = false;
+            syncPerformancePadUi();
+            return;
+        }
         const auto& assignment =
             padAssignments_[static_cast<int>(pressedMode)][pad];
         if (assignment.action == PerformancePadAction::HotCue) {
@@ -1474,6 +1547,23 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
     const auto& assignment =
         padAssignments_[static_cast<int>(padMode_)][pad];
     TrackDataPtr track = engine_->deck(deckIndex_).track();
+    if (padMode_ == PerformancePadMode::Sampler &&
+        temporaryTransitionCuesActive_) {
+        if (!track || !std::isfinite(temporaryTransitionCueSecs_[pad]) ||
+            temporaryTransitionCueSecs_[pad] < 0.0) {
+            showPadFeedback(tr("That transition cue slot is empty"));
+            return;
+        }
+        padIsPressed_[pad] = true;
+        padReleasePending_[pad] = false;
+        pressedPadModes_[pad] = padMode_;
+        dispatchPerformancePadGesture(padMode_, pad);
+        const auto id = static_cast<ControlId>(
+            static_cast<int>(ControlId::TransitionCue1) + pad);
+        dispatch(id, 1.0);
+        syncPerformancePadUi();
+        return;
+    }
     if (!track && performancePadActionIsSupported(assignment.action)) {
         showPadFeedback(tr("Load a track before using performance pads"));
         return;
@@ -1640,6 +1730,10 @@ bool DeckWidget::canDragHotCueToPlay(int pad) const
     if (pad < 0 || pad >= kPerformancePadCount || !padIsPressed_[pad])
         return false;
     const PerformancePadMode pressedMode = pressedPadModes_[pad];
+    if (pressedMode == PerformancePadMode::Sampler &&
+        temporaryTransitionCuesActive_)
+        return std::isfinite(temporaryTransitionCueSecs_[pad]) &&
+               temporaryTransitionCueSecs_[pad] >= 0.0;
     const auto& assignment =
         padAssignments_[static_cast<int>(pressedMode)][pad];
     const TrackDataPtr track = engine_->deck(deckIndex_).track();
@@ -1685,6 +1779,12 @@ void DeckWidget::finishHotCuePlayDrag(
 void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
 {
     if (pad < 0 || pad >= kPerformancePadCount) return;
+    if (padMode_ == PerformancePadMode::Sampler &&
+        temporaryTransitionCuesActive_) {
+        showPadFeedback(
+            tr("Transition cues are temporary; edit them in the transition"));
+        return;
+    }
     TrackDataPtr track = engine_->deck(deckIndex_).track();
     if (padMode_ == PerformancePadMode::HotCue) {
         if (track) {
