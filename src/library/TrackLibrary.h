@@ -69,6 +69,10 @@ public:
     // have a migrated counterpart. Legacy files are never overwritten.
     int convertAllLegacy(QStringList* convertedPaths = nullptr,
                          QStringList* errors = nullptr);
+    // Promote recoverable raw saved-loop events in existing portable files to
+    // transition-owned loop definitions. Files are updated atomically.
+    int upgradePortableSavedLoops(QStringList* upgradedPaths = nullptr,
+                                  QStringList* errors = nullptr);
 signals:
     void changed();
 private:

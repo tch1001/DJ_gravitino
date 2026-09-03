@@ -51,7 +51,8 @@ signals:
     // seconds for each physical deck's beatgrid.
     void cueMarkersChanged(int deck, const QList<double>& seconds,
                            const QStringList& labels);
-    void temporaryCueBankChanged(int deck, const QList<double>& seconds,
+    void temporaryCueBankChanged(int deck, const QList<double>& startSeconds,
+                                 const QList<double>& endSeconds,
                                  const QStringList& labels,
                                  const QStringList& colors);
     void hardwareTakeoverTrackingStarted();

@@ -29,7 +29,8 @@ int main()
     file.license = QStringLiteral("CC-BY-4.0");
     file.tags = {QStringLiteral("house"), QStringLiteral("teaching")};
     file.requirements = {QStringLiteral("timeline.v1"),
-                         QStringLiteral("temporary-cues.v1")};
+                         QStringLiteral("temporary-cues.v1"),
+                         QStringLiteral("temporary-loops.v1")};
     file.from.title = QStringLiteral("Outgoing");
     file.from.artists = {QStringLiteral("Artist A")};
     file.from.artist = QStringLiteral("Artist A");
@@ -54,6 +55,17 @@ int main()
          QStringLiteral("Launch"), QStringLiteral("start-track"),
          QStringLiteral("#55b9df"), QStringLiteral("launch"),
          QStringLiteral("custom"), 2, QStringLiteral("3"), {}, {}});
+    TransitionSavedLoop savedLoop;
+    savedLoop.id = QStringLiteral("incoming-intro-loop");
+    savedLoop.role = Role::ToDeck;
+    savedLoop.startTrackBeat = 48.125;
+    savedLoop.endTrackBeat = 56.125;
+    savedLoop.label = QStringLiteral("Intro loop");
+    savedLoop.purpose = QStringLiteral("saved-loop");
+    savedLoop.color = QStringLiteral("#e8a13a");
+    savedLoop.preferredPad = 4;
+    savedLoop.extraYaml.insert(QStringLiteral("future_loop_field"), 9);
+    file.transitionLoops.push_back(savedLoop);
     GvtEvent event;
     event.beat = 12.375123456;
     event.role = Role::ToDeck;
@@ -64,6 +76,13 @@ int main()
     event.inputExtraYaml.insert(QStringLiteral("future_gesture_field"),
                                 QStringLiteral("kept"));
     file.events.push_back(event);
+    GvtEvent loopEvent;
+    loopEvent.beat = 14.125;
+    loopEvent.role = Role::ToDeck;
+    loopEvent.control = ControlId::SavedLoop5;
+    loopEvent.value = 1.0;
+    loopEvent.loopId = savedLoop.id;
+    file.events.push_back(loopEvent);
     file.cues.push_back({12.375123456, QStringLiteral("Between beats"), {}});
     file.metadataExtraYaml.insert(QStringLiteral("future_credit"),
                                   QStringLiteral("guest"));
@@ -76,6 +95,8 @@ int main()
     CHECK(yaml.contains(QStringLiteral("format: \"gravitino.transition\"")));
     CHECK(yaml.contains(QStringLiteral("at_beat: 12.375123456")));
     CHECK(yaml.contains(QStringLiteral("control: \"deck.transition_cue\"")));
+    CHECK(yaml.contains(QStringLiteral("control: \"deck.transition_loop\"")));
+    CHECK(yaml.contains(QStringLiteral("start_track_beat: 48.125")));
 
     GvtFile parsed;
     QString error;
@@ -87,11 +108,28 @@ int main()
     CHECK(parsed.license == file.license);
     CHECK(parsed.from.artists == file.from.artists);
     CHECK(std::fabs(parsed.anchorFromBeat - file.anchorFromBeat) < 1e-10);
-    CHECK(parsed.events.size() == 1);
+    CHECK(parsed.events.size() == 2);
     CHECK(std::fabs(parsed.events[0].beat - event.beat) < 1e-10);
     CHECK(parsed.events[0].cueId == event.cueId);
     CHECK(parsed.transitionCues.size() == 1);
     CHECK(parsed.transitionCues[0].preferredPad == 2);
+    CHECK(parsed.transitionLoops.size() == 1);
+    CHECK(parsed.transitionLoops[0].id == savedLoop.id);
+    CHECK(parsed.transitionLoops[0].preferredPad == 4);
+    CHECK(parsed.events[1].loopId == savedLoop.id);
+    CHECK(parsed.transitionLoops[0].extraYaml.value(
+              QStringLiteral("future_loop_field")).toInt() == 9);
+    GvtFile collidingPads;
+    TransitionHotCue collidingCue = file.transitionCues.front();
+    collidingCue.preferredPad = 0;
+    TransitionSavedLoop collidingLoop = savedLoop;
+    collidingLoop.preferredPad = 0;
+    collidingPads.transitionCues.push_back(collidingCue);
+    collidingPads.transitionLoops.push_back(collidingLoop);
+    const auto allocated = transitionPerformanceSlots(
+        collidingPads, Role::ToDeck);
+    CHECK(allocated[0].cue == &collidingPads.transitionCues[0]);
+    CHECK(allocated[1].loop == &collidingPads.transitionLoops[0]);
     CHECK(parsed.metadataExtraYaml.value(QStringLiteral("future_credit")) ==
           QStringLiteral("guest"));
     CHECK(parsed.from.assumptionsExtraYaml.value(
@@ -135,6 +173,16 @@ int main()
     CHECK(!transitionParse(yaml + QStringLiteral("---\n{}\n"),
                            parsed, &error, nullptr));
 
+    invalid = yaml;
+    invalid.replace(QStringLiteral("end_track_beat: 56.125"),
+                    QStringLiteral("end_track_beat: 48.125"));
+    CHECK(!transitionParse(invalid, parsed, &error, nullptr));
+    CHECK(error.contains(QStringLiteral("end after"), Qt::CaseInsensitive));
+    invalid = yaml;
+    invalid.remove(QStringLiteral("  - \"temporary-loops.v1\"\n"));
+    CHECK(!transitionParse(invalid, parsed, &error, nullptr));
+    CHECK(error.contains(QStringLiteral("temporary-loops.v1")));
+
     GvtFile tooManyCues = file;
     for (int index = 0; index < 8; ++index) {
         TransitionHotCue cue = tooManyCues.transitionCues.front();
@@ -144,6 +192,38 @@ int main()
     }
     CHECK(!transitionParse(transitionSerialize(tooManyCues), parsed,
                            &error, nullptr));
+
+    GvtFile tooManyPads = file;
+    for (int index = 0; index < 7; ++index) {
+        TransitionSavedLoop loop = savedLoop;
+        loop.id = QStringLiteral("extra-loop-%1").arg(index);
+        loop.preferredPad = -1;
+        tooManyPads.transitionLoops.push_back(loop);
+    }
+    CHECK(!transitionParse(transitionSerialize(tooManyPads), parsed,
+                           &error, nullptr));
+
+    GvtFile recoverable;
+    recoverable.requirements = {QStringLiteral("timeline.v1"),
+                                QStringLiteral("temporary-cues.v1")};
+    recoverable.initialComplete = true;
+    recoverable.initialTo.captured = true;
+    recoverable.initialTo.loopStartBeat = 16.25;
+    recoverable.initialTo.loopEndBeat = 24.25;
+    recoverable.events.push_back(
+        {2.0, Role::ToDeck, ControlId::SavedLoop7, 1.0, Curve::Step});
+    recoverable.events.push_back(
+        {3.0, Role::ToDeck, ControlId::SavedLoop7, 0.0, Curve::Step});
+    CHECK(migrateSavedLoopsFromInitialState(recoverable) == 1);
+    CHECK(recoverable.transitionLoops.size() == 1);
+    CHECK(recoverable.transitionLoops[0].preferredPad == 6);
+    CHECK(std::fabs(recoverable.transitionLoops[0].startTrackBeat - 16.25) <
+          1e-12);
+    CHECK(recoverable.events[0].loopId == recoverable.transitionLoops[0].id);
+    CHECK(recoverable.events[1].loopId == recoverable.transitionLoops[0].id);
+    CHECK(recoverable.requirements.contains(
+        QStringLiteral("temporary-loops.v1")));
+    CHECK(migrateSavedLoopsFromInitialState(recoverable) == 0);
 
     QTemporaryDir dir;
     CHECK(dir.isValid());

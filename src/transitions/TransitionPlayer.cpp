@@ -4,6 +4,7 @@
 #include "TransitionEngine.h"
 #include "TransitionImpls.h"
 #include "TransitionPlayerExt.h"
+#include "../performance/PerformancePads.h"
 
 #include <cmath>
 #include <algorithm>
@@ -239,40 +240,62 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
                      // longer applied as part of a transition.
                      return event.control != ControlId::Trim;
                  });
-    const auto prepareCues = [&](Role role, int physicalDeck,
-                                  const TrackDataPtr& track) {
-        std::array<double, 8> seconds {
+    const auto preparePerformanceSlots = [&](Role role, int physicalDeck,
+                                              const TrackDataPtr& track) {
+        std::array<double, 8> startSeconds {
             -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
-        const auto cueSlots = transitionCueSlots(f, role);
-        for (int slot = 0; slot < 8; ++slot)
-            if (cueSlots[static_cast<std::size_t>(slot)] && track)
-                seconds[static_cast<std::size_t>(slot)] = transitionSecAtBeat(
-                    f, *track,
-                    cueSlots[static_cast<std::size_t>(slot)]->trackBeat);
-        im.engine->deck(physicalDeck).setTransitionCues(seconds);
-        return cueSlots;
+        std::array<double, 8> endSeconds {
+            -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+        const auto allocated = transitionPerformanceSlots(f, role);
+        for (int slotIndex = 0; slotIndex < 8; ++slotIndex) {
+            const TransitionPerformanceSlot& slot =
+                allocated[static_cast<std::size_t>(slotIndex)];
+            if (!track) continue;
+            if (slot.cue) {
+                startSeconds[static_cast<std::size_t>(slotIndex)] =
+                    transitionSecAtBeat(f, *track, slot.cue->trackBeat);
+            } else if (slot.loop) {
+                startSeconds[static_cast<std::size_t>(slotIndex)] =
+                    transitionSecAtBeat(f, *track, slot.loop->startTrackBeat);
+                endSeconds[static_cast<std::size_t>(slotIndex)] =
+                    transitionSecAtBeat(f, *track, slot.loop->endTrackBeat);
+            }
+        }
+        im.engine->deck(physicalDeck).setTransitionPerformanceSlots(
+            startSeconds, endSeconds);
+        return allocated;
     };
-    const auto fromCueSlots = prepareCues(
+    const auto fromPerformanceSlots = preparePerformanceSlots(
         Role::FromDeck, fromDeck, im.engine->deck(fromDeck).track());
-    const auto toCueSlots = prepareCues(
+    const auto toPerformanceSlots = preparePerformanceSlots(
         Role::ToDeck, toDeck, im.engine->deck(toDeck).track());
     for (GvtEvent& event : events) {
-        if (event.cueId.isEmpty() || event.role == Role::Mixer) continue;
-        const auto& cueSlots = event.role == Role::FromDeck
-                                ? fromCueSlots : toCueSlots;
+        if ((event.cueId.isEmpty() && event.loopId.isEmpty()) ||
+            event.role == Role::Mixer)
+            continue;
+        const auto& allocated = event.role == Role::FromDeck
+                                ? fromPerformanceSlots : toPerformanceSlots;
         const auto found = std::find_if(
-            cueSlots.begin(), cueSlots.end(), [&event](const TransitionHotCue* cue) {
-                return cue && cue->id == event.cueId;
+            allocated.begin(), allocated.end(), [&event](const auto& slot) {
+                return (!event.cueId.isEmpty() && slot.cue &&
+                        slot.cue->id == event.cueId) ||
+                       (!event.loopId.isEmpty() && slot.loop &&
+                        slot.loop->id == event.loopId);
             });
-        if (found == cueSlots.end()) {
-            if (error) *error = QStringLiteral("timeline refers to unallocated cue '%1'")
-                                    .arg(event.cueId);
+        if (found == allocated.end()) {
+            if (error) *error = QStringLiteral(
+                "timeline refers to unallocated transition pad '%1'")
+                                    .arg(event.cueId.isEmpty()
+                                             ? event.loopId : event.cueId);
             return false;
         }
         const int slot = static_cast<int>(
-            std::distance(cueSlots.begin(), found));
+            std::distance(allocated.begin(), found));
         event.control = static_cast<ControlId>(
             static_cast<int>(ControlId::TransitionCue1) + slot);
+        event.gestureControl = static_cast<ControlId>(
+            static_cast<int>(ControlId::PerformancePad1) + slot);
+        event.gesturePadMode = static_cast<int>(PerformancePadMode::Sampler);
     }
     // A library re-scan or manual regrid can change the loaded track's native
     // BPM after recording. Preserve every recorded effective BPM, including

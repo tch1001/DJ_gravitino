@@ -6,6 +6,22 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-04 (codex): **Transition-owned saved-loop slots.** Portable YAML now
+  stores semantic saved-loop IDs plus canonical IN/OUT beats under
+  `performance.loops`; timeline events use `deck.transition_loop` and
+  `loop_id`. Cues and loops share the isolated eight-pad CUSTOM bank, replay
+  preserves press/PLAY/release and live-arm behavior, and neither recording nor
+  playback overwrites the song's permanent slots. New recordings capture the
+  loop definition on first use. The safe parser preserves unknown loop fields,
+  validates ranges/references and the combined per-endpoint pad limit, and
+  advertises `temporary-loops.v1`. The recovery command
+  `--upgrade-transition-loops` atomically promotes unambiguous older portable
+  copies from their captured initial loop range while leaving `.gvt` sources
+  untouched. All 12 saved-loop-dependent portable files in the local library
+  were upgraded successfully; all 28 `.gvt` source hashes remained unchanged,
+  and an idempotence rerun upgraded zero files. Verified with all 27 CTest
+  targets, the full offline `--selftest`, and `git diff --check`.
+
 - 2026-09-04 (codex): **Non-destructive analysis-cache migration and harmonic
   BPM fix.** Cached detector output is now stored separately from the effective
   beat grid with an explicit source marker. Schema/analysis upgrades merge

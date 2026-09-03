@@ -1,5 +1,6 @@
 #include "audio/AudioEngine.h"
 #include "control/ControlBus.h"
+#include "performance/PerformancePads.h"
 #include "transitions/TransitionEngine.h"
 #include "transitions/TransitionEventSummary.h"
 #include "transitions/TransitionPrime.h"
@@ -237,6 +238,33 @@ int main(int argc, char** argv)
     CHECK(!engine.deck(1).previewActive());
     CHECK(std::fabs(engine.deck(1).positionSec() - 0.5) < 1.0e-6);
     player.abort();
+
+    // Recorder output promotes a used permanent saved-loop slot into a
+    // semantic, transition-owned loop range. Future edits to the track slot
+    // therefore cannot change this recording.
+    engine.deck(1).stop();
+    TransitionRecorder savedLoopRecorder(&bus, &engine);
+    savedLoopRecorder.start(0);
+    bus.dispatch({1, ControlId::PerformancePad1,
+                  static_cast<double>(PerformancePadMode::Sampler)},
+                 Origin::Ui);
+    bus.dispatch({1, ControlId::SavedLoop1, 1.0}, Origin::Ui);
+    bus.dispatch({1, ControlId::SavedLoop1, 0.0}, Origin::Ui);
+    const GvtFile loopRecording = savedLoopRecorder.finish();
+    CHECK(loopRecording.requirements.contains(
+        QStringLiteral("temporary-loops.v1")));
+    CHECK(loopRecording.transitionLoops.size() == 1);
+    if (!loopRecording.transitionLoops.empty()) {
+        CHECK(std::fabs(loopRecording.transitionLoops[0].startTrackBeat - 1.0) <
+              1.0e-6);
+        CHECK(std::fabs(loopRecording.transitionLoops[0].endTrackBeat - 3.0) <
+              1.0e-6);
+        CHECK(loopRecording.transitionLoops[0].preferredPad == 0);
+    }
+    CHECK(std::count_if(loopRecording.events.begin(),
+                        loopRecording.events.end(), [](const GvtEvent& event) {
+              return !event.loopId.isEmpty();
+          }) == 2);
 
     // Recorder output retains the controller/audio engine's six-decimal
     // tempo precision instead of rounding it to a drift-inducing 0.001.

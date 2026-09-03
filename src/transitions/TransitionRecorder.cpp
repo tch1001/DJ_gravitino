@@ -143,6 +143,40 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
                         track->canonicalBeatAtSec(track->hotCues[pad]);
             }
         }
+        if (e.deck >= 0 && e.deck < kNumDecks &&
+            e.id >= ControlId::SavedLoop1 &&
+            e.id <= ControlId::SavedLoop8) {
+            const int pad = static_cast<int>(e.id) -
+                            static_cast<int>(ControlId::SavedLoop1);
+            const TrackDataPtr track = im.engine->deck(e.deck).track();
+            auto& mappings = e.deck == im.fromDeck
+                                 ? im.fromSavedLoops : im.toSavedLoops;
+            TransitionSavedLoop& loop =
+                mappings[static_cast<std::size_t>(pad)];
+            if (track && loop.id.isEmpty()) {
+                const SavedLoopSlot& slot = track->savedLoops[pad];
+                if (slot.isSet()) {
+                    const bool outgoing = e.deck == im.fromDeck;
+                    loop.id = QStringLiteral("%1-loop-%2")
+                                  .arg(outgoing
+                                           ? QStringLiteral("outgoing")
+                                           : QStringLiteral("incoming"))
+                                  .arg(pad + 1);
+                    loop.role = outgoing ? Role::FromDeck : Role::ToDeck;
+                    loop.startTrackBeat =
+                        track->canonicalBeatAtSec(slot.startSec);
+                    loop.endTrackBeat =
+                        track->canonicalBeatAtSec(slot.endSec);
+                    loop.label = slot.label.isEmpty()
+                                     ? QStringLiteral("LOOP %1").arg(pad + 1)
+                                     : slot.label;
+                    loop.purpose = QStringLiteral("saved-loop");
+                    loop.color = QStringLiteral("#e8a13a");
+                    loop.pairingGroup = QStringLiteral("pad-%1").arg(pad + 1);
+                    loop.preferredPad = pad;
+                }
+            }
+        }
 
         GvtEvent g;
         g.beat = std::max(0.0, beat);
@@ -229,6 +263,8 @@ void TransitionRecorder::start(int fromDeck) {
     im.lastTimelineNs = 0;
     im.fromHotCueBeats.fill(kUnmappedHotCueBeat);
     im.toHotCueBeats.fill(kUnmappedHotCueBeat);
+    im.fromSavedLoops.fill(TransitionSavedLoop {});
+    im.toSavedLoops.fill(TransitionSavedLoop {});
     im.events.clear();
     im.gesturePending = false;
     im.gestureDeck = kNoDeck;
@@ -255,7 +291,8 @@ GvtFile TransitionRecorder::finish() {
     f.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     f.created = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     f.requirements = {QStringLiteral("timeline.v1"),
-                      QStringLiteral("temporary-cues.v1")};
+                      QStringLiteral("temporary-cues.v1"),
+                      QStringLiteral("temporary-loops.v1")};
 
     auto fillRef = [&](GvtTrackRef& ref, int deckIdx) {
         if (TrackDataPtr t = im.engine->deck(deckIdx).track()) {
@@ -423,6 +460,13 @@ GvtFile TransitionRecorder::finish() {
     for (auto* mappings : {&f.fromHotCueBeats, &f.toHotCueBeats})
         for (double& beat : *mappings)
             if (hotCueBeatIsMapped(beat)) beat = q(beat, kPrecise);
+    for (auto* mappings : {&im.fromSavedLoops, &im.toSavedLoops}) {
+        for (TransitionSavedLoop& loop : *mappings) {
+            if (loop.id.isEmpty()) continue;
+            loop.startTrackBeat = q(loop.startTrackBeat, kPrecise);
+            loop.endTrackBeat = q(loop.endTrackBeat, kPrecise);
+        }
+    }
     for (GvtEvent& e : f.events) {
         e.beat = q(e.beat, kPrecise);
         e.value = q(e.value,
@@ -453,20 +497,39 @@ GvtFile TransitionRecorder::finish() {
     };
     addCues(Role::FromDeck, f.fromHotCueBeats, QStringLiteral("outgoing"));
     addCues(Role::ToDeck, f.toHotCueBeats, QStringLiteral("incoming"));
+    for (const auto* mappings : {&im.fromSavedLoops, &im.toSavedLoops})
+        for (const TransitionSavedLoop& loop : *mappings)
+            if (!loop.id.isEmpty()) f.transitionLoops.push_back(loop);
     for (GvtEvent& event : f.events) {
-        if (event.role == Role::Mixer || event.control < ControlId::HotCue1 ||
-            event.control > ControlId::HotCue8)
-            continue;
-        const int pad = static_cast<int>(event.control) -
-                        static_cast<int>(ControlId::HotCue1);
-        event.cueId = QStringLiteral("%1-cue-%2")
-                          .arg(event.role == Role::FromDeck
-                                   ? QStringLiteral("outgoing")
-                                   : QStringLiteral("incoming"))
-                          .arg(pad + 1);
-        event.gestureControl = static_cast<ControlId>(
-            static_cast<int>(ControlId::PerformancePad1) + pad);
-        event.gesturePadMode = static_cast<int>(PerformancePadMode::Sampler);
+        if (event.role == Role::Mixer) continue;
+        if (event.control >= ControlId::HotCue1 &&
+            event.control <= ControlId::HotCue8) {
+            const int pad = static_cast<int>(event.control) -
+                            static_cast<int>(ControlId::HotCue1);
+            event.cueId = QStringLiteral("%1-cue-%2")
+                              .arg(event.role == Role::FromDeck
+                                       ? QStringLiteral("outgoing")
+                                       : QStringLiteral("incoming"))
+                              .arg(pad + 1);
+            event.gestureControl = static_cast<ControlId>(
+                static_cast<int>(ControlId::PerformancePad1) + pad);
+            event.gesturePadMode =
+                static_cast<int>(PerformancePadMode::Sampler);
+        } else if (event.control >= ControlId::SavedLoop1 &&
+                   event.control <= ControlId::SavedLoop8) {
+            const int pad = static_cast<int>(event.control) -
+                            static_cast<int>(ControlId::SavedLoop1);
+            const auto& mappings = event.role == Role::FromDeck
+                                       ? im.fromSavedLoops : im.toSavedLoops;
+            const TransitionSavedLoop& loop =
+                mappings[static_cast<std::size_t>(pad)];
+            if (loop.id.isEmpty()) continue;
+            event.loopId = loop.id;
+            event.gestureControl = static_cast<ControlId>(
+                static_cast<int>(ControlId::PerformancePad1) + pad);
+            event.gesturePadMode =
+                static_cast<int>(PerformancePadMode::Sampler);
+        }
     }
 
     im.events.clear();

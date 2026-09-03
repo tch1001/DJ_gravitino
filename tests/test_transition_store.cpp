@@ -153,6 +153,41 @@ int main()
     CHECK(conversionErrors.isEmpty());
     CHECK(store.all().size() == 2);
 
+    // Existing portable copies with one recoverable saved-loop slot can be
+    // upgraded in place without touching their legacy source.
+    GvtFile rawLoop;
+    rawLoop.name = QStringLiteral("Raw loop source");
+    rawLoop.requirements = {QStringLiteral("timeline.v1"),
+                            QStringLiteral("temporary-cues.v1")};
+    rawLoop.from.title = QStringLiteral("A");
+    rawLoop.from.bpm = 120.0;
+    rawLoop.from.durationSec = 60.0;
+    rawLoop.to.title = QStringLiteral("B");
+    rawLoop.to.bpm = 120.0;
+    rawLoop.to.durationSec = 60.0;
+    rawLoop.masterBpm = 120.0;
+    rawLoop.initialComplete = true;
+    rawLoop.initialTo.captured = true;
+    rawLoop.initialTo.loopStartBeat = 8.5;
+    rawLoop.initialTo.loopEndBeat = 16.5;
+    rawLoop.events.push_back(
+        {1.0, Role::ToDeck, ControlId::SavedLoop3, 1.0, Curve::Step});
+    const QString rawLoopPath = store.save(rawLoop, &error);
+    CHECK(!rawLoopPath.isEmpty());
+    QStringList upgradedPaths;
+    QStringList upgradeErrors;
+    CHECK(store.upgradePortableSavedLoops(&upgradedPaths, &upgradeErrors) == 1);
+    CHECK(upgradeErrors.isEmpty());
+    CHECK(upgradedPaths == QStringList {rawLoopPath});
+    GvtFile upgradedLoop;
+    CHECK(transitionLoadFile(rawLoopPath, upgradedLoop, &error));
+    CHECK(upgradedLoop.transitionLoops.size() == 1);
+    CHECK(upgradedLoop.events.size() == 1);
+    CHECK(!upgradedLoop.events[0].loopId.isEmpty());
+    CHECK(upgradedLoop.requirements.contains(
+        QStringLiteral("temporary-loops.v1")));
+    CHECK(QFileInfo::exists(legacyPath));
+
     qunsetenv("GRAVITINO_TRANSITIONS_DIR");
     if (failures) return 1;
     std::printf("test_transition_store: save/update/rename/delete passed\n");

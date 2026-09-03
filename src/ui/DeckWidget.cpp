@@ -1060,17 +1060,20 @@ void DeckWidget::setTransitionCues(const QList<double>& seconds,
 }
 
 void DeckWidget::setTemporaryTransitionCues(
-    const std::array<double, 8>& seconds, const QStringList& labels,
-    const QStringList& colors)
+    const std::array<double, 8>& startSeconds,
+    const std::array<double, 8>& endSeconds,
+    const QStringList& labels, const QStringList& colors)
 {
-    temporaryTransitionCueSecs_ = seconds;
+    temporaryTransitionCueSecs_ = startSeconds;
+    temporaryTransitionLoopEndSecs_ = endSeconds;
     temporaryTransitionCueLabels_ = labels;
     temporaryTransitionCueColors_ = colors;
     temporaryTransitionCuesActive_ = std::any_of(
-        seconds.begin(), seconds.end(), [](double sec) {
+        startSeconds.begin(), startSeconds.end(), [](double sec) {
             return std::isfinite(sec) && sec >= 0.0;
         });
-    engine_->deck(deckIndex_).setTransitionCues(seconds);
+    engine_->deck(deckIndex_).setTransitionPerformanceSlots(
+        startSeconds, endSeconds);
     syncPerformancePadUi();
 }
 
@@ -1082,6 +1085,7 @@ void DeckWidget::clearTemporaryTransitionCues()
             handlePerformancePad(pad, false);
     temporaryTransitionCuesActive_ = false;
     temporaryTransitionCueSecs_.fill(-1.0);
+    temporaryTransitionLoopEndSecs_.fill(-1.0);
     temporaryTransitionCueLabels_.clear();
     temporaryTransitionCueColors_.clear();
     engine_->deck(deckIndex_).clearTransitionCues();
@@ -1376,13 +1380,20 @@ void DeckWidget::syncPerformancePadUi()
             const bool set = std::isfinite(temporaryTransitionCueSecs_[pad]) &&
                              temporaryTransitionCueSecs_[pad] >= 0.0;
             const QString label = temporaryTransitionCueLabels_.value(pad);
+            const bool savedLoop = set &&
+                std::isfinite(temporaryTransitionLoopEndSecs_[pad]) &&
+                temporaryTransitionLoopEndSecs_[pad] >
+                    temporaryTransitionCueSecs_[pad];
             button->setText(label.isEmpty() ? tr("T%1").arg(pad + 1)
                                             : label.left(8));
             color = temporaryTransitionCueColors_.value(pad);
             if (color.isEmpty() && set) color = hotCueColor(pad).name();
             tooltip = set
-                ? tr("Temporary transition cue %1 — hold to preview; drag to PLAY to continue. Permanent track cues are unchanged")
-                      .arg(pad + 1)
+                ? (savedLoop
+                    ? tr("Temporary transition loop %1 — hold to preview; drag to PLAY to continue. Permanent track loops are unchanged")
+                          .arg(pad + 1)
+                    : tr("Temporary transition cue %1 — hold to preview; drag to PLAY to continue. Permanent track cues are unchanged")
+                          .arg(pad + 1))
                 : tr("Unused temporary transition cue slot %1").arg(pad + 1);
             button->setToolTip(tooltip);
             if (color.isEmpty()) {
@@ -1756,8 +1767,17 @@ void DeckWidget::updateHotCuePlayDropTarget(
 {
     const bool overPlay = canDragHotCueToPlay(pad) && playBtn_ &&
         playBtn_->rect().contains(playBtn_->mapFromGlobal(globalPosition));
-    if (overPlay && !playDropTargetVisible_)
-        showPadFeedback(tr("Release over PLAY to keep this hot cue playing"));
+    if (overPlay && !playDropTargetVisible_) {
+        const bool transitionLoop =
+            pressedPadModes_[pad] == PerformancePadMode::Sampler &&
+            temporaryTransitionCuesActive_ &&
+            std::isfinite(temporaryTransitionLoopEndSecs_[pad]) &&
+            temporaryTransitionLoopEndSecs_[pad] >
+                temporaryTransitionCueSecs_[pad];
+        showPadFeedback(transitionLoop
+            ? tr("Release over PLAY to keep this transition loop playing")
+            : tr("Release over PLAY to keep this hot cue playing"));
+    }
     setPlayDropTargetVisible(overPlay);
 }
 
@@ -1770,10 +1790,18 @@ void DeckWidget::finishHotCuePlayDrag(
     if (!latch) return;
 
     // This executes before the pad button emits released. PLAY therefore
-    // takes ownership of the held hot-cue preview, and the subsequent hot-cue
-    // release is intentionally a no-op in Deck::handleHotCue().
+    // takes ownership of the held cue/loop preview, and the subsequent pad
+    // release is intentionally a no-op in the deck preview handler.
     dispatch(ControlId::Play);
-    showPadFeedback(tr("Hot cue latched — playback continues"));
+    const bool transitionLoop =
+        pressedPadModes_[pad] == PerformancePadMode::Sampler &&
+        temporaryTransitionCuesActive_ &&
+        std::isfinite(temporaryTransitionLoopEndSecs_[pad]) &&
+        temporaryTransitionLoopEndSecs_[pad] >
+            temporaryTransitionCueSecs_[pad];
+    showPadFeedback(transitionLoop
+        ? tr("Transition loop latched — playback continues")
+        : tr("Hot cue latched — playback continues"));
 }
 
 void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
@@ -1782,7 +1810,7 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
     if (padMode_ == PerformancePadMode::Sampler &&
         temporaryTransitionCuesActive_) {
         showPadFeedback(
-            tr("Transition cues are temporary; edit them in the transition"));
+            tr("Transition cues and loops are temporary; edit them in the transition"));
         return;
     }
     TrackDataPtr track = engine_->deck(deckIndex_).track();

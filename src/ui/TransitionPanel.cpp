@@ -683,6 +683,12 @@ void TransitionPanel::onRec()
     }
     int fromDeck = aPlaying ? 0 : 1;
     clearReplayLifecycle();
+    // Recording starts from the user's current track metadata. A previously
+    // selected transition may have installed its own temporary CUSTOM bank;
+    // remove it so saved-loop presses can be captured with their real slot
+    // ranges instead of leaking another transition's runtime-only pad IDs.
+    emit temporaryCueBankChanged(0, {}, {}, {}, {});
+    emit temporaryCueBankChanged(1, {}, {}, {}, {});
     recorder_->start(fromDeck);
     capturedCount_ = 0;
     recIndicator_->setText(tr("REC ● 0 events (from deck %1)")
@@ -717,15 +723,18 @@ void TransitionPanel::onStopSave()
         f.name.isEmpty() ? tr("My Transition") : f.name, &ok);
     if (!ok || name.trimmed().isEmpty()) {
         emit statusMessage(tr("Recording discarded"), 3000);
+        announceEntryMarker();
         return;
     }
     f.name = name.trimmed();
     QString error;
     QString path = store_->save(f, &error);
-    if (path.isEmpty())
+    if (path.isEmpty()) {
         emit statusMessage(tr("Save failed: %1").arg(error), 6000);
-    else
+        announceEntryMarker();
+    } else {
         emit statusMessage(tr("Saved %1").arg(path), 5000);
+    }
     // Store emits changed() -> refreshMatches().
     updateControls();
 }
@@ -738,8 +747,8 @@ void TransitionPanel::announceEntryMarker()
         emit entryMarkerChanged(1, -1.0);
         emit cueMarkersChanged(0, {}, {});
         emit cueMarkersChanged(1, {}, {});
-        emit temporaryCueBankChanged(0, {}, {}, {});
-        emit temporaryCueBankChanged(1, {}, {}, {});
+        emit temporaryCueBankChanged(0, {}, {}, {}, {});
+        emit temporaryCueBankChanged(1, {}, {}, {}, {});
         return;
     }
     const Match& m = matches_[(size_t)idx];
@@ -751,19 +760,28 @@ void TransitionPanel::announceEntryMarker()
     for (Role role : {Role::FromDeck, Role::ToDeck}) {
         const int deck = role == Role::FromDeck ? m.fromDeck : 1 - m.fromDeck;
         const TrackDataPtr track = engine_->deck(deck).track();
-        QList<double> seconds;
+        QList<double> startSeconds;
+        QList<double> endSeconds;
         QStringList labels;
         QStringList colors;
-        const auto cueSlots = transitionCueSlots(*m.file, role);
-        for (const TransitionHotCue* cue : cueSlots) {
-            seconds.append(cue && track
-                               ? transitionSecAtBeat(*m.file, *track,
-                                                     cue->trackBeat)
-                               : -1.0);
-            labels.append(cue ? cue->label : QString());
-            colors.append(cue ? cue->color : QString());
+        const auto allocated = transitionPerformanceSlots(*m.file, role);
+        for (const TransitionPerformanceSlot& slot : allocated) {
+            const double startBeat = slot.cue ? slot.cue->trackBeat
+                                              : (slot.loop
+                                                     ? slot.loop->startTrackBeat
+                                                     : 0.0);
+            startSeconds.append((slot.cue || slot.loop) && track
+                ? transitionSecAtBeat(*m.file, *track, startBeat) : -1.0);
+            endSeconds.append(slot.loop && track
+                ? transitionSecAtBeat(*m.file, *track,
+                                      slot.loop->endTrackBeat) : -1.0);
+            labels.append(slot.cue ? slot.cue->label
+                                   : (slot.loop ? slot.loop->label : QString()));
+            colors.append(slot.cue ? slot.cue->color
+                                   : (slot.loop ? slot.loop->color : QString()));
         }
-        emit temporaryCueBankChanged(deck, seconds, labels, colors);
+        emit temporaryCueBankChanged(deck, startSeconds, endSeconds,
+                                     labels, colors);
     }
     announceSelectedEventMarker();
 }
@@ -988,6 +1006,10 @@ void TransitionPanel::updateRawPreview(const GvtFile& file)
 
         QString action = QString::fromUtf8(controlName(event.control));
         action.replace(QLatin1Char('_'), QLatin1Char(' '));
+        if (!event.loopId.isEmpty())
+            action = tr("transition saved loop");
+        else if (!event.cueId.isEmpty())
+            action = tr("transition hot cue");
         const auto [firstEndpoint, lastEndpoint] =
             transitionSummaryEndpoints(file, eventIndex);
         if (event.control == ControlId::Crossfader) {
@@ -1242,6 +1264,25 @@ QString TransitionPanel::humanActionText(
             instruction = tr("Set %1 to %2").arg(control, to);
         }
         break;
+    }
+
+    if (!action.eventIndices.empty()) {
+        const GvtEvent& sourceEvent = file.events[static_cast<std::size_t>(
+            action.eventIndices.front())];
+        if (!sourceEvent.loopId.isEmpty()) {
+            const auto found = std::find_if(
+                file.transitionLoops.begin(), file.transitionLoops.end(),
+                [&sourceEvent](const TransitionSavedLoop& loop) {
+                    return loop.id == sourceEvent.loopId;
+                });
+            const QString name = found != file.transitionLoops.end() &&
+                                         !found->label.isEmpty()
+                                     ? found->label
+                                     : tr("saved loop");
+            instruction = sourceEvent.value >= 0.5
+                              ? tr("Press %1").arg(name)
+                              : tr("Release %1").arg(name);
+        }
     }
 
     if (!action.eventIndices.empty()) {
@@ -2421,6 +2462,7 @@ void TransitionPanel::onAbort()
         capturedCount_ = 0;
         recIndicator_->clear();
         emit statusMessage(tr("Recording cancelled"), 3000);
+        announceEntryMarker();
     }
     progress_->setValue(0);
     clearSequenceProgress();
@@ -2550,7 +2592,7 @@ QString TransitionPanel::tutorialWarningForEvent(
 
     if (event.gestureControl >= ControlId::PerformancePad1 &&
         event.gestureControl <= ControlId::PerformancePad8 &&
-        event.cueId.isEmpty() &&
+        event.cueId.isEmpty() && event.loopId.isEmpty() &&
         (event.gesturePadMode == static_cast<int>(PerformancePadMode::Sampler) ||
          event.gesturePadMode == static_cast<int>(PerformancePadMode::SavedLoop))) {
         if (event.role == Role::Mixer)
@@ -2567,7 +2609,7 @@ QString TransitionPanel::tutorialWarningForEvent(
         }
     }
 
-    if (!event.cueId.isEmpty()) return {};
+    if (!event.cueId.isEmpty() || !event.loopId.isEmpty()) return {};
     if (event.control < ControlId::HotCue1 ||
         event.control > ControlId::HotCue8)
         return {};
@@ -2628,7 +2670,7 @@ bool TransitionPanel::tutorialEventCanActivate(
     if (!tutorialMappingForEvent(event)) return false;
     if (event.gestureControl >= ControlId::PerformancePad1 &&
         event.gestureControl <= ControlId::PerformancePad8 &&
-        event.cueId.isEmpty() &&
+        event.cueId.isEmpty() && event.loopId.isEmpty() &&
         (event.gesturePadMode == static_cast<int>(PerformancePadMode::Sampler) ||
          event.gesturePadMode == static_cast<int>(PerformancePadMode::SavedLoop))) {
         if (event.role == Role::Mixer) return false;
@@ -2639,7 +2681,7 @@ bool TransitionPanel::tutorialEventCanActivate(
         const TrackDataPtr track = engine_->deck(deck).track();
         if (!track || !track->savedLoops[pad].isSet()) return false;
     }
-    if (!event.cueId.isEmpty()) return true;
+    if (!event.cueId.isEmpty() || !event.loopId.isEmpty()) return true;
     if (event.control < ControlId::HotCue1 ||
         event.control > ControlId::HotCue8)
         return true;

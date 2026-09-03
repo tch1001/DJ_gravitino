@@ -31,6 +31,8 @@ struct TransitionRecorder::Impl {
         kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
         kUnmappedHotCueBeat, kUnmappedHotCueBeat, kUnmappedHotCueBeat,
         kUnmappedHotCueBeat, kUnmappedHotCueBeat};
+    std::array<TransitionSavedLoop, 8> fromSavedLoops {};
+    std::array<TransitionSavedLoop, 8> toSavedLoops {};
     double initialCrossfader = 0.0; // role space
     bool   toAnchorSet = false;
     double toAnchorBeat = 0.0;

@@ -50,6 +50,24 @@ int main(int argc, char** argv)
                     errors.size() == 1 ? "" : "s");
         return errors.isEmpty() ? 0 : 1;
     }
+    if (args.contains(QStringLiteral("--upgrade-transition-loops"))) {
+        gvt::TransitionStore store;
+        QStringList upgraded;
+        QStringList errors;
+        const int count = store.upgradePortableSavedLoops(&upgraded, &errors);
+        std::printf("Transition directory: %s\n",
+                    qUtf8Printable(store.directory()));
+        for (const QString& path : upgraded)
+            std::printf("upgraded: %s\n", qUtf8Printable(path));
+        for (const QString& error : errors)
+            std::fprintf(stderr, "upgrade failed: %s\n",
+                         qUtf8Printable(error));
+        std::printf("Upgraded %d portable transition%s; %lld error%s.\n",
+                    count, count == 1 ? "" : "s",
+                    static_cast<long long>(errors.size()),
+                    errors.size() == 1 ? "" : "s");
+        return errors.isEmpty() ? 0 : 1;
+    }
 
     // Two GUI processes would each open their own CoreAudio stream. A hidden
     // older process can then sound exactly like one deck is playing two tracks

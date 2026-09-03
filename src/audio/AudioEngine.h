@@ -32,6 +32,9 @@ public:
     void handleCue(bool pressed);           // press/hold-preview/release semantics
     void handleHotCue(int i, bool pressed); // hold: play; release: stop + return
     void setTransitionCues(const std::array<double, 8>& seconds);
+    void setTransitionPerformanceSlots(
+        const std::array<double, 8>& startSeconds,
+        const std::array<double, 8>& endSeconds);
     void clearTransitionCues();
     void handleTransitionCue(int i, bool pressed);
     void handleSavedLoop(int i, bool pressed); // same hold/PLAY-latch contract

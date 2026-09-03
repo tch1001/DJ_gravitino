@@ -135,8 +135,9 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
    remains state-based; Tutorial can therefore say “CUSTOM pad 3” instead of
    misleadingly reducing the gesture to its resulting `play` event.
 4. Stop recording → normalize/thin continuous streams → save a typed v1 YAML
-   `.transition`. Semantic hot cues are allocated into a temporary CUSTOM bank
-   without changing permanent per-track cues.
+   `.transition`. Semantic hot cues and saved loops (canonical IN/OUT beats)
+   are allocated together into an isolated temporary CUSTOM bank without
+   changing permanent per-track cues or loop slots.
 5. Replay: user loads the same pair (confirmed catalog binding, encode-tolerant
    structural fingerprint, checked recording ID, or explicit manual confirmation), picks
    a transition, then uses **Perform** to reconstruct the recorded pre-state

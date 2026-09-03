@@ -360,20 +360,26 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     connect(transitionPanel_, &TransitionPanel::transitionEditingEnabled,
             libraryWidget_, &LibraryWidget::setTransitionEditingEnabled);
     connect(transitionPanel_, &TransitionPanel::temporaryCueBankChanged, this,
-            [this](int deck, const QList<double>& seconds,
+            [this](int deck, const QList<double>& startSeconds,
+                   const QList<double>& endSeconds,
                    const QStringList& labels, const QStringList& colors) {
                 if (deck != 0 && deck != 1) return;
                 DeckWidget* widget = deckWidget(deck);
-                if (seconds.isEmpty()) {
+                if (startSeconds.isEmpty()) {
                     widget->clearTemporaryTransitionCues();
                     return;
                 }
-                std::array<double, 8> cueSeconds {
+                std::array<double, 8> slotStarts {
                     -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
-                for (int i = 0; i < 8 && i < seconds.size(); ++i)
-                    cueSeconds[static_cast<std::size_t>(i)] = seconds.at(i);
+                std::array<double, 8> slotEnds {
+                    -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+                for (int i = 0; i < 8 && i < startSeconds.size(); ++i)
+                    slotStarts[static_cast<std::size_t>(i)] =
+                        startSeconds.at(i);
+                for (int i = 0; i < 8 && i < endSeconds.size(); ++i)
+                    slotEnds[static_cast<std::size_t>(i)] = endSeconds.at(i);
                 widget->setTemporaryTransitionCues(
-                    cueSeconds, labels, colors);
+                    slotStarts, slotEnds, labels, colors);
             });
     libraryWidget_->setTransitionEditingEnabled(true);
     connect(transitionPanel_, &TransitionPanel::tutorialViewChanged, this,

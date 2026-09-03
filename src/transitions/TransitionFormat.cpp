@@ -757,6 +757,9 @@ void ensurePortableDefaults(GvtFile& file)
         file.requirements = {QStringLiteral("timeline.v1"),
                              QStringLiteral("temporary-cues.v1")};
     }
+    if (!file.transitionLoops.empty() &&
+        !file.requirements.contains(QStringLiteral("temporary-loops.v1")))
+        file.requirements.append(QStringLiteral("temporary-loops.v1"));
     const auto normalizeRef = [](GvtTrackRef& ref) {
         if (ref.artists.isEmpty() && !ref.artist.isEmpty())
             ref.artists.append(ref.artist);
@@ -826,6 +829,84 @@ QString stableLegacyTransitionId(const GvtFile& file)
     return QStringLiteral("legacy-%1").arg(QString::fromLatin1(digest.left(32)));
 }
 
+int migrateSavedLoopsFromInitialState(GvtFile& file, QStringList* warnings)
+{
+    int migrated = 0;
+    QSet<QString> usedIds;
+    for (const TransitionHotCue& cue : file.transitionCues)
+        usedIds.insert(cue.id);
+    for (const TransitionSavedLoop& loop : file.transitionLoops)
+        usedIds.insert(loop.id);
+
+    for (const Role role : {Role::FromDeck, Role::ToDeck}) {
+        QSet<int> rawPads;
+        for (const GvtEvent& event : file.events) {
+            if (event.role != role || !event.loopId.isEmpty() ||
+                event.control < ControlId::SavedLoop1 ||
+                event.control > ControlId::SavedLoop8)
+                continue;
+            rawPads.insert(static_cast<int>(event.control) -
+                           static_cast<int>(ControlId::SavedLoop1));
+        }
+        if (rawPads.isEmpty()) continue;
+        const QString side = role == Role::FromDeck
+                                 ? QStringLiteral("outgoing")
+                                 : QStringLiteral("incoming");
+        if (rawPads.size() != 1) {
+            if (warnings) warnings->append(QStringLiteral(
+                "%1 uses multiple saved-loop slots; their individual ranges "
+                "cannot be recovered from one initial-state loop")
+                                                .arg(side));
+            continue;
+        }
+        const GvtInitialState& state = role == Role::FromDeck
+                                           ? file.initialFrom : file.initialTo;
+        if (!state.captured || !std::isfinite(state.loopStartBeat) ||
+            !std::isfinite(state.loopEndBeat) ||
+            !(state.loopEndBeat > state.loopStartBeat)) {
+            if (warnings) warnings->append(QStringLiteral(
+                "%1 saved-loop range is absent from the captured initial state")
+                                                .arg(side));
+            continue;
+        }
+        const int pad = *rawPads.constBegin();
+        QString id = QStringLiteral("%1-loop-%2").arg(side).arg(pad + 1);
+        for (int suffix = 2; usedIds.contains(id); ++suffix)
+            id = QStringLiteral("%1-loop-%2-%3")
+                     .arg(side).arg(pad + 1).arg(suffix);
+        usedIds.insert(id);
+
+        TransitionSavedLoop loop;
+        loop.id = id;
+        loop.role = role;
+        loop.startTrackBeat = state.loopStartBeat;
+        loop.endTrackBeat = state.loopEndBeat;
+        loop.label = QStringLiteral("LOOP %1").arg(pad + 1);
+        loop.purpose = QStringLiteral("saved-loop");
+        loop.color = QStringLiteral("#e8a13a");
+        loop.pairingGroup = QStringLiteral("pad-%1").arg(pad + 1);
+        loop.preferredPad = pad;
+        file.transitionLoops.push_back(loop);
+
+        for (GvtEvent& event : file.events) {
+            if (event.role != role ||
+                event.control != static_cast<ControlId>(
+                    static_cast<int>(ControlId::SavedLoop1) + pad))
+                continue;
+            event.loopId = id;
+            event.gestureControl = static_cast<ControlId>(
+                static_cast<int>(ControlId::PerformancePad1) + pad);
+            event.gesturePadMode =
+                static_cast<int>(PerformancePadMode::Sampler);
+        }
+        ++migrated;
+    }
+    if (migrated > 0 &&
+        !file.requirements.contains(QStringLiteral("temporary-loops.v1")))
+        file.requirements.append(QStringLiteral("temporary-loops.v1"));
+    return migrated;
+}
+
 bool transitionParse(const QString& text, GvtFile& out, QString* error,
                      QStringList* warnings)
 {
@@ -881,7 +962,8 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
         file.requirements.append(value.toString().trimmed());
     }
     const QSet<QString> supported {QStringLiteral("timeline.v1"),
-                                    QStringLiteral("temporary-cues.v1")};
+                                    QStringLiteral("temporary-cues.v1"),
+                                    QStringLiteral("temporary-loops.v1")};
     for (const QString& requirement : file.requirements)
         if (!supported.contains(requirement))
             file.unsupportedRequirements.append(requirement);
@@ -932,10 +1014,12 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
         QStringLiteral("initial_state")).toObject();
     if (!performance.value(QStringLiteral("initial_state")).isObject() ||
         !performance.value(QStringLiteral("cues")).isArray() ||
+        (!performance.value(QStringLiteral("loops")).isUndefined() &&
+         !performance.value(QStringLiteral("loops")).isArray()) ||
         !performance.value(QStringLiteral("labels")).isArray() ||
         !performance.value(QStringLiteral("timeline")).isArray()) {
         if (error) *error = QStringLiteral(
-            "performance initial_state/cues/labels/timeline have invalid types");
+            "performance initial_state/cues/loops/labels/timeline have invalid types");
         return false;
     }
     const auto validateInitial = [error](const QJsonObject& state,
@@ -1066,6 +1150,93 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
         return false;
     }
 
+    QSet<QString> loopIds;
+    std::map<QString, Role> loopRoles;
+    int outgoingLoops = 0;
+    int incomingLoops = 0;
+    const QJsonArray transitionLoops = performance.value(
+        QStringLiteral("loops")).toArray();
+    for (const QJsonValue& value : transitionLoops) {
+        if (!value.isObject()) {
+            if (error) *error = QStringLiteral(
+                "performance.loops entries must be mappings");
+            return false;
+        }
+        const QJsonObject item = value.toObject();
+        TransitionSavedLoop loop;
+        loop.id = stringAt(item, "id").trimmed();
+        if (loop.id.isEmpty() || cueIds.contains(loop.id) ||
+            loopIds.contains(loop.id)) {
+            if (error) *error = QStringLiteral(
+                "transition cue and loop IDs must be non-empty and unique");
+            return false;
+        }
+        loopIds.insert(loop.id);
+        if (!parseRole(stringAt(item, "endpoint"), loop.role) ||
+            loop.role == Role::Mixer) {
+            if (error) *error = QStringLiteral(
+                "transition loop '%1' has an invalid endpoint").arg(loop.id);
+            return false;
+        }
+        const QString loopPath = QStringLiteral("performance.loops[%1]")
+                                     .arg(file.transitionLoops.size());
+        if (!finiteField(item, "start_track_beat", -1000000.0, 1000000.0,
+                         true, loopPath, error) ||
+            !finiteField(item, "end_track_beat", -1000000.0, 1000000.0,
+                         true, loopPath, error))
+            return false;
+        loop.startTrackBeat = numberAt(item, "start_track_beat");
+        loop.endTrackBeat = numberAt(item, "end_track_beat");
+        if (!(loop.endTrackBeat > loop.startTrackBeat)) {
+            if (error) *error = QStringLiteral(
+                "transition loop '%1' must end after it starts").arg(loop.id);
+            return false;
+        }
+        loop.label = stringAt(item, "label");
+        loop.purpose = stringAt(item, "purpose");
+        loop.color = stringAt(item, "color");
+        loop.pairingGroup = stringAt(item, "pairing_group");
+        const QJsonObject input = item.value(
+            QStringLiteral("preferred_input")).toObject();
+        loop.preferredBank = stringAt(input, "bank");
+        if (loop.preferredBank.isEmpty())
+            loop.preferredBank = QStringLiteral("custom");
+        if (loop.preferredBank != QLatin1String("custom")) {
+            if (error) *error = QStringLiteral(
+                "transition loop '%1' requests an unsupported bank")
+                                    .arg(loop.id);
+            return false;
+        }
+        const QJsonValue padValue = input.value(QStringLiteral("pad"));
+        if (!padValue.isUndefined() &&
+            (!padValue.isDouble() || std::floor(padValue.toDouble()) !=
+                                         padValue.toDouble() ||
+             padValue.toDouble() < 1.0 || padValue.toDouble() > 8.0)) {
+            if (error) *error = QStringLiteral(
+                "transition loop '%1' preferred pad must be 1 through 8")
+                                    .arg(loop.id);
+            return false;
+        }
+        loop.preferredPad = padValue.isUndefined()
+                                ? -1 : static_cast<int>(padValue.toDouble()) - 1;
+        loop.preferredKey = stringAt(input, "key");
+        loop.inputExtraYaml = without(input, {"bank", "pad", "key"});
+        loop.extraYaml = without(item,
+            {"id", "endpoint", "start_track_beat", "end_track_beat",
+             "label", "purpose", "color", "pairing_group",
+             "preferred_input"});
+        if (loop.role == Role::FromDeck) ++outgoingLoops;
+        else ++incomingLoops;
+        loopRoles.emplace(loop.id, loop.role);
+        file.transitionLoops.push_back(loop);
+    }
+    if (outgoingCues + outgoingLoops > 8 ||
+        incomingCues + incomingLoops > 8) {
+        if (error) *error = QStringLiteral(
+            "v1 supports at most eight temporary cues and loops per endpoint");
+        return false;
+    }
+
     const QJsonArray labels = performance.value(QStringLiteral("labels")).toArray();
     if (labels.size() > kMaximumLabels) {
         if (error) *error = QStringLiteral("too many transition labels");
@@ -1115,7 +1286,9 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
         const QString controlNameText = stringAt(item, "control");
         const bool semanticCueControl =
             controlNameText == QLatin1String("deck.transition_cue");
-        if (semanticCueControl) {
+        const bool semanticLoopControl =
+            controlNameText == QLatin1String("deck.transition_loop");
+        if (semanticCueControl || semanticLoopControl) {
             event.control = ControlId::TransitionCue1;
         } else if (!parsePortableControl(controlNameText, event.control)) {
             if (error) *error = QStringLiteral(
@@ -1127,7 +1300,7 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
                                            : QStringLiteral("deck.");
         if (!controlNameText.startsWith(expectedPrefix) ||
             !portableTimelineControlAllowed(event.control) ||
-            (!semanticCueControl &&
+            (!semanticCueControl && !semanticLoopControl &&
              event.control >= ControlId::TransitionCue1 &&
              event.control <= ControlId::TransitionCue8) ||
             (event.role == Role::Mixer &&
@@ -1151,6 +1324,13 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
             return false;
         }
         event.cueId = stringAt(item, "cue_id").trimmed();
+        event.loopId = stringAt(item, "loop_id").trimmed();
+        if (!event.cueId.isEmpty() && !event.loopId.isEmpty()) {
+            if (error) *error = QStringLiteral(
+                "timeline event %1 cannot reference both a cue and a loop")
+                                    .arg(i + 1);
+            return false;
+        }
         if (!event.cueId.isEmpty() && !cueIds.contains(event.cueId)) {
             if (error) *error = QStringLiteral("timeline event %1 refers to unknown cue '%2'")
                                     .arg(i + 1).arg(event.cueId);
@@ -1162,9 +1342,27 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
                                     .arg(i + 1);
             return false;
         }
+        if (!event.loopId.isEmpty() && !loopIds.contains(event.loopId)) {
+            if (error) *error = QStringLiteral(
+                "timeline event %1 refers to unknown loop '%2'")
+                                    .arg(i + 1).arg(event.loopId);
+            return false;
+        }
+        if (semanticLoopControl && event.loopId.isEmpty()) {
+            if (error) *error = QStringLiteral(
+                "timeline event %1 needs loop_id for deck.transition_loop")
+                                    .arg(i + 1);
+            return false;
+        }
         if (!event.cueId.isEmpty() && cueRoles[event.cueId] != event.role) {
             if (error) *error = QStringLiteral(
                 "timeline event %1 cue belongs to the other endpoint")
+                                    .arg(i + 1);
+            return false;
+        }
+        if (!event.loopId.isEmpty() && loopRoles[event.loopId] != event.role) {
+            if (error) *error = QStringLiteral(
+                "timeline event %1 loop belongs to the other endpoint")
                                     .arg(i + 1);
             return false;
         }
@@ -1175,6 +1373,16 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
               event.control <= ControlId::TransitionCue8)) {
             if (error) *error = QStringLiteral(
                 "timeline event %1 attaches cue_id to a non-cue control")
+                                    .arg(i + 1);
+            return false;
+        }
+        if (!event.loopId.isEmpty() && !semanticLoopControl &&
+            !(event.control >= ControlId::SavedLoop1 &&
+              event.control <= ControlId::SavedLoop8) &&
+            !(event.control >= ControlId::TransitionCue1 &&
+              event.control <= ControlId::TransitionCue8)) {
+            if (error) *error = QStringLiteral(
+                "timeline event %1 attaches loop_id to a non-loop control")
                                     .arg(i + 1);
             return false;
         }
@@ -1206,8 +1414,14 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
         }
         event.extraYaml = without(item,
             {"at_beat", "target", "control", "value", "curve", "cue_id",
-             "input_hint"});
+             "loop_id", "input_hint"});
         file.events.push_back(event);
+    }
+    if (!file.transitionLoops.empty() &&
+        !file.requirements.contains(QStringLiteral("temporary-loops.v1"))) {
+        if (error) *error = QStringLiteral(
+            "performance.loops requires capability temporary-loops.v1");
+        return false;
     }
     std::stable_sort(file.events.begin(), file.events.end(),
                      [](const GvtEvent& a, const GvtEvent& b) {
@@ -1219,7 +1433,8 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
                      });
 
     file.performanceExtraYaml = without(performance,
-        {"master_bpm", "anchors", "initial_state", "cues", "labels", "timeline"});
+        {"master_bpm", "anchors", "initial_state", "cues", "loops",
+         "labels", "timeline"});
     file.extensions = root.value(QStringLiteral("extensions")).toObject();
     file.legacySourceId = file.extensions
         .value(QStringLiteral("gravitino.legacy"))
@@ -1300,6 +1515,30 @@ QString transitionSerialize(const GvtFile& source)
     }
     performance.insert(QStringLiteral("cues"), cueArray);
 
+    QJsonArray loopArray;
+    for (const TransitionSavedLoop& loop : file.transitionLoops) {
+        QJsonObject item = loop.extraYaml;
+        item.insert(QStringLiteral("id"), loop.id);
+        item.insert(QStringLiteral("endpoint"), roleName(loop.role));
+        item.insert(QStringLiteral("start_track_beat"), loop.startTrackBeat);
+        item.insert(QStringLiteral("end_track_beat"), loop.endTrackBeat);
+        setIfText(item, QStringLiteral("label"), loop.label);
+        setIfText(item, QStringLiteral("purpose"), loop.purpose);
+        setIfText(item, QStringLiteral("color"), loop.color);
+        setIfText(item, QStringLiteral("pairing_group"), loop.pairingGroup);
+        QJsonObject input = loop.inputExtraYaml;
+        input.insert(QStringLiteral("bank"),
+                     loop.preferredBank.isEmpty() ? QStringLiteral("custom")
+                                                  : loop.preferredBank);
+        if (loop.preferredPad >= 0)
+            input.insert(QStringLiteral("pad"), loop.preferredPad + 1);
+        else input.remove(QStringLiteral("pad"));
+        setIfText(input, QStringLiteral("key"), loop.preferredKey);
+        item.insert(QStringLiteral("preferred_input"), input);
+        loopArray.append(item);
+    }
+    performance.insert(QStringLiteral("loops"), loopArray);
+
     QJsonArray labels;
     for (const GvtCue& cue : file.cues) {
         QJsonObject item = cue.extraYaml;
@@ -1314,12 +1553,15 @@ QString transitionSerialize(const GvtFile& source)
         QJsonObject item = event.extraYaml;
         item.insert(QStringLiteral("at_beat"), event.beat);
         item.insert(QStringLiteral("target"), roleName(event.role));
-        item.insert(QStringLiteral("control"), event.cueId.isEmpty()
-            ? portableControlName(event.control, event.role)
-            : QStringLiteral("deck.transition_cue"));
+        item.insert(QStringLiteral("control"), !event.loopId.isEmpty()
+            ? QStringLiteral("deck.transition_loop")
+            : (!event.cueId.isEmpty()
+                   ? QStringLiteral("deck.transition_cue")
+                   : portableControlName(event.control, event.role)));
         item.insert(QStringLiteral("value"), event.value);
         item.insert(QStringLiteral("curve"), curveNamePortable(event.curve));
         setIfText(item, QStringLiteral("cue_id"), event.cueId);
+        setIfText(item, QStringLiteral("loop_id"), event.loopId);
         if (event.gestureControl != ControlId::Count) {
             QJsonObject input = event.inputExtraYaml;
             input.insert(QStringLiteral("control"),
@@ -1406,20 +1648,57 @@ std::array<const TransitionHotCue*, 8>
 transitionCueSlots(const GvtFile& file, Role role)
 {
     std::array<const TransitionHotCue*, 8> cueSlots {};
+    const auto performanceSlots = transitionPerformanceSlots(file, role);
+    for (std::size_t index = 0; index < cueSlots.size(); ++index)
+        cueSlots[index] = performanceSlots[index].cue;
+    return cueSlots;
+}
+
+std::array<TransitionPerformanceSlot, 8>
+transitionPerformanceSlots(const GvtFile& file, Role role)
+{
+    std::array<TransitionPerformanceSlot, 8> allocated {};
+    const auto occupied = [&allocated](int pad) {
+        const TransitionPerformanceSlot& slot =
+            allocated[static_cast<std::size_t>(pad)];
+        return slot.cue || slot.loop;
+    };
+    const auto cueAllocated = [&allocated](const TransitionHotCue* cue) {
+        return std::any_of(allocated.begin(), allocated.end(), [cue](const auto& slot) {
+            return slot.cue == cue;
+        });
+    };
+    const auto loopAllocated = [&allocated](const TransitionSavedLoop* loop) {
+        return std::any_of(allocated.begin(), allocated.end(), [loop](const auto& slot) {
+            return slot.loop == loop;
+        });
+    };
+
     for (const TransitionHotCue& cue : file.transitionCues) {
         if (cue.role != role || cue.preferredPad < 0 || cue.preferredPad >= 8 ||
-            cueSlots[static_cast<std::size_t>(cue.preferredPad)])
+            occupied(cue.preferredPad))
             continue;
-        cueSlots[static_cast<std::size_t>(cue.preferredPad)] = &cue;
+        allocated[static_cast<std::size_t>(cue.preferredPad)].cue = &cue;
+    }
+    for (const TransitionSavedLoop& loop : file.transitionLoops) {
+        if (loop.role != role || loop.preferredPad < 0 ||
+            loop.preferredPad >= 8 || occupied(loop.preferredPad))
+            continue;
+        allocated[static_cast<std::size_t>(loop.preferredPad)].loop = &loop;
     }
     for (const TransitionHotCue& cue : file.transitionCues) {
-        if (cue.role != role ||
-            std::find(cueSlots.begin(), cueSlots.end(), &cue) != cueSlots.end())
-            continue;
-        const auto free = std::find(cueSlots.begin(), cueSlots.end(), nullptr);
-        if (free != cueSlots.end()) *free = &cue;
+        if (cue.role != role || cueAllocated(&cue)) continue;
+        const auto free = std::find_if(allocated.begin(), allocated.end(),
+            [](const auto& slot) { return !slot.cue && !slot.loop; });
+        if (free != allocated.end()) free->cue = &cue;
     }
-    return cueSlots;
+    for (const TransitionSavedLoop& loop : file.transitionLoops) {
+        if (loop.role != role || loopAllocated(&loop)) continue;
+        const auto free = std::find_if(allocated.begin(), allocated.end(),
+            [](const auto& slot) { return !slot.cue && !slot.loop; });
+        if (free != allocated.end()) free->loop = &loop;
+    }
+    return allocated;
 }
 
 double transitionBeatAtSec(const GvtFile& file, const TrackData& track,

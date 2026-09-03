@@ -31,6 +31,9 @@ struct GvtEvent {
     // Portable files can address a semantic transition-owned cue instead of
     // baking a physical pad number into the musical timeline.
     QString   cueId;
+    // Saved loops use the same temporary CUSTOM bank as transition cues, but
+    // carry their own semantic ID and an IN/OUT range in the document.
+    QString   loopId;
     QJsonObject extraYaml;
     QJsonObject inputExtraYaml;
 };
@@ -115,6 +118,30 @@ struct TransitionHotCue {
     QJsonObject inputExtraYaml;
 };
 
+struct TransitionSavedLoop {
+    QString id;
+    Role role = Role::FromDeck;
+    double startTrackBeat = 0.0;
+    double endTrackBeat = 0.0;
+    QString label;
+    QString purpose;
+    QString color;
+    QString pairingGroup;
+    QString preferredBank = QStringLiteral("custom");
+    int preferredPad = -1; // zero based; -1 lets the host allocate a slot
+    QString preferredKey;
+    QJsonObject extraYaml;
+    QJsonObject inputExtraYaml;
+};
+
+// One allocated entry in the isolated, transition-owned CUSTOM bank. A slot
+// contains exactly one cue or saved loop; permanent track metadata is never
+// consulted or mutated when this bank is active.
+struct TransitionPerformanceSlot {
+    const TransitionHotCue* cue = nullptr;
+    const TransitionSavedLoop* loop = nullptr;
+};
+
 enum class TransitionSourceFormat : uint8_t { Unsaved, LegacyGvt, PortableYaml };
 
 // Missing hot-cue mappings need a non-numeric sentinel because valid beat
@@ -161,6 +188,9 @@ struct GvtFile {
     // Transition-owned performance cues. These are loaded into the temporary
     // CUSTOM bank and never replace a track's permanent hot cues.
     std::vector<TransitionHotCue> transitionCues;
+    // Transition-owned saved loops, also allocated into the temporary CUSTOM
+    // bank. Their canonical beat ranges survive changes to track loop slots.
+    std::vector<TransitionSavedLoop> transitionLoops;
     // [events], sorted by beat
     std::vector<GvtEvent> events;
 
@@ -208,8 +238,15 @@ bool loadTransitionFile(const QString& path, GvtFile& out, QString* error,
                         QStringList* warnings = nullptr);
 bool saveTransitionFile(const GvtFile& f, const QString& path, QString* error);
 QString stableLegacyTransitionId(const GvtFile& f);
+// Upgrade raw saved-loop pad events when a legacy recording captured exactly
+// one loop slot for that endpoint and its initial snapshot contains the loop
+// range. Returns the number of semantic loop definitions added.
+int migrateSavedLoopsFromInitialState(GvtFile& file,
+                                      QStringList* warnings = nullptr);
 std::array<const TransitionHotCue*, 8>
 transitionCueSlots(const GvtFile& file, Role role);
+std::array<TransitionPerformanceSlot, 8>
+transitionPerformanceSlots(const GvtFile& file, Role role);
 // Portable coordinates are canonical arrangement beats. Legacy coordinates
 // remain tied to the original analyzed grid for permanent compatibility.
 double transitionBeatAtSec(const GvtFile& file, const struct TrackData& track,

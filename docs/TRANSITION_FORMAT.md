@@ -3,8 +3,8 @@
 A transition is a directed, reusable performance edge between two canonical
 song arrangements: `outgoing → incoming`. The file contains no copyrighted
 audio. Instead it describes which arrangements it expects, the musical beat
-coordinates used by the author, transition-owned cues, initial state, labels,
-and the exact control timeline.
+coordinates used by the author, transition-owned cues and saved loops, initial
+state, labels, and the exact control timeline.
 
 New recordings are one UTF-8 YAML document with the extension `.transition`.
 Legacy `.gvt` files remain readable indefinitely; editing or converting one
@@ -51,6 +51,7 @@ metadata:
 requires:
   - "timeline.v1"
   - "temporary-cues.v1"
+  - "temporary-loops.v1"
 
 endpoints:
   outgoing:
@@ -156,6 +157,16 @@ performance:
       color: "#55b9df"
       pairing_group: "launch"
       preferred_input: {bank: "custom", pad: 3, key: "3"}
+  loops:
+    - id: "incoming-intro-loop"
+      endpoint: "incoming"
+      start_track_beat: 96.125
+      end_track_beat: 104.125
+      label: "Intro loop"
+      purpose: "saved-loop"
+      color: "#e8a13a"
+      pairing_group: "intro"
+      preferred_input: {bank: "custom", pad: 5, key: "5"}
   labels:
     - at_beat: 0.0
       label: "Start beatmatch"
@@ -181,6 +192,15 @@ performance:
       value: 0.0
       curve: "step"
     - at_beat: 16.625
+      target: "incoming"
+      control: "deck.transition_loop"
+      loop_id: "incoming-intro-loop"
+      value: 1.0
+      curve: "step"
+      input_hint:
+        control: "host.performance_pad_5"
+        pad_mode: "custom"
+    - at_beat: 24.625
       target: "mixer"
       control: "mixer.xfader"
       value: 1.0
@@ -227,19 +247,27 @@ rebuilt by scanning `.transition` and `.gvt`, so rename/delete cannot leave an
 authoritative stale edge. Missing asset paths remain local history but are not
 offered for loading.
 
-## Transition-owned cues
+## Transition-owned cues and saved loops
 
 Timeline events refer to stable semantic `cue_id` values, not serialized pad
 numbers. Each cue declares an endpoint and canonical track beat, with optional
 label, purpose, teaching color, pairing group, and preferred key/pad. A shared
 pairing group lets outgoing and incoming cues use the same teaching color.
 
-On selection/replay, Gravitino allocates at most eight cues per endpoint in an
-isolated temporary `CUSTOM` bank. Preferred controls are hints; the host owns
-the actual controller mapping. Permanent per-track hot cues are never replaced
-or saved over. Clearing/changing the selected transition restores the normal
-CUSTOM bank. More than eight cues, an unknown cue reference, or an unsupported
-bank is a validation error rather than a silent truncation.
+Saved-loop timeline events likewise refer to stable semantic `loop_id` values.
+Each loop owns canonical `start_track_beat` and `end_track_beat` coordinates,
+so changing or losing the song's permanent saved-loop slots cannot change the
+transition. Labels, purpose, color, pairing group, and preferred input use the
+same optional teaching metadata as cues.
+
+On selection/replay, Gravitino allocates at most eight cues and saved loops
+combined per endpoint in an isolated temporary `CUSTOM` bank. Preferred
+controls are hints; collisions are assigned another free pad and the host owns
+the actual controller mapping. Permanent per-track hot cues and saved loops are
+never replaced or saved over. Clearing/changing the selected transition
+restores the normal CUSTOM bank. More than eight combined entries, an unknown
+semantic reference, an invalid loop range, or an unsupported bank is a
+validation error rather than a silent truncation.
 
 ## Timeline semantics
 
@@ -248,7 +276,8 @@ role (`outgoing`, `incoming`, or `mixer`), never a physical deck number.
 Controls use stable namespaces. Current portable timeline controls are:
 
 - Deck transport/state: `deck.play`, `deck.stop`, `deck.cue`,
-  `deck.tempo_sync`, `deck.quantize`, `deck.transition_cue`.
+  `deck.tempo_sync`, `deck.quantize`, `deck.transition_cue`, and
+  `deck.transition_loop`.
 - Deck movement: `deck.tempo` (ratio `0.01..4`), `deck.fader`,
   `deck.eq_low`, `deck.eq_mid`, `deck.eq_high`, `deck.filter` (`0..1`).
 - Loops/jumps: `deck.loop_in`, `deck.loop_out`, `deck.loop_exit`,
@@ -272,8 +301,9 @@ playback dependency.
 ## Compatibility and safe parsing
 
 `requires` declares semantics necessary for correct playback. This build
-supports `timeline.v1` and `temporary-cues.v1`. Unknown required capabilities
-allow inspection but block Perform/Tutorial with a clear compatibility error.
+supports `timeline.v1`, `temporary-cues.v1`, and `temporary-loops.v1`. Unknown
+required capabilities allow inspection but block Perform/Tutorial with a clear
+compatibility error.
 
 Additive optional fields may be introduced within version 1. Unknown mapping
 fields and namespaced `extensions` are preserved at their containing level on
@@ -287,7 +317,7 @@ The reader accepts a deliberately safe YAML subset:
 - no aliases, anchors, custom tags, merge keys, duplicate mapping keys, or NUL;
 - scalar mapping keys only;
 - finite, bounded numeric fields and validated roles, controls, curves,
-  cue references, pad slots, and control values.
+  cue/loop references, loop ranges, combined pad limits, and control values.
 
 Malformed known fields fail the document rather than being guessed. Unknown
 timeline controls also fail: a future producer must pair new behavior with an
@@ -309,4 +339,7 @@ Scanning keeps both source files available as distinct rows so they can be
 compared with the Transitions tab's `.gvt` and `.transition` filters. The link
 still makes bulk conversion idempotent. `gravitino --convert-transitions`
 creates only missing portable counterparts and always leaves each `.gvt`
-intact.
+intact. `gravitino --upgrade-transition-loops` can promote an older portable
+copy that contains one raw saved-loop slot per endpoint when its complete
+initial snapshot contains the corresponding IN/OUT range. Ambiguous or absent
+ranges are reported and left untouched.

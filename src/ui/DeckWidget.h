@@ -94,9 +94,10 @@ public:
     void setTransitionEntry(double sec);
     void setTransitionCues(const QList<double>& seconds,
                            const QStringList& labels);
-    void setTemporaryTransitionCues(const std::array<double, 8>& seconds,
-                                    const QStringList& labels,
-                                    const QStringList& colors);
+    void setTemporaryTransitionCues(
+        const std::array<double, 8>& startSeconds,
+        const std::array<double, 8>& endSeconds,
+        const QStringList& labels, const QStringList& colors);
     void clearTemporaryTransitionCues();
 
     // Selects the virtual performance-pad layer. Hardware integration can
@@ -199,6 +200,8 @@ private:
     std::array<bool, kPerformancePadCount> padReleasePending_ {};
     bool temporaryTransitionCuesActive_ = false;
     std::array<double, kPerformancePadCount> temporaryTransitionCueSecs_ {
+        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+    std::array<double, kPerformancePadCount> temporaryTransitionLoopEndSecs_ {
         -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
     QStringList temporaryTransitionCueLabels_;
     QStringList temporaryTransitionCueColors_;

@@ -126,6 +126,7 @@ GvtFile migratedPortableCopy(const GvtFile& source)
         .value(QStringLiteral("gravitino.legacy")).toObject();
     legacy.insert(QStringLiteral("source_id"), portable.legacySourceId);
     portable.extensions.insert(QStringLiteral("gravitino.legacy"), legacy);
+    migrateSavedLoopsFromInitialState(portable);
     return portable;
 }
 
@@ -315,6 +316,38 @@ int TransitionStore::convertAllLegacy(QStringList* convertedPaths,
     }
     if (converted > 0) reload();
     return converted;
+}
+
+int TransitionStore::upgradePortableSavedLoops(QStringList* upgradedPaths,
+                                                QStringList* errors)
+{
+    int upgraded = 0;
+    const std::vector<GvtFile> snapshot = impl_->files;
+    for (GvtFile file : snapshot) {
+        if (file.sourceFormat != TransitionSourceFormat::PortableYaml)
+            continue;
+        QStringList warnings;
+        const int loopCount = migrateSavedLoopsFromInitialState(file, &warnings);
+        if (loopCount == 0) {
+            for (const QString& warning : warnings)
+                if (errors) errors->append(
+                    QStringLiteral("%1: %2").arg(file.filePath, warning));
+            continue;
+        }
+        QString error;
+        if (!transitionSaveFile(file, file.filePath, &error)) {
+            if (errors) errors->append(
+                QStringLiteral("%1: %2").arg(file.filePath, error));
+            continue;
+        }
+        if (upgradedPaths) upgradedPaths->append(file.filePath);
+        for (const QString& warning : warnings)
+            if (errors) errors->append(
+                QStringLiteral("%1: %2").arg(file.filePath, warning));
+        ++upgraded;
+    }
+    if (upgraded > 0) reload();
+    return upgraded;
 }
 
 QString TransitionStore::save(GvtFile& f, QString* error)

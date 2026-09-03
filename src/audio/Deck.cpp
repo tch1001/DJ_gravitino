@@ -116,6 +116,8 @@ struct Deck::Impl {
     std::atomic<double> hotCuePreviewSec { -1.0 };
     std::array<double, 8> transitionCueSecs {
         -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
+    std::array<double, 8> transitionLoopEndSecs {
+        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
     std::atomic<int> savedLoopPreviewIndex { -1 };
     std::atomic<double> savedLoopPreviewSec { -1.0 };
     double jogRatio = 0.0; // Audio-thread-owned after a safe track swap.
@@ -191,6 +193,7 @@ void Deck::loadTrack(TrackDataPtr track)
     impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
     impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
     impl_->transitionCueSecs.fill(-1.0);
+    impl_->transitionLoopEndSecs.fill(-1.0);
     impl_->savedLoopPreviewIndex.store(-1, std::memory_order_release);
     impl_->savedLoopPreviewSec.store(-1.0, std::memory_order_release);
     channelLevel.store(0.0f, std::memory_order_release);
@@ -406,16 +409,66 @@ void Deck::handleHotCue(int index, bool pressed)
 void Deck::setTransitionCues(const std::array<double, 8>& seconds)
 {
     impl_->transitionCueSecs = seconds;
+    impl_->transitionLoopEndSecs.fill(-1.0);
+}
+
+void Deck::setTransitionPerformanceSlots(
+    const std::array<double, 8>& startSeconds,
+    const std::array<double, 8>& endSeconds)
+{
+    impl_->transitionCueSecs = startSeconds;
+    impl_->transitionLoopEndSecs = endSeconds;
 }
 
 void Deck::clearTransitionCues()
 {
     impl_->transitionCueSecs.fill(-1.0);
+    impl_->transitionLoopEndSecs.fill(-1.0);
 }
 
 void Deck::handleTransitionCue(int index, bool pressed)
 {
     if (index < 0 || index >= 8 || !track()) return;
+    const double startSec =
+        impl_->transitionCueSecs[static_cast<std::size_t>(index)];
+    const double endSec =
+        impl_->transitionLoopEndSecs[static_cast<std::size_t>(index)];
+    const bool savedLoop = std::isfinite(startSec) && startSec >= 0.0 &&
+                           std::isfinite(endSec) && endSec > startSec;
+    if (savedLoop) {
+        if (!pressed) {
+            if (impl_->savedLoopPreviewIndex.exchange(
+                    -1, std::memory_order_acq_rel) != index)
+                return;
+            const double returnSec = impl_->savedLoopPreviewSec.exchange(
+                -1.0, std::memory_order_acq_rel);
+            stop();
+            if (std::isfinite(returnSec) && returnSec >= 0.0)
+                seekSec(returnSec);
+            return;
+        }
+
+        const bool alreadyPlaying =
+            playing.load(std::memory_order_acquire) && !previewActive();
+        if (alreadyPlaying) {
+            impl_->cuePreviewing.store(false, std::memory_order_release);
+            impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
+            impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
+            impl_->savedLoopPreviewIndex.store(-1, std::memory_order_release);
+            impl_->savedLoopPreviewSec.store(-1.0, std::memory_order_release);
+            armSavedLoop(startSec, endSec);
+            return;
+        }
+        if (!activateSavedLoop(startSec, endSec)) return;
+        impl_->cuePreviewing.store(false, std::memory_order_release);
+        impl_->hotCuePreviewIndex.store(-1, std::memory_order_release);
+        impl_->hotCuePreviewSec.store(-1.0, std::memory_order_release);
+        impl_->savedLoopPreviewIndex.store(index, std::memory_order_release);
+        impl_->savedLoopPreviewSec.store(startSec, std::memory_order_release);
+        seekSec(startSec);
+        startPlayback(false);
+        return;
+    }
     if (!pressed) {
         if (impl_->hotCuePreviewIndex.exchange(
                 -1, std::memory_order_acq_rel) != index)
@@ -427,8 +480,7 @@ void Deck::handleTransitionCue(int index, bool pressed)
         return;
     }
 
-    const double cueSec =
-        impl_->transitionCueSecs[static_cast<std::size_t>(index)];
+    const double cueSec = startSec;
     if (!std::isfinite(cueSec) || cueSec < 0.0) return;
     impl_->savedLoopPreviewIndex.store(-1, std::memory_order_release);
     impl_->savedLoopPreviewSec.store(-1.0, std::memory_order_release);
