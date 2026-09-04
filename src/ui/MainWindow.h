@@ -25,6 +25,7 @@ class DetailWaveformView;
 class MixerWidget;
 class LibraryWidget;
 class TransitionPanel;
+class TransitionEditorWindow;
 class PickupFuzzOverlay;
 class SetupMismatchOverlay;
 
@@ -80,6 +81,7 @@ private:
     MixerWidget* mixer_ = nullptr;
     LibraryWidget* libraryWidget_ = nullptr;
     TransitionPanel* transitionPanel_ = nullptr;
+    TransitionEditorWindow* transitionEditor_ = nullptr;
     QSplitter* lowerWorkspaceSplitter_ = nullptr;
     QSplitter* lowerSplitter_ = nullptr;
     QPushButton* libraryToggleBtn_ = nullptr;

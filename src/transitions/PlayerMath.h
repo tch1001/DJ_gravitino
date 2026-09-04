@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <functional>
 #include <vector>
+#include "../analysis/TrackData.h"
 #include "Transition.h"
 
 namespace gvt {
@@ -81,6 +82,30 @@ inline double glideValueAt(const ScheduledEvent& s, double rel) {
     if (s.e.beat <= s.startBeat) return s.e.value;
     const double t = (rel - s.startBeat) / (s.e.beat - s.startBeat);
     return curveValue(s.e.curve, t, s.startValue, s.e.value);
+}
+
+// Preserve the effective BPM authored by a transition when the compatible
+// local asset has since received a corrected beat grid. Portable coordinates
+// remain canonical; only the engine-facing tempo ratio changes.
+inline double transitionReplayTempoRatio(
+    const GvtInitialState& state, const GvtTrackRef& recorded,
+    const TrackDataPtr& loaded, double fallbackBpm = 0.0) {
+    if (!loaded || loaded->bpm <= 0.0) return state.tempoRatio;
+    const double effectiveBpm = fallbackBpm > 0.0
+                                    ? fallbackBpm
+                                    : recorded.bpm * state.tempoRatio;
+    return effectiveBpm > 0.0 ? effectiveBpm / loaded->bpm
+                              : state.tempoRatio;
+}
+
+inline double transitionReplayTempoEvent(
+    double recordedRatio, const GvtTrackRef& recorded,
+    const TrackDataPtr& loaded) {
+    if (!loaded || loaded->bpm <= 0.0 || recorded.bpm <= 0.0)
+        return recordedRatio;
+    const double recordedEffectiveBpm = recorded.bpm * recordedRatio;
+    return recordedEffectiveBpm > 0.0
+               ? recordedEffectiveBpm / loaded->bpm : recordedRatio;
 }
 
 } // namespace gvt

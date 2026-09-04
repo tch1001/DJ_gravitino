@@ -132,6 +132,7 @@ struct TransitionPlayer::Impl {
     int        fromDeck = 0, toDeck = 1;
     double     anchorFrom = 0.0;
     double     totalBeats = 0.0;
+    double     completionBeat = 0.0;
     bool       preStateTransportApplied = false;
     ControlId  incomingPreviewControl = ControlId::Count;
 

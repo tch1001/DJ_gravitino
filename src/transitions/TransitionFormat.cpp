@@ -760,6 +760,9 @@ void ensurePortableDefaults(GvtFile& file)
     if (!file.transitionLoops.empty() &&
         !file.requirements.contains(QStringLiteral("temporary-loops.v1")))
         file.requirements.append(QStringLiteral("temporary-loops.v1"));
+    if (file.endBeat.has_value() &&
+        !file.requirements.contains(QStringLiteral("timeline-end.v1")))
+        file.requirements.append(QStringLiteral("timeline-end.v1"));
     const auto normalizeRef = [](GvtTrackRef& ref) {
         if (ref.artists.isEmpty() && !ref.artist.isEmpty())
             ref.artists.append(ref.artist);
@@ -963,7 +966,8 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
     }
     const QSet<QString> supported {QStringLiteral("timeline.v1"),
                                     QStringLiteral("temporary-cues.v1"),
-                                    QStringLiteral("temporary-loops.v1")};
+                                    QStringLiteral("temporary-loops.v1"),
+                                    QStringLiteral("timeline-end.v1")};
     for (const QString& requirement : file.requirements)
         if (!supported.contains(requirement))
             file.unsupportedRequirements.append(requirement);
@@ -990,6 +994,19 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
                      QStringLiteral("performance"), error))
         return false;
     file.masterBpm = numberAt(performance, "master_bpm");
+    const QJsonValue endBeatValue = performance.value(
+        QStringLiteral("end_beat"));
+    if (!endBeatValue.isUndefined()) {
+        if (!endBeatValue.isDouble() ||
+            !std::isfinite(endBeatValue.toDouble()) ||
+            endBeatValue.toDouble() < 0.0 ||
+            endBeatValue.toDouble() > 1000000.0) {
+            if (error) *error = QStringLiteral(
+                "performance.end_beat must be a finite nonnegative beat");
+            return false;
+        }
+        file.endBeat = endBeatValue.toDouble();
+    }
     const QJsonObject anchors = performance.value(QStringLiteral("anchors")).toObject();
     if (!anchors.value(QStringLiteral("outgoing")).isObject() ||
         !anchors.value(QStringLiteral("incoming")).isObject() ||
@@ -1432,8 +1449,26 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
                          return a.beat < b.beat;
                      });
 
+    if (file.endBeat.has_value()) {
+        double latestBeat = 0.0;
+        for (const GvtEvent& event : file.events)
+            latestBeat = std::max(latestBeat, event.beat);
+        for (const GvtCue& cue : file.cues)
+            latestBeat = std::max(latestBeat, cue.beat);
+        if (*file.endBeat < latestBeat) {
+            if (error) *error = QStringLiteral(
+                "performance.end_beat cannot be before a timeline event or label");
+            return false;
+        }
+        if (!file.requirements.contains(QStringLiteral("timeline-end.v1"))) {
+            if (error) *error = QStringLiteral(
+                "performance.end_beat requires capability timeline-end.v1");
+            return false;
+        }
+    }
+
     file.performanceExtraYaml = without(performance,
-        {"master_bpm", "anchors", "initial_state", "cues", "loops",
+        {"master_bpm", "end_beat", "anchors", "initial_state", "cues", "loops",
          "labels", "timeline"});
     file.extensions = root.value(QStringLiteral("extensions")).toObject();
     file.legacySourceId = file.extensions
@@ -1473,6 +1508,10 @@ QString transitionSerialize(const GvtFile& source)
 
     QJsonObject performance = file.performanceExtraYaml;
     performance.insert(QStringLiteral("master_bpm"), file.masterBpm);
+    if (file.endBeat.has_value())
+        performance.insert(QStringLiteral("end_beat"), *file.endBeat);
+    else
+        performance.remove(QStringLiteral("end_beat"));
     QJsonObject anchors = file.anchorsExtraYaml;
     QJsonObject outgoingAnchor = file.outgoingAnchorExtraYaml;
     outgoingAnchor.insert(QStringLiteral("track_beat"), file.anchorFromBeat);

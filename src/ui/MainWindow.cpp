@@ -8,6 +8,7 @@
 #include "SoftTakeoverOverlay.h"
 #include "Theme.h"
 #include "TransitionPanel.h"
+#include "TransitionEditor.h"
 #include "../analysis/BeatGridEditor.h"
 #include "../analysis/StemSeparator.h"
 #include "../audio/MasterRecorder.h"
@@ -202,6 +203,7 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     QMenu* transMenu = menuBar()->addMenu(tr("&Transitions"));
     transMenu->addAction(tr("Open Transitions Folder"), this,
                          &MainWindow::openTransitionsFolder);
+    QAction* newTransitionAction = transMenu->addAction(tr("New Transition…"));
     QMenu* settingsMenu = menuBar()->addMenu(tr("&Settings"));
     audioOutputMenu_ = settingsMenu->addMenu(tr("Audio Output"));
     audioOutputMenu_->setToolTipsVisible(true);
@@ -353,10 +355,48 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
 
     // Cross-widget wiring.
     store_->setSongCatalog(library_->songCatalog());
+    transitionEditor_ = new TransitionEditorWindow(
+        engine_, library_, store_, recorder, player, rec_, stems_, this);
+    connect(newTransitionAction, &QAction::triggered, transitionEditor_,
+            [this] { transitionEditor_->createTransition(); });
+    connect(libraryWidget_, &LibraryWidget::newTransitionRequested,
+            transitionEditor_, [this] { transitionEditor_->createTransition(); });
     connect(libraryWidget_, &LibraryWidget::transitionSelected,
             transitionPanel_, &TransitionPanel::selectTransitionFile);
     connect(libraryWidget_, &LibraryWidget::transitionEditRequested,
-            transitionPanel_, &TransitionPanel::editTransitionFile);
+            this, [this](const QString& path) {
+                const auto found = std::find_if(
+                    store_->all().begin(), store_->all().end(),
+                    [&path](const GvtFile& file) { return file.filePath == path; });
+                if (found != store_->all().end()) transitionEditor_->openTransition(*found);
+            });
+    connect(transitionPanel_, &TransitionPanel::transitionEditRequested,
+            this, [this](const QString& path) {
+                const auto found = std::find_if(
+                    store_->all().begin(), store_->all().end(),
+                    [&path](const GvtFile& file) { return file.filePath == path; });
+                if (found != store_->all().end()) transitionEditor_->openTransition(*found);
+            });
+    connect(transitionEditor_, &TransitionEditorWindow::transitionSaved,
+            transitionPanel_, [this](const QString& path) {
+                transitionPanel_->refreshMatches();
+                transitionPanel_->selectTransitionFile(path);
+            });
+    connect(transitionEditor_, &TransitionEditorWindow::statusMessage,
+            this, [this](const QString& message, int timeout) {
+                statusBar()->showMessage(message, timeout);
+            });
+    connect(transitionEditor_, &TransitionEditorWindow::previewStateChanged,
+            this, [this](bool active) {
+                if (centralWidget()) centralWidget()->setEnabled(!active);
+                menuBar()->setEnabled(!active);
+                if (recBtn_) recBtn_->setEnabled(!active);
+                if (active)
+                    statusBar()->showMessage(
+                        tr("Transition Editor preview owns MASTER; the live workspace is locked."));
+                else
+                    statusBar()->clearMessage();
+            });
     connect(transitionPanel_, &TransitionPanel::transitionEditingEnabled,
             libraryWidget_, &LibraryWidget::setTransitionEditingEnabled);
     connect(transitionPanel_, &TransitionPanel::temporaryCueBankChanged, this,

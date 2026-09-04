@@ -39,6 +39,7 @@ signals:
     void statusMessage(const QString& msg, int timeoutMs);
     void transitionSelected(const QString& filePath);
     void transitionEditRequested(const QString& filePath);
+    void newTransitionRequested();
 
 public slots:
     void browseBy(int rows);             // physical browser encoder
@@ -90,6 +91,7 @@ private:
     QPushButton* transitionTabBtn_ = nullptr;
     QPushButton* renameTransitionBtn_ = nullptr;
     QPushButton* deleteTransitionBtn_ = nullptr;
+    QPushButton* newTransitionBtn_ = nullptr;
     QPushButton* loadABtn_ = nullptr;
     QPushButton* loadBBtn_ = nullptr;
     QTimer* loadStateTimer_ = nullptr;

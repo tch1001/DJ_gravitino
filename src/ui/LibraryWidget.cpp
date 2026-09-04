@@ -206,9 +206,10 @@ public:
         }
         if (role == kTransitionFormatRole)
             return static_cast<int>(file.sourceFormat);
-        double endBeat = 0.0;
-        for (const GvtEvent& event : file.events)
-            endBeat = std::max(endBeat, event.beat);
+        double endBeat = file.endBeat.value_or(0.0);
+        if (!file.endBeat.has_value())
+            for (const GvtEvent& event : file.events)
+                endBeat = std::max(endBeat, event.beat);
         if (role == Qt::TextAlignmentRole) {
             if (idx.column() == ColArrow || idx.column() == ColBpm ||
                 idx.column() == ColLength || idx.column() == ColCues)
@@ -420,9 +421,12 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     search_->setClearButtonEnabled(true);
     topRow->addWidget(search_, 1);
 
+    newTransitionBtn_ = new FitPushButton(tr("New…"));
+    newTransitionBtn_->setObjectName(QStringLiteral("newTransitionButton"));
     renameTransitionBtn_ = new FitPushButton(tr("Rename…"));
     deleteTransitionBtn_ = new FitPushButton(tr("Delete…"));
-    for (QPushButton* button : {renameTransitionBtn_, deleteTransitionBtn_}) {
+    for (QPushButton* button : {newTransitionBtn_, renameTransitionBtn_,
+                                deleteTransitionBtn_}) {
         button->setFixedHeight(20);
         button->hide();
         topRow->addWidget(button);
@@ -616,6 +620,8 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             &LibraryWidget::showTransitionContextMenu);
     connect(renameTransitionBtn_, &QPushButton::clicked, this,
             &LibraryWidget::renameSelectedTransition);
+    connect(newTransitionBtn_, &QPushButton::clicked, this,
+            &LibraryWidget::newTransitionRequested);
     connect(deleteTransitionBtn_, &QPushButton::clicked, this,
             &LibraryWidget::deleteSelectedTransition);
     connect(libraryTabBtn_, &QPushButton::toggled, this,
@@ -683,6 +689,7 @@ void LibraryWidget::showTab(int index)
     updateLoadButtons();
     renameTransitionBtn_->setVisible(transitions);
     deleteTransitionBtn_->setVisible(transitions);
+    newTransitionBtn_->setVisible(transitions);
     updateTransitionButtons();
 }
 
@@ -1077,6 +1084,7 @@ void LibraryWidget::updateTransitionButtons()
                          transitionEditingEnabled_;
     renameTransitionBtn_->setEnabled(enabled);
     deleteTransitionBtn_->setEnabled(enabled);
+    newTransitionBtn_->setEnabled(transitionsPage && transitionEditingEnabled_);
     const QString tip = !transitionEditingEnabled_
                             ? tr("Finish or abort the active transition first")
                         : !selected ? tr("Select a transition edge first")
@@ -1133,6 +1141,12 @@ void LibraryWidget::loadRowTo(int sourceRow, int deck)
 {
     if (deck < 0 || deck >= kNumDecks)
         return;
+    if (engine_->exclusivePreviewActive()) {
+        emit statusMessage(
+            tr("Stop Transition Editor preview before changing a live deck"),
+            5000);
+        return;
+    }
     if (engine_->deck(deck).playing.load()) {
         emit statusMessage(
             tr("⚠ Stop deck %1 before loading another track")

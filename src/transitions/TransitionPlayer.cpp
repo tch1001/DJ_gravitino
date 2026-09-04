@@ -63,28 +63,6 @@ void prependInitialState(std::vector<GvtEvent>& events,
     events.insert(events.begin(), setup.begin(), setup.end());
 }
 
-double replayTempoRatio(const GvtInitialState& state,
-                        const GvtTrackRef& recorded,
-                        const TrackDataPtr& loaded,
-                        double fallbackBpm = 0.0) {
-    if (!loaded || loaded->bpm <= 0.0) return state.tempoRatio;
-    const double effectiveBpm = fallbackBpm > 0.0
-                                    ? fallbackBpm
-                                    : recorded.bpm * state.tempoRatio;
-    return effectiveBpm > 0.0 ? effectiveBpm / loaded->bpm
-                              : state.tempoRatio;
-}
-
-double replayTempoEvent(double recordedRatio,
-                        const GvtTrackRef& recorded,
-                        const TrackDataPtr& loaded) {
-    if (!loaded || loaded->bpm <= 0.0 || recorded.bpm <= 0.0)
-        return recordedRatio;
-    const double recordedEffectiveBpm = recorded.bpm * recordedRatio;
-    return recordedEffectiveBpm > 0.0
-               ? recordedEffectiveBpm / loaded->bpm : recordedRatio;
-}
-
 } // namespace
 
 TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
@@ -139,7 +117,7 @@ TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
         // while Tutorial uses the raw value for an honest 8-beat countdown.
         emit progressChanged(rel, im2.totalBeats);
 
-        if (rel >= im2.totalBeats + kGraceBeats) {
+        if (rel >= im2.completionBeat) {
             im2.active = false;
             im2.timer.stop();
             emit finished(true);
@@ -303,10 +281,10 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     for (GvtEvent& event : events) {
         if (event.control != ControlId::Tempo) continue;
         if (event.role == Role::FromDeck)
-            event.value = replayTempoEvent(
+            event.value = transitionReplayTempoEvent(
                 event.value, f.from, im.engine->deck(fromDeck).track());
         else if (event.role == Role::ToDeck)
-            event.value = replayTempoEvent(
+            event.value = transitionReplayTempoEvent(
                 event.value, f.to, im.engine->deck(toDeck).track());
     }
     // Setup snapshots are replay actions, not tutorial gestures.  In Perform
@@ -314,14 +292,14 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     // the outgoing deck starts at the BPM/EQ used by the recording.
     if (im.mode == PlayerMode::Perform) {
         GvtInitialState fromSetup = f.initialFrom;
-        fromSetup.tempoRatio = replayTempoRatio(
+        fromSetup.tempoRatio = transitionReplayTempoRatio(
             fromSetup, f.from, im.engine->deck(fromDeck).track(), f.masterBpm);
         prependInitialState(events, fromSetup, Role::FromDeck,
                             f.initialComplete,
                             !preserveOutgoingSetupTempo);
         if (f.initialComplete) {
             GvtInitialState toSetup = f.initialTo;
-            toSetup.tempoRatio = replayTempoRatio(
+            toSetup.tempoRatio = transitionReplayTempoRatio(
                 toSetup, f.to, im.engine->deck(toDeck).track());
             prependInitialState(events, toSetup, Role::ToDeck, true);
             if (f.initialMixerCaptured) {
@@ -340,7 +318,9 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     });
     im.done.assign(im.sched.size(), 0);
     im.prompted.assign(im.sched.size(), 0);
-    im.totalBeats = events.empty() ? 0.0 : events.back().beat;
+    const double lastEventBeat = events.empty() ? 0.0 : events.back().beat;
+    im.totalBeats = f.endBeat.value_or(lastEventBeat);
+    im.completionBeat = f.endBeat.value_or(lastEventBeat + kGraceBeats);
     im.haveLastBeat = false;
     im.lastBeat = 0.0;
     im.timelineStarted = false;

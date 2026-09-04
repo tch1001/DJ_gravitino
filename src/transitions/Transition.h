@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <optional>
 #include <vector>
 #include "../control/ControlBus.h"
 
@@ -165,6 +166,10 @@ struct GvtFile {
     // [from] [to] [sync]
     GvtTrackRef from, to;
     double anchorFromBeat = 0.0, anchorToBeat = 0.0, masterBpm = 0.0;
+    // Optional authored end of the transition, in master beats from the
+    // transition anchor. Files without it retain the legacy last-event plus
+    // one-beat completion grace used by TransitionPlayer.
+    std::optional<double> endBeat;
     // New recordings capture a complete role-based pre-transition snapshot.
     // Legacy files may contain only initialFrom's gain/EQ fields.
     bool initialComplete = false;

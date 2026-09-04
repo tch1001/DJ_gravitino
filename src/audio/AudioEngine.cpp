@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <thread>
 
 namespace gvt {
 namespace {
@@ -33,7 +34,9 @@ bool isReleaseAwareTrigger(ControlId id) noexcept
     return id == ControlId::Cue ||
         id == ControlId::PlatterTouch ||
         (id >= ControlId::HotCue1 && id <= ControlId::HotCue8) ||
-        (id >= ControlId::SavedLoop1 && id <= ControlId::SavedLoop8);
+        (id >= ControlId::SavedLoop1 && id <= ControlId::SavedLoop8) ||
+        (id >= ControlId::TransitionCue1 &&
+         id <= ControlId::TransitionCue8);
 }
 
 } // namespace
@@ -66,6 +69,8 @@ struct AudioEngine::Impl {
     bool fourChannelOutput = false;
     QString outputName;
     QString requestedOutputName;
+    std::atomic<AudioPreviewSource*> previewSource {nullptr};
+    std::atomic<int> previewReaders {0};
 
     bool ensureContext(QString* error)
     {
@@ -200,6 +205,37 @@ struct AudioEngine::Impl {
             return;
         outputChannels = outputChannels >= kFlx4Channels
                              ? kFlx4Channels : kMasterChannels;
+
+        AudioPreviewSource* preview = previewSource.load(
+            std::memory_order_acquire);
+        if (preview != nullptr) {
+            previewReaders.fetch_add(1, std::memory_order_acq_rel);
+            if (preview == previewSource.load(std::memory_order_acquire)) {
+                int rendered = 0;
+                while (rendered < frames) {
+                    const int chunkFrames = std::min(kScratchFrames,
+                                                     frames - rendered);
+                    preview->read(master.data(), chunkFrames);
+                    for (int frame = 0; frame < chunkFrames; ++frame) {
+                        const std::size_t source =
+                            static_cast<std::size_t>(frame) * 2U;
+                        const std::size_t destination =
+                            static_cast<std::size_t>(rendered + frame) *
+                            static_cast<std::size_t>(outputChannels);
+                        output[destination] = master[source];
+                        output[destination + 1U] = master[source + 1U];
+                        for (int channel = 2; channel < outputChannels;
+                             ++channel)
+                            output[destination +
+                                   static_cast<std::size_t>(channel)] = 0.0f;
+                    }
+                    rendered += chunkFrames;
+                }
+                previewReaders.fetch_sub(1, std::memory_order_acq_rel);
+                return;
+            }
+            previewReaders.fetch_sub(1, std::memory_order_acq_rel);
+        }
 
         int rendered = 0;
         while (rendered < frames) {
@@ -605,6 +641,39 @@ void AudioEngine::renderOfflineFourChannel(float* out, int frames)
     impl_->renderMix(out, frames, kFlx4Channels);
 }
 
+bool AudioEngine::acquireExclusivePreview(AudioPreviewSource* source,
+                                          QString* error)
+{
+    if (source == nullptr) {
+        if (error) *error = QStringLiteral("preview source is missing");
+        return false;
+    }
+    AudioPreviewSource* expected = nullptr;
+    if (!impl_->previewSource.compare_exchange_strong(
+            expected, source, std::memory_order_release,
+            std::memory_order_relaxed)) {
+        if (error) *error = QStringLiteral("another audio preview is active");
+        return false;
+    }
+    return true;
+}
+
+void AudioEngine::releaseExclusivePreview(AudioPreviewSource* source)
+{
+    AudioPreviewSource* expected = source;
+    if (!impl_->previewSource.compare_exchange_strong(
+        expected, nullptr, std::memory_order_acq_rel,
+        std::memory_order_relaxed))
+        return;
+    while (impl_->previewReaders.load(std::memory_order_acquire) != 0)
+        std::this_thread::yield();
+}
+
+bool AudioEngine::exclusivePreviewActive() const
+{
+    return impl_->previewSource.load(std::memory_order_acquire) != nullptr;
+}
+
 bool AudioEngine::headphoneOutputAvailable() const
 {
     return (impl_->fourChannelOutput && impl_->deviceStarted &&
@@ -668,6 +737,12 @@ QList<AudioOutputDevice> AudioEngine::availableOutputDevices(QString* error)
 void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
 {
     (void)origin;
+    // The transition editor owns MASTER exclusively while auditioning its
+    // private graph. No live ControlBus origin may mutate the frozen decks
+    // behind that preview; the editor's Replay events use its own private bus
+    // and engine. This also makes an accidental late System/Replay action
+    // harmless while the UI workspace is locked.
+    if (exclusivePreviewActive()) return;
 
     if (controlIsTrigger(event.id)) {
         if (!std::isfinite(event.value))

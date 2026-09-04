@@ -64,6 +64,9 @@ signals:
                                          bool pressed);
     void tutorialViewChanged(bool open);
     void transitionEditingEnabled(bool enabled);
+    // MainWindow owns the full-size editor and routes both panel and library
+    // edit requests through this single path.
+    void transitionEditRequested(const QString& filePath);
     // Exact visible controls currently outside the selected transition's
     // accepted pre-state tolerance. Empty clears all highlights.
     void setupMismatchControlsChanged(
@@ -74,8 +77,8 @@ public slots:
     // Select the canonical edge chosen in Library > Transitions after its
     // tracks have been loaded onto the physical decks.
     void selectTransitionFile(const QString& filePath);
-    // Open any managed transition in the validated source editor. This also
-    // serves Library > Transitions, where the tracks need not be loaded.
+    // Ask MainWindow to open any managed transition in the full visual editor.
+    // Library and Event Sequence share this route; loaded decks are optional.
     void editTransitionFile(const QString& filePath);
     void observeTutorialHardwareControl(const gvt::ControlEvent& event);
     void observePerformancePadState(int deck, int mode,

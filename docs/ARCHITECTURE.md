@@ -32,7 +32,8 @@ src/transitions/  typed model, YAML/legacy readers, Recorder,
                   Player                                        (depends: control, analysis)
 src/midi/         MidiEngine (RtMidi), Flx4Mapping, LEDs        (depends: control)
 src/ui/           MainWindow, DeckWidget, MixerWidget,
-                  LibraryWidget, TransitionPanel                (depends: everything)
+                  LibraryWidget, TransitionPanel, typed visual
+                  TransitionEditor                              (depends: everything)
 src/app/          main.cpp wiring, --selftest harness
 third_party/      miniaudio.h (vendored)
 ```
@@ -55,6 +56,13 @@ no widgets) so they stay testable headless.
   any active callback, clears the old PCM/stems/FX state, publishes the new
   source, and returns stopped at frame zero. It must never crossfade or layer
   the old source with the replacement.
+- **Transition-editor preview**: the GUI thread renders a private two-deck
+  `AudioEngine` into a bounded lock-free stereo ring. While its exclusive
+  preview lease is held, the live callback reads that ring into MASTER and
+  neither renders nor advances the live decks. All live ControlBus origins and
+  deck-loading UI are blocked for the lease. Lease release drains any
+  in-flight callback before the private source can be destroyed. The callback
+  remains allocation- and lock-free; preview bypasses the live master tap.
 - **MIDI thread** (RtMidi callback): converts raw MIDI → ControlEvent, posts to
   GUI thread via queued signal. LEDs written directly from GUI thread.
 - **Analysis**: QtConcurrent / std::thread per track, results delivered via
@@ -134,7 +142,8 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
    the recorder also stores an optional physical input hint. Replay
    remains state-based; Tutorial can therefore say “CUSTOM pad 3” instead of
    misleadingly reducing the gesture to its resulting `play` event.
-4. Stop recording → normalize/thin continuous streams → save a typed v1 YAML
+4. Stop recording → capture the exact authored completion beat,
+   normalize/thin continuous streams → save a typed v1 YAML
    `.transition`. Semantic hot cues and saved loops (canonical IN/OUT beats)
    are allocated together into an isolated temporary CUSTOM bank without
    changing permanent per-track cues or loop slots.
@@ -186,6 +195,17 @@ the timing cue. A derived, non-actionable beat-zero “Transition starts” row
 provides the first countdown interval; simultaneous actions do not create
 zero-length visual countdowns. Neither the marker nor its progress is written
 to `.transition` or legacy `.gvt`.
+The full-size Transition Editor is the creation/editing surface for the same
+typed model consumed by replay. A single undoable working copy drives two
+waveforms, an action lane, independent `(role, control)` automation lanes,
+semantic cue/loop and initial-state inspectors, and an advanced safe-YAML
+view. Timeline points, cue markers, loop edges, labels, and the explicit END
+marker are directly draggable; grid snapping never changes stored precision.
+Starting preview reconstructs cursor state by rendering the private graph from
+beat zero, then routes only that graph to MASTER. A Write Automation take
+punch-replaces touched streams as one undo command. Autosave drafts, source
+hash conflict detection, forced Save As for legacy/endpoint edits, and
+schema-level validation keep library files non-destructive and reopenable.
 The virtual FLX4 mirrors live controls, pad state, LEDs, and channel meters;
 prose/countdown/reset guidance lives in the transition control panel above
 CLOSE ENOUGH. Perform gives the guided run up to eight beats of pre-anchor

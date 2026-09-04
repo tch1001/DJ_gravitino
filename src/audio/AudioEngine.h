@@ -17,6 +17,16 @@ struct AudioOutputDevice {
     bool isDefault = false;
 };
 
+// Realtime-safe stereo source used by the transition editor. The live audio
+// callback calls read() only while an exclusive preview lease is held. The
+// implementation must not allocate, lock, or block and must always fill the
+// requested frames (silence is acceptable on underrun).
+class AudioPreviewSource {
+public:
+    virtual ~AudioPreviewSource() = default;
+    virtual void read(float* interleavedStereo, int frames) noexcept = 0;
+};
+
 // Per-deck realtime state. Parameters are atomics written from the GUI thread,
 // read by the audio thread. Implementation details live in Deck.cpp.
 class Deck {
@@ -151,6 +161,14 @@ public:
     void renderOffline(float* out, int frames);
     // Test/diagnostic path: interleaved MASTER L/R, PHONES L/R.
     void renderOfflineFourChannel(float* out, int frames);
+
+    // Temporarily route a private editor graph to MASTER without advancing or
+    // mutating the live decks. Only one source may hold the lease. release()
+    // waits for an in-flight callback before the source may be destroyed.
+    bool acquireExclusivePreview(AudioPreviewSource* source,
+                                 QString* error = nullptr);
+    void releaseExclusivePreview(AudioPreviewSource* source);
+    bool exclusivePreviewActive() const;
 
     // Master-output tap (set/cleared from the GUI thread; the audio thread
     // calls tap->feed(interleavedStereo, frames) after the limiter when set).

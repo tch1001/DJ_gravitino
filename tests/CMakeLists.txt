@@ -15,6 +15,7 @@ foreach(t ${TEST_SRCS})
             ${CMAKE_SOURCE_DIR}/src/ui/MixerWidget.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/LibraryWidget.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionPanel.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/TransitionEditor.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/Flx4TutorialWidget.cpp)
         target_link_libraries(${name} PRIVATE Qt6::Widgets)
     endif()

@@ -6,6 +6,26 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-04 (codex): **Visual transition editor and isolated auditioning.**
+  New/Edit now opens one full-size typed editor with synchronized outgoing and
+  incoming waveforms, master-beat ruler, discrete-action and per-control
+  automation lanes, selectable snapping with Option bypass, exact event and
+  initial-state inspectors, semantic cue/loop/label editing, advanced safe
+  YAML, and undo/redo. Timeline points, labels, cue markers, loop edges, and
+  an explicit authored END beat are draggable. New recordings write
+  `performance.end_beat` with required `timeline-end.v1`; older files retain
+  their last-event-plus-one-beat completion behavior. Preview reconstructs
+  exact cursor state in a private two-deck graph and leases MASTER through a
+  lock-free ring while the live workspace is frozen, with stem preparation
+  required when relevant. Mouse controls can add actions or punch-write and
+  thin touched automation streams. Autosave/recovery drafts, source-hash
+  conflict handling, schema validation, extension preservation, and forced
+  Save As for legacy or endpoint-changing edits protect source files. Verified
+  with a clean build, all 28 CTest targets, the full offline `--selftest`,
+  `git diff --check`, and an offscreen test that opens the real editor window.
+  The final audible/dragging smoke pass remains pending because the Mac was
+  locked during Computer Use.
+
 - 2026-09-04 (codex): **Transition-owned saved-loop slots.** Portable YAML now
   stores semantic saved-loop IDs plus canonical IN/OUT beats under
   `performance.loops`; timeline events use `deck.transition_loop` and

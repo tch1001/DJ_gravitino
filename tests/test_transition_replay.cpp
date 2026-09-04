@@ -211,6 +211,43 @@ int main(int argc, char** argv)
     player.abort();
     transitionPlayerPreserveOutgoingSetupTempo(&player, false);
 
+    // New files can author the exact completion beat. Legacy files retain
+    // their historical one-beat grace after the final event.
+    int completionCount = 0;
+    double reportedTotal = -1.0;
+    QObject::connect(&player, &TransitionPlayer::finished,
+                     [&completionCount](bool completed) {
+        if (completed) ++completionCount;
+    });
+    QObject::connect(&player, &TransitionPlayer::progressChanged,
+                     [&reportedTotal](double, double total) {
+        reportedTotal = total;
+    });
+    GvtFile authoredEnd;
+    authoredEnd.masterBpm = 120.0;
+    authoredEnd.endBeat = 0.25;
+    authoredEnd.events = {
+        {0.0, Role::Mixer, ControlId::Crossfader, 0.0, Curve::Step},
+    };
+    engine.deck(0).play();
+    CHECK(player.arm(authoredEnd, 0, true, &error));
+    float endScratch[7000 * 2] {};
+    engine.renderOffline(endScratch, 7000);
+    spinEvents(20);
+    CHECK(completionCount == 1);
+    CHECK(std::fabs(reportedTotal - 0.25) < 1.0e-9);
+
+    GvtFile legacyEnd = authoredEnd;
+    legacyEnd.endBeat.reset();
+    CHECK(player.arm(legacyEnd, 0, true, &error));
+    float graceScratch[12000 * 2] {};
+    engine.renderOffline(graceScratch, 12000); // half a beat
+    spinEvents(20);
+    CHECK(completionCount == 1);
+    engine.renderOffline(graceScratch, 12000); // one full beat total
+    spinEvents(20);
+    CHECK(completionCount == 2);
+
     // A recorded CUSTOM loop follows the same press -> PLAY -> release order
     // as the live pad. PLAY takes ownership of the momentary preview, so the
     // recorded release cannot stop or rewind the incoming deck.
@@ -278,6 +315,8 @@ int main(int argc, char** argv)
     bus.dispatch({0, ControlId::Trim, 0.91}, Origin::Ui);
     bus.dispatch({0, ControlId::TempoRange, 0.50}, Origin::Ui);
     const GvtFile recorded = recorder.finish();
+    CHECK(recorded.endBeat.has_value());
+    CHECK(recorded.requirements.contains(QStringLiteral("timeline-end.v1")));
     CHECK(std::fabs(recorded.from.bpm - 127.987654) < 1.0e-9);
     CHECK(std::fabs(recorded.initialFrom.tempoRatio - 1.000027) < 1.0e-9);
     CHECK(recorded.initialFrom.quantizeCaptured);

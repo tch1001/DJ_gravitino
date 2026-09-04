@@ -4,13 +4,12 @@ Updated: 2026-09-04 (Asia/Singapore)
 
 ## Current state
 
-The Tutor/progress/mouse-control work is committed and pushed at `00fe760`
-(`Improve tutor workflow and mouse deck controls`). Portable `.transition`
-YAML, the permanent `.gvt` adapter, multi-format catalog/matching, and
-transition-owned cues are pushed at `641db49`. The current follow-up adds
-format checkboxes to the Transitions tab and an idempotent bulk-conversion
-command. All 28 files in the user's transition directory were converted on
-2026-09-04; their 28 legacy sources remain beside them.
+The current revision adds the next-generation visual Transition Editor:
+typed waveform/timeline editing, semantic cue/loop and initial-state
+inspectors, an explicit authored end beat, crash-safe drafts, and a private
+preview graph that leases MASTER without changing the live decks. All 28 files
+in the user's transition directory were converted on 2026-09-04; their 28
+legacy sources remain beside them.
 
 The user explicitly permits stopping a running Gravitino process when a
 restart is needed. Always resolve the process narrowly with
@@ -48,8 +47,9 @@ committed and pushed after validation. Never include the untracked `tmp/` tree.
   narrowed. The library is no longer forced closed in Tutor mode and has a
   persistent bottom-edge Show/Hide button. Library > Transitions now exposes
   Edit/Rename/Delete on right click (Delete retains confirmation), and the
-  event-sequence header has an Edit Transition button. Editing uses an in-app,
-  validated UTF-8 `.gvt` source editor. The format documentation now states the
+  event-sequence header has an Edit Transition button. Both paths now open the
+  full typed visual editor; safe YAML remains its advanced inspector. The
+  format documentation now states the
   exact v1 sharing boundary, especially HOT CUE, CUSTOM-loop, beatgrid, stem,
   and audio dependencies.
 - **Single transition picker and compact sequence:** Library >
@@ -368,9 +368,14 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-Latest result: build succeeded; 19/19 tests passed;
+Latest result: build succeeded; 28/28 tests passed;
 the full audio, transition, loop, and stem self-test passed; and
-`git diff --check` passed. Focused tests now cover touch press/release mapping,
+`git diff --check` passed. The offscreen UI test opens the real standalone
+Transition Editor and verifies its timeline, typed inspectors, safe YAML
+fallback, undoable validation model, and entry points. The isolated-audio test
+verifies that preview reaches MASTER only, leaves four-channel phones silent,
+freezes live deck position, rejects every live ControlBus origin during the
+lease, and resumes the live graph afterward. Focused tests also cover touch press/release mapping,
 silent stationary scratch, forward/reverse scratch audio, transport restore,
 phase-only SYNC tempo preservation, Quantized/exact manual IN/OUT, exact saved
 loop activation, saved-loop/hot-cue persistence with stale-metadata merge,
@@ -385,11 +390,10 @@ eight-beat Tutorial prompt for a button due at transition beat zero.
 input freezing, consumed pickup events, software retargeting, and a control
 being highlighted again after it overshoots while another target is pending.
 Transition coverage verifies continuous tutorial prompts remain active until
-their recorded value is reached. The Computer Use accessibility service timed
-out while reading the large Qt window, so the full-board tutor still deserves
-a physical visual pass. The rebuilt UI is running as the sole Gravitino process
-(PID 25864 at this handoff); resolve its current PID narrowly before any future
-restart.
+their recorded value is reached. The Mac was locked during the final Computer
+Use pass, so audible preview, dragging, and compact-window layout still deserve
+a physical smoke test after unlocking it. Resolve any running process narrowly
+before a future restart.
 
 New focused coverage includes:
 
@@ -451,6 +455,11 @@ New focused coverage includes:
 14. Confirm System/MacBook/Bluetooth master output and FLX4 headphone cue after
    restart. If duplicate audio is heard, check that Serato is stopped and that
    exactly one Gravitino process exists.
+15. Open a representative `.transition` through Edit, drag an automation point,
+    a semantic cue, a loop edge, a label, and END with 1/4-beat snap plus Option
+    bypass. Preview from the middle, pause/resume, audition with Write off, then
+    record one touched lane with Write on. Confirm the live decks do not move,
+    Save/Undo work, and changing an endpoint forces Save As.
 
 ## Key files
 
@@ -464,8 +473,10 @@ New focused coverage includes:
 - `src/ui/DetailWaveformView.*`: stacked-waveform scratch and loop visuals.
 - `src/analysis/BeatGridEditor.*`, `src/library/TrackLibrary.*`: manual grid
   math and atomic persistence.
-- `src/ui/LibraryWidget.*`, `src/ui/MainWindow.cpp`: browser/load guards and
-  cross-subsystem wiring.
+- `src/ui/TransitionEditor.*`: typed editor document, beat timeline,
+  inspectors, drafts, isolated audition graph, and automation capture.
+- `src/ui/LibraryWidget.*`, `src/ui/MainWindow.cpp`: browser/load guards,
+  editor entry points, preview workspace lock, and cross-subsystem wiring.
 
 Also read `docs/ARCHITECTURE.md`, `docs/STATUS.md`, and
 `docs/TRANSITION_FORMAT.md` before changing pinned interfaces or transition

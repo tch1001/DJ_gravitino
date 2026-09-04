@@ -283,6 +283,7 @@ void TransitionRecorder::cancel() {
 
 GvtFile TransitionRecorder::finish() {
     Impl& im = *impl_;
+    const double authoredEndBeat = std::max(0.0, im.currentBeat());
     im.recording = false;
 
     GvtFile f;
@@ -292,7 +293,9 @@ GvtFile TransitionRecorder::finish() {
     f.created = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     f.requirements = {QStringLiteral("timeline.v1"),
                       QStringLiteral("temporary-cues.v1"),
-                      QStringLiteral("temporary-loops.v1")};
+                      QStringLiteral("temporary-loops.v1"),
+                      QStringLiteral("timeline-end.v1")};
+    f.endBeat = authoredEndBeat;
 
     auto fillRef = [&](GvtTrackRef& ref, int deckIdx) {
         if (TrackDataPtr t = im.engine->deck(deckIdx).track()) {
@@ -472,6 +475,10 @@ GvtFile TransitionRecorder::finish() {
         e.value = q(e.value,
                     e.control == ControlId::Tempo ? kPrecise : 0.001);
     }
+    double finalEndBeat = authoredEndBeat;
+    for (const GvtEvent& event : f.events)
+        finalEndBeat = std::max(finalEndBeat, event.beat);
+    f.endBeat = q(finalEndBeat, kPrecise);
 
     static const QStringList cueColors {
         QStringLiteral("#e85d75"), QStringLiteral("#f09a4a"),

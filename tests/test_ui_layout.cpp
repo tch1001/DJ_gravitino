@@ -6,19 +6,23 @@
 #include "transitions/TransitionEngine.h"
 #include "ui/LibraryWidget.h"
 #include "ui/MainWindow.h"
+#include "ui/TransitionEditor.h"
 #include "ui/TransitionPanel.h"
 
 #include <QApplication>
 #include <QCheckBox>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QTableView>
 #include <QTemporaryDir>
+#include <QUndoStack>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -124,6 +128,9 @@ int main(int argc, char** argv)
         {4.0, gvt::Role::Mixer, gvt::ControlId::Crossfader, 1.0,
          gvt::Curve::Step},
     };
+    sample.endBeat = 8.0;
+    sample.requirements = {QStringLiteral("timeline.v1"),
+                           QStringLiteral("timeline-end.v1")};
     QString saveError;
     CHECK(!store.save(sample, &saveError).isEmpty());
     const QString legacyPath = store.directory() +
@@ -131,6 +138,31 @@ int main(int argc, char** argv)
     CHECK(gvtSaveFile(sample, legacyPath, &saveError));
     store.reload();
     CHECK(store.all().size() == 2);
+
+    // The editor's typed working document is undoable and delegates final
+    // schema/reference validation to the normal safe portable reader.
+    {
+        gvt::TransitionEditorDocument document;
+        document.reset(sample);
+        CHECK(!document.isDirty());
+        CHECK(document.validationErrors().isEmpty());
+        document.mutate(QStringLiteral("shorten end"), [](gvt::GvtFile& file) {
+            file.endBeat = 3.0;
+        });
+        CHECK(document.isDirty());
+        CHECK(!document.validationErrors().isEmpty());
+        document.undoStack()->undo();
+        CHECK(document.validationErrors().isEmpty());
+        CHECK(!document.isDirty());
+        document.mutate(QStringLiteral("broken semantic reference"),
+                        [](gvt::GvtFile& file) {
+            file.events.front().role = gvt::Role::ToDeck;
+            file.events.front().control = gvt::ControlId::TransitionCue1;
+            file.events.front().cueId = QStringLiteral("missing-cue");
+        });
+        CHECK(document.validationErrors().join(QStringLiteral(" ")).contains(
+            QStringLiteral("unknown cue"), Qt::CaseInsensitive));
+    }
     engine.deck(0).loadTrack(
         makeTrack(sample.from.title, sample.from.fingerprint));
     engine.deck(1).loadTrack(
@@ -162,6 +194,8 @@ int main(int argc, char** argv)
                                    QStringLiteral("HIDE LIBRARY")));
         auto* transitionTab = window.findChild<QPushButton*>(
             QStringLiteral("transitionLibraryTab"));
+        auto* newTransition = window.findChild<QPushButton*>(
+            QStringLiteral("newTransitionButton"));
         auto* legacyFilter = window.findChild<QCheckBox*>(
             QStringLiteral("legacyTransitionFilter"));
         auto* portableFilter = window.findChild<QCheckBox*>(
@@ -169,6 +203,7 @@ int main(int argc, char** argv)
         auto* transitionTable = window.findChild<QTableView*>(
             QStringLiteral("transitionLibraryTable"));
         CHECK(transitionTab != nullptr);
+        CHECK(newTransition != nullptr);
         CHECK(legacyFilter != nullptr);
         CHECK(portableFilter != nullptr);
         CHECK(transitionTable != nullptr);
@@ -365,6 +400,34 @@ int main(int argc, char** argv)
         if (human) human->click();
         CHECK(human && human->isChecked());
         CHECK(headerText(table, 0) == QStringLiteral("Outgoing Beat"));
+
+        // Library/context Edit opens the full visual editor window rather
+        // than the retired source-only dialog.
+        auto* editor = window.findChild<gvt::TransitionEditorWindow*>();
+        CHECK(editor != nullptr);
+        const auto portable = std::find_if(
+            store.all().begin(), store.all().end(), [](const gvt::GvtFile& file) {
+                return file.sourceFormat ==
+                       gvt::TransitionSourceFormat::PortableYaml;
+            });
+        CHECK(portable != store.all().end());
+        if (editor && portable != store.all().end()) {
+            editor->openTransition(*portable);
+            app.processEvents();
+            CHECK(editor->isVisible());
+            CHECK(editor->isWindow());
+            CHECK(editor->findChild<QWidget*>(
+                      QStringLiteral("transitionEditorTimeline")) != nullptr);
+            CHECK(editor->findChild<QTableWidget*>(
+                      QStringLiteral("transitionEditorEvents")) != nullptr);
+            CHECK(editor->findChild<QTableWidget*>(
+                      QStringLiteral("transitionEditorPerformanceDefinitions")) != nullptr);
+            CHECK(editor->findChild<QPlainTextEdit*>(
+                      QStringLiteral("transitionEditorYaml")) != nullptr);
+            CHECK(editor->findChild<QPushButton*>(
+                      QStringLiteral("transitionEditorPlay")) != nullptr);
+            editor->close();
+        }
     }
 
     {

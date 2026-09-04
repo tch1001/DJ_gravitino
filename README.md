@@ -28,6 +28,10 @@ for the Pioneer DDJ-FLX4 controller.
 - Library browser scanning local MP3, FLAC, WAV, and AIFF files (tags via TagLib)
 - **Transition recording & replay** — the headline feature (see
   [docs/TRANSITION_FORMAT.md](docs/TRANSITION_FORMAT.md))
+- **Visual transition authoring** — create or edit an edge on synchronized
+  outgoing/incoming waveforms, drag actions and automation at fractional beats,
+  manage temporary cues/loops and initial state, audition from any cursor, and
+  write mouse automation without touching the live decks
 - Full virtual DDJ-FLX4 Tutorial overlay: highlights each recorded gesture,
   accepts clicks or physical input, and checks referenced hot-cue assignments
 - DDJ-FLX4 plug-and-play MIDI mapping with LED feedback (hot-plug supported —
@@ -66,6 +70,11 @@ cmake --build build
    eight beats ahead, and scores physical-controller or virtual-control input. It
    warns before starting when an action lacks an FLX4 mapping or a referenced
    hot cue is missing, unverifiable, or mapped to the wrong beat.
+6. **Author it on the computer**: open Library > Transitions and choose New or
+   Edit. The dedicated editor has beat-grid snapping (Option bypasses it),
+   exact property tables, undo/redo, a private MASTER preview, stem preparation,
+   automation writing, and crash-recovery drafts. Legacy or endpoint-changing
+   edits are always saved as a new `.transition`.
 
 `--selftest` writes `selftest_out.wav` in the working directory; its temporary
 transition round-trip files are removed automatically.

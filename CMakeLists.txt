@@ -63,6 +63,7 @@ add_executable(gravitino MACOSX_BUNDLE
     src/ui/MixerWidget.cpp
     src/ui/LibraryWidget.cpp
     src/ui/TransitionPanel.cpp
+    src/ui/TransitionEditor.cpp
     src/ui/Flx4TutorialWidget.cpp
 )
 set_target_properties(gravitino PROPERTIES MACOSX_BUNDLE FALSE) # plain binary for dev

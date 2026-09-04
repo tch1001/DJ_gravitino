@@ -15,7 +15,6 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
-#include <QFontDatabase>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -25,7 +24,6 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QProgressBar>
-#include <QPlainTextEdit>
 #include <QSettings>
 #include <QSet>
 #include <QSignalBlocker>
@@ -2049,132 +2047,7 @@ void TransitionPanel::onEdit()
 void TransitionPanel::editTransition(const GvtFile& original)
 {
     if (!transitionEditingEnabled_ || original.filePath.isEmpty()) return;
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(tr("Edit transition — %1").arg(original.name));
-    dialog.resize(820, 620);
-    auto* root = new QVBoxLayout(&dialog);
-
-    auto* explanation = new QLabel(
-        tr("Edit the portable UTF-8 YAML below. Beats may be fractional. "
-           "Saving a legacy .gvt creates a separate .transition file."),
-        &dialog);
-    explanation->setWordWrap(true);
-    root->addWidget(explanation);
-
-    auto* path = new QLabel(QFileInfo(original.filePath).absoluteFilePath(),
-                            &dialog);
-    path->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    path->setStyleSheet(
-        QStringLiteral("color:%1; font-size:10px;").arg(themeDimText().name()));
-    root->addWidget(path);
-
-    auto* editor = new QPlainTextEdit(&dialog);
-    editor->setLineWrapMode(QPlainTextEdit::NoWrap);
-    editor->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    editor->setPlainText(transitionSerialize(original));
-    root->addWidget(editor, 1);
-
-    auto* buttons = new QDialogButtonBox(
-        QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
-    root->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    connect(buttons->button(QDialogButtonBox::Save), &QPushButton::clicked,
-            &dialog, [this, &dialog, editor, original] {
-                GvtFile edited;
-                QString error;
-                QStringList warnings;
-                if (!transitionParse(editor->toPlainText(), edited, &error,
-                                     &warnings)) {
-                    QMessageBox::warning(
-                        &dialog, tr("Invalid .transition file"),
-                        tr("The transition was not saved:\n\n%1").arg(error));
-                    return;
-                }
-                if (edited.version != 1) {
-                    QMessageBox::warning(
-                        &dialog, tr("Unsupported .transition version"),
-                        tr("This Gravitino build can edit version 1 files only."));
-                    return;
-                }
-                if (edited.name.trimmed().isEmpty()) {
-                    QMessageBox::warning(
-                        &dialog, tr("Transition needs a name"),
-                        tr("Set metadata.name before saving."));
-                    return;
-                }
-                if (edited.events.empty()) {
-                    QMessageBox::warning(
-                        &dialog, tr("Transition has no events"),
-                        tr("Add at least one valid performance.timeline event before saving."));
-                    return;
-                }
-                if (!edited.unsupportedRequirements.isEmpty()) {
-                    QMessageBox::warning(
-                        &dialog, tr("Unsupported transition capabilities"),
-                        tr("This build cannot safely edit or replay: %1")
-                            .arg(edited.unsupportedRequirements.join(", ")));
-                    return;
-                }
-                if (std::any_of(
-                        edited.events.begin(), edited.events.end(),
-                        [](const GvtEvent& event) {
-                            return !std::isfinite(event.beat) ||
-                                   !std::isfinite(event.value);
-                        })) {
-                    QMessageBox::warning(
-                        &dialog, tr("Invalid event number"),
-                        tr("Event beats and values must be finite numbers."));
-                    return;
-                }
-                if (!warnings.isEmpty() &&
-                    QMessageBox::warning(
-                        &dialog, tr("Save with parser warnings?"),
-                        tr("Some lines would be skipped or normalized:\n\n• %1\n\n"
-                           "Save the remaining valid transition?")
-                            .arg(warnings.mid(0, 8).join(
-                                QStringLiteral("\n• "))),
-                        QMessageBox::Save | QMessageBox::Cancel,
-                        QMessageBox::Cancel) != QMessageBox::Save) {
-                    return;
-                }
-
-                edited.filePath = original.filePath;
-                QString savedPath = original.filePath;
-                bool saved = false;
-                if (edited.name.trimmed() != original.name.trimmed()) {
-                    savedPath = store_->renameTransition(
-                        edited, edited.name.trimmed(), &error);
-                    saved = !savedPath.isEmpty();
-                } else {
-                    selectedPath_ = original.filePath;
-                    saved = store_->update(edited, &error);
-                    if (saved) {
-                        const auto migrated = std::find_if(
-                            store_->all().begin(), store_->all().end(),
-                            [&edited](const GvtFile& candidate) {
-                                return candidate.id == edited.id ||
-                                       candidate.legacySourceId == edited.id;
-                            });
-                        if (migrated != store_->all().end())
-                            savedPath = migrated->filePath;
-                    }
-                }
-                if (!saved) {
-                    QMessageBox::warning(
-                        &dialog, tr("Could not save transition"), error);
-                    return;
-                }
-
-                selectedPath_ = savedPath;
-                refreshMatches();
-                emit statusMessage(
-                    tr("Saved transition “%1”").arg(edited.name), 4000);
-                dialog.accept();
-            });
-
-    editor->setFocus();
-    dialog.exec();
+    emit transitionEditRequested(original.filePath);
 }
 
 void TransitionPanel::onLabelCue()

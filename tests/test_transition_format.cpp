@@ -30,7 +30,8 @@ int main()
     file.tags = {QStringLiteral("house"), QStringLiteral("teaching")};
     file.requirements = {QStringLiteral("timeline.v1"),
                          QStringLiteral("temporary-cues.v1"),
-                         QStringLiteral("temporary-loops.v1")};
+                         QStringLiteral("temporary-loops.v1"),
+                         QStringLiteral("timeline-end.v1")};
     file.from.title = QStringLiteral("Outgoing");
     file.from.artists = {QStringLiteral("Artist A")};
     file.from.artist = QStringLiteral("Artist A");
@@ -46,6 +47,7 @@ int main()
     file.anchorFromBeat = 296.452345678;
     file.anchorToBeat = 32.125;
     file.masterBpm = 127.5;
+    file.endBeat = 32.875;
     file.initialComplete = true;
     file.initialFrom.captured = true;
     file.initialTo.captured = true;
@@ -97,6 +99,7 @@ int main()
     CHECK(yaml.contains(QStringLiteral("control: \"deck.transition_cue\"")));
     CHECK(yaml.contains(QStringLiteral("control: \"deck.transition_loop\"")));
     CHECK(yaml.contains(QStringLiteral("start_track_beat: 48.125")));
+    CHECK(yaml.contains(QStringLiteral("end_beat: 32.875")));
 
     GvtFile parsed;
     QString error;
@@ -108,6 +111,8 @@ int main()
     CHECK(parsed.license == file.license);
     CHECK(parsed.from.artists == file.from.artists);
     CHECK(std::fabs(parsed.anchorFromBeat - file.anchorFromBeat) < 1e-10);
+    CHECK(parsed.endBeat.has_value());
+    CHECK(std::fabs(*parsed.endBeat - *file.endBeat) < 1e-10);
     CHECK(parsed.events.size() == 2);
     CHECK(std::fabs(parsed.events[0].beat - event.beat) < 1e-10);
     CHECK(parsed.events[0].cueId == event.cueId);
@@ -173,6 +178,15 @@ int main()
     CHECK(!transitionParse(yaml + QStringLiteral("---\n{}\n"),
                            parsed, &error, nullptr));
 
+    invalid = yaml;
+    invalid.replace(QStringLiteral("end_beat: 32.875"),
+                    QStringLiteral("end_beat: 10"));
+    CHECK(!transitionParse(invalid, parsed, &error, nullptr));
+    CHECK(error.contains(QStringLiteral("end_beat")));
+    invalid = yaml;
+    invalid.remove(QStringLiteral("  - \"timeline-end.v1\"\n"));
+    CHECK(!transitionParse(invalid, parsed, &error, nullptr));
+    CHECK(error.contains(QStringLiteral("timeline-end.v1")));
     invalid = yaml;
     invalid.replace(QStringLiteral("end_track_beat: 56.125"),
                     QStringLiteral("end_track_beat: 48.125"));

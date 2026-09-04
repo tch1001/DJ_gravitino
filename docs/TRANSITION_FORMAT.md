@@ -52,6 +52,7 @@ requires:
   - "timeline.v1"
   - "temporary-cues.v1"
   - "temporary-loops.v1"
+  - "timeline-end.v1"
 
 endpoints:
   outgoing:
@@ -96,6 +97,7 @@ endpoints:
 
 performance:
   master_bpm: 104.016667
+  end_beat: 32.875
   anchors:
     outgoing: {track_beat: 283.195058}
     incoming: {track_beat: 96.0}
@@ -209,6 +211,13 @@ performance:
 extensions: {}
 ```
 
+`performance.end_beat` is the authored end of the edge in master transition
+beats. It may fall between beats but cannot precede a timeline action or
+label. Playback finishes exactly there, which lets the visual editor retain
+intentional silence or a musical tail after the last gesture. Files without
+this field keep the permanent legacy behavior: completion occurs one beat
+after the final action. The field requires `timeline-end.v1`.
+
 The serializer is deterministic, quotes strings, and keeps double precision.
 Human/Raw event summaries and tutorial progress rows are derived UI data and
 are never serialized.
@@ -301,9 +310,36 @@ playback dependency.
 ## Compatibility and safe parsing
 
 `requires` declares semantics necessary for correct playback. This build
-supports `timeline.v1`, `temporary-cues.v1`, and `temporary-loops.v1`. Unknown
-required capabilities allow inspection but block Perform/Tutorial with a clear
+supports `timeline.v1`, `temporary-cues.v1`, `temporary-loops.v1`, and
+`timeline-end.v1`. Unknown required capabilities allow inspection but block
+Perform/Tutorial with a clear
 compatibility error.
+
+## Visual authoring and save safety
+
+Library > Transitions > Edit and the Event Sequence edit button open the same
+full-size typed editor. It shows outgoing and incoming waveforms against one
+master-beat ruler, discrete actions, per-control automation lanes, semantic
+cues/loops, labels, initial state, and the explicit end marker. Points and
+markers snap to a selectable grid by default; Option-drag bypasses snapping,
+so arbitrary fractional beats remain available. Exact numbers and every
+portable control remain editable in the inspectors, with the YAML source as an
+advanced lossless view.
+
+Preview uses a private two-deck audio graph. It silently renders from beat zero
+to reconstruct transport, loops, FX, and automation at the cursor, then leases
+MASTER while the live workspace is frozen. Required stems must be prepared
+first. Preview never changes the live deck state and never enters a master
+recording. Automation Write captures only touched streams and commits the take
+as one undo step.
+
+Autosave drafts live outside the transition library under
+`~/.gravitino/drafts`. Saving a legacy file, changing either canonical
+endpoint, or choosing Save As always creates a new UUID-backed
+`.transition`; the source is retained. If the source changes on disk while the
+editor is open, the editor offers to reload it or save the working copy as a
+new edge. Unknown YAML mappings/extensions survive both inspector and source
+round trips.
 
 Additive optional fields may be introduced within version 1. Unknown mapping
 fields and namespaced `extensions` are preserved at their containing level on
