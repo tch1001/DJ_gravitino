@@ -8,11 +8,14 @@
 #include <memory>
 #include "../analysis/TrackData.h"
 #include "../transitions/Transition.h"
+#include "../transitions/TransitionTransportTrace.h"
 
 class QAction;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QEvent;
+class QKeyEvent;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -35,6 +38,7 @@ class TrackLibrary;
 class TransitionPlayer;
 class TransitionRecorder;
 class TransitionStore;
+class TransitionFieldsEditor;
 
 class TransitionEditorDocument final : public QObject {
     Q_OBJECT
@@ -75,6 +79,8 @@ public:
     double playheadBeat() const noexcept { return playheadBeat_; }
     void setSnapBeats(double beats) noexcept { snapBeats_ = beats; }
     void setSelectedEvent(int index);
+    std::optional<TransitionTransportPosition> sourcePositionAt(
+        Role role, double transitionBeat) const;
 
 signals:
     void eventSelected(int index);
@@ -101,8 +107,12 @@ private:
     QRect actionRect() const;
     QRect automationRect(int laneIndex) const;
     double incomingLaunchBeat() const;
+    void rebuildTransportTrace();
     void drawWaveform(QPainter& painter, const QRect& rect,
                       const TrackDataPtr& track, Role role);
+    void drawDragGuide(QPainter& painter);
+    double sourceMarkerTransitionBeat(Role role, double sourceBeat,
+                                      double nearTransitionBeat) const;
 
     TransitionEditorDocument* document_ = nullptr;
     TrackDataPtr outgoing_;
@@ -123,6 +133,8 @@ private:
     Role dragDefinitionRole_ = Role::FromDeck;
     double dragDefinitionOriginalBeat_ = 0.0;
     double dragDefinitionPreviewBeat_ = 0.0;
+    double dragDefinitionTransitionBeat_ = 0.0;
+    TransitionTransportTrace transportTrace_;
 };
 
 class TransitionEditorWindow final : public QMainWindow {
@@ -147,6 +159,9 @@ signals:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
 
 private slots:
     void save();
@@ -182,8 +197,13 @@ private:
     void rebuildPerformanceDefinitions();
     void rebuildInitialStateTable();
     void updateEventInspector();
+    void updateEditingHelp();
+    void editReferencedPosition();
     void updateValidation();
     void updateYamlFromModel();
+    void acceptStructuredEdit(GvtFile file, const QString& description);
+    void refreshDefinitionPosition();
+    void applyDefinitionPosition();
     void setEndpoint(bool outgoing);
     void addCue();
     void addLoop();
@@ -194,6 +214,15 @@ private:
     void finishAutomationTake(bool commit);
     void updatePreviewTick();
     void prepareRequiredStems();
+    bool beginPreviewAt(double beat, bool establishCue = true);
+    void endPreview(bool returnToCue);
+    void returnPlayheadToPreviewCue();
+    int nextExecutableEventAtOrAfter(double beat) const;
+    int nextExecutableEventFromIndex(int index, const GvtEvent& deleted) const;
+    void followEventSequence(double beat);
+    bool handleEditorKeyPress(QKeyEvent* event);
+    bool handleEditorKeyRelease(QKeyEvent* event);
+    bool focusConsumesTransportShortcut() const;
     bool endpointNeedsStems(Role role) const;
     bool requiredStemsReady() const;
 
@@ -221,6 +250,9 @@ private:
     TransitionTimelineView* timeline_ = nullptr;
     QScrollArea* timelineScroll_ = nullptr;
     QTabWidget* inspectorTabs_ = nullptr;
+    QComboBox* sectionCombo_ = nullptr;
+    TransitionFieldsEditor* fieldsEditor_ = nullptr;
+    int eventsTabIndex_ = -1;
     QLineEdit* nameEdit_ = nullptr;
     QLineEdit* authorEdit_ = nullptr;
     QPlainTextEdit* descriptionEdit_ = nullptr;
@@ -234,6 +266,12 @@ private:
     QComboBox* roleCombo_ = nullptr;
     QComboBox* controlCombo_ = nullptr;
     QDoubleSpinBox* eventBeatSpin_ = nullptr;
+    QLabel* eventSourceBeatLabel_ = nullptr;
+    QLabel* eventMeaningLabel_ = nullptr;
+    QLabel* valueMeaningLabel_ = nullptr;
+    QLabel* timingSummaryLabel_ = nullptr;
+    QPushButton* editSourceButton_ = nullptr;
+    QCheckBox* moveLaunchTogetherCheck_ = nullptr;
     QDoubleSpinBox* eventValueSpin_ = nullptr;
     QComboBox* curveCombo_ = nullptr;
     QComboBox* gestureControlCombo_ = nullptr;
@@ -242,6 +280,11 @@ private:
     QPushButton* applyEventButton_ = nullptr;
     QPushButton* deleteEventButton_ = nullptr;
     QTableWidget* performanceTable_ = nullptr;
+    QLineEdit* definitionStart_ = nullptr;
+    QLineEdit* definitionEnd_ = nullptr;
+    QLabel* definitionLength_ = nullptr;
+    QLineEdit* incomingBpmEdit_ = nullptr;
+    QLineEdit* incomingTempoEdit_ = nullptr;
     QTableWidget* initialTable_ = nullptr;
     QPlainTextEdit* yamlEdit_ = nullptr;
     QLabel* validationLabel_ = nullptr;
@@ -256,6 +299,11 @@ private:
     QAction* saveAction_ = nullptr;
     QAction* saveAsAction_ = nullptr;
     std::vector<GvtEvent> takeEvents_;
+    double previewCueBeat_ = 0.0;
+    bool previewCueValid_ = false;
+    bool previewPaused_ = false;
+    bool keyboardCueHeld_ = false;
+    bool keyboardCueLatched_ = false;
 };
 
 } // namespace gvt

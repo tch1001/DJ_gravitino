@@ -17,8 +17,10 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QResizeEvent>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSlider>
 #include <QStyle>
 #include <QTimer>
@@ -50,6 +52,13 @@ static double sliderToRatio(int value, double range)
 // styles append a background to this so the compact metrics survive.
 static constexpr const char* kLoopBtnBase =
     "QPushButton { padding: 1px 3px; font-size: 9px; }";
+
+// Deck::scratch maps one tick to 10 ms. Projecting the pointer by 0.1 tick
+// per pixel therefore makes the mouse platter a deliberately fine 1 ms/pixel
+// control while leaving the hardware mapping untouched.
+// One scratch tick is 10 ms in Deck. A projected mouse pixel therefore moves
+// 0.2 ms: intentionally very fine for beat matching without a controller.
+static constexpr double kMousePlatterTicksPerPixel = 0.02;
 
 // FxBeats display: "1/4", "1/2", "1", "2", "4".
 static QString formatFxBeats(double beats)
@@ -95,6 +104,37 @@ protected:
             dragReleased(event->globalPosition().toPoint());
         FitPushButton::mouseReleaseEvent(event);
     }
+};
+
+// Transient pad help must never participate in the deck's horizontal size
+// hint. Long CUSTOM messages are elided in place and remain available in the
+// tooltip instead of temporarily pushing the adjacent control rows away.
+class ElidedFeedbackLabel final : public QLabel {
+public:
+    using QLabel::QLabel;
+
+    void setFullText(const QString& text)
+    {
+        fullText_ = text;
+        setToolTip(text);
+        updateElidedText();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QLabel::resizeEvent(event);
+        updateElidedText();
+    }
+
+private:
+    void updateElidedText()
+    {
+        QLabel::setText(fontMetrics().elidedText(
+            fullText_, Qt::ElideRight, std::max(0, width())));
+    }
+
+    QString fullText_;
 };
 
 // ---------------------------------------------------------------- WaveformView
@@ -323,25 +363,21 @@ JogWheelWidget::JogWheelWidget(int deckIndex, ControlBus* bus,
 {
     setObjectName(QStringLiteral("deck%1JogWheel").arg(deckIndex_));
     setFixedSize(72, 72);
-    setCursor(Qt::OpenHandCursor);
-    setToolTip(tr("Fine-adjust platter — drag clockwise or counterclockwise "
-                  "to align the beat by milliseconds without pausing"));
+    setCursor(Qt::SizeFDiagCursor);
+    setToolTip(tr("Fine-adjust platter — drag toward bottom-left to move "
+                  "forward or top-right to move backward (1 ms per pixel)"));
 }
 
 void JogWheelWidget::setPositionSec(double positionSec, bool trackAvailable)
 {
     const bool availabilityChanged = trackAvailable_ != trackAvailable;
     trackAvailable_ = trackAvailable;
-    if (!dragging_) {
-        const double next = trackAvailable && std::isfinite(positionSec)
-                                ? std::fmod(positionSec * 200.0, 360.0)
-                                : 0.0;
-        if (availabilityChanged || std::fabs(next - rotationDegrees_) > 0.05) {
-            rotationDegrees_ = next;
-            setProperty("rotationDegrees", rotationDegrees_);
-            update();
-        }
-    } else if (availabilityChanged) {
+    const double next = trackAvailable && std::isfinite(positionSec)
+                            ? std::fmod(positionSec * 200.0, 360.0)
+                            : 0.0;
+    if (availabilityChanged || std::fabs(next - rotationDegrees_) > 0.05) {
+        rotationDegrees_ = next;
+        setProperty("rotationDegrees", rotationDegrees_);
         update();
     }
 }
@@ -391,13 +427,23 @@ void JogWheelWidget::paintEvent(QPaintEvent*)
         painter.setFont(QFont(font().family(), 7, QFont::Bold));
         painter.drawText(platter, Qt::AlignCenter, tr("JOG"));
     }
-}
 
-double JogWheelWidget::pointerAngle(const QPointF& position) const
-{
-    const QPointF delta = position - rect().center();
-    return std::atan2(delta.x(), -delta.y()) * 180.0 /
-           std::numbers::pi;
+    if (dragging_) {
+        QColor guide = accent;
+        guide.setAlpha(150);
+        painter.setPen(QPen(guide, 1.2, Qt::DashLine));
+        const QPointF topRight = platter.topRight() + QPointF(-10.0, 10.0);
+        const QPointF bottomLeft = platter.bottomLeft() + QPointF(10.0, -10.0);
+        painter.drawLine(topRight, bottomLeft);
+        painter.setPen(accent.lighter(140));
+        painter.setFont(QFont(font().family(), 8, QFont::Bold));
+        painter.drawText(QRectF(platter.right() - 18.0, platter.top() + 3.0,
+                                14.0, 14.0),
+                         Qt::AlignCenter, QStringLiteral("−"));
+        painter.drawText(QRectF(platter.left() + 4.0, platter.bottom() - 17.0,
+                                14.0, 14.0),
+                         Qt::AlignCenter, QStringLiteral("+"));
+    }
 }
 
 void JogWheelWidget::dispatch(ControlId id, double value)
@@ -412,29 +458,26 @@ void JogWheelWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
     dragging_ = true;
-    lastPointerAngle_ = pointerAngle(event->position());
-    setCursor(Qt::ClosedHandCursor);
+    lastPointerX_ = event->position().x();
+    lastPointerY_ = event->position().y();
     update();
     event->accept();
 }
 
 void JogWheelWidget::applyDrag(const QPointF& position)
 {
-    double angle = pointerAngle(position);
-    double delta = angle - lastPointerAngle_;
-    if (delta > 180.0) delta -= 360.0;
-    if (delta < -180.0) delta += 360.0;
-    lastPointerAngle_ = angle;
-    if (std::fabs(delta) < 0.05) return;
+    const double dx = position.x() - lastPointerX_;
+    const double dy = position.y() - lastPointerY_;
+    lastPointerX_ = position.x();
+    lastPointerY_ = position.y();
 
-    rotationDegrees_ = std::fmod(rotationDegrees_ + delta + 360.0, 360.0);
-    setProperty("rotationDegrees", rotationDegrees_);
-    // Mouse use is for fine phase alignment, not coarse set preparation. By
-    // deliberately omitting PlatterTouch, Deck::scratch takes its direct
-    // positional path and leaves PLAY untouched. Twenty angular degrees per
-    // 10 ms tick means about 45 ms per quarter turn. Hardware remains on its
-    // separately touch-gated, substantially coarser mapping.
-    dispatch(ControlId::PlatterScratch, delta / 20.0);
+    // Unit projection onto bottom-left (-x,+y). Positive moves the playhead
+    // forward, top-right moves it backward, and the perpendicular diagonal is
+    // ignored. PlatterTouch is deliberately omitted so PLAY never pauses.
+    const double forwardPixels = (dy - dx) / std::numbers::sqrt2;
+    if (std::fabs(forwardPixels) < 0.05) return;
+    dispatch(ControlId::PlatterScratch,
+             forwardPixels * kMousePlatterTicksPerPixel);
     update();
 }
 
@@ -456,7 +499,6 @@ void JogWheelWidget::mouseReleaseEvent(QMouseEvent* event)
     }
     applyDrag(event->position());
     dragging_ = false;
-    setCursor(Qt::OpenHandCursor);
     update();
     event->accept();
 }
@@ -665,7 +707,26 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
             configurePerformancePad(i, b->mapToGlobal(pos));
         });
     }
-    padsAndModes->addLayout(cues);
+    auto* padBankColumn = new QVBoxLayout;
+    padBankColumn->setSpacing(3);
+    customBankCombo_ = new QComboBox(this);
+    customBankCombo_->setObjectName(
+        QStringLiteral("deck%1CustomBank").arg(deckIndex_));
+    customBankCombo_->addItems({tr("CUSTOM: NORMAL"), tr("CUSTOM: TRANSITION")});
+    customBankCombo_->setFixedSize(153, 19);
+    customBankCombo_->setFocusPolicy(Qt::NoFocus);
+    customBankCombo_->setStyleSheet(QStringLiteral("font-size:9px;"));
+    QSizePolicy bankPolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    bankPolicy.setRetainSizeWhenHidden(true);
+    customBankCombo_->setSizePolicy(bankPolicy);
+    connect(customBankCombo_, &QComboBox::currentIndexChanged, this,
+            [this](int index) {
+                setCustomPadBank(index == 1 ? CustomPadBank::Transition
+                                            : CustomPadBank::Normal);
+            });
+    padBankColumn->addWidget(customBankCombo_);
+    padBankColumn->addLayout(cues);
+    padsAndModes->addLayout(padBankColumn);
 
     auto* modes = new QGridLayout;
     modes->setSpacing(2);
@@ -675,6 +736,10 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     for (int i = 0; i < 4; ++i) {
         auto* b = new FitPushButton(
             QLatin1String(performancePadModeLabel(kNormalModes[i])), this);
+        b->setObjectName(
+            QStringLiteral("deck%1PerformanceMode%2")
+                .arg(deckIndex_)
+                .arg(QLatin1String(performancePadModeKey(kNormalModes[i]))));
         b->setFixedHeight(19);
         b->setFixedWidth(48);
         b->setFocusPolicy(Qt::NoFocus);
@@ -712,13 +777,33 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     padsAndModes->addStretch(1);
     padsSection->addLayout(padsAndModes);
 
-    padStatusLabel_ = new QLabel(this);
-    padStatusLabel_->setMinimumHeight(13);
+    padStatusLabel_ = new ElidedFeedbackLabel(this);
+    padStatusLabel_->setObjectName(
+        QStringLiteral("deck%1PadFeedback").arg(deckIndex_));
+    padStatusLabel_->setFixedHeight(13);
+    padStatusLabel_->setMinimumWidth(0);
+    padStatusLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     padStatusLabel_->setStyleSheet(
         QStringLiteral("color:%1; font-size:9px;").arg(themeDimText().name()));
     padsSection->addWidget(padStatusLabel_);
+
     jogWheel_ = new JogWheelWidget(deckIndex_, bus_, this);
-    performanceArea->addWidget(jogWheel_, 0, Qt::AlignTop);
+    beatLabel_ = new QLabel(tr("BEAT —"), this);
+    beatLabel_->setObjectName(
+        QStringLiteral("deck%1BeatCounter").arg(deckIndex_));
+    beatLabel_->setFixedSize(72, 14);
+    beatLabel_->setAlignment(Qt::AlignCenter);
+    beatLabel_->setStyleSheet(
+        QStringLiteral("font-family:monospace; font-size:9px; color:%1;")
+            .arg(themeDimText().name()));
+    beatLabel_->setToolTip(
+        tr("Canonical track beat used by portable transition files"));
+    auto* platterColumn = new QVBoxLayout;
+    platterColumn->setContentsMargins(0, 0, 0, 0);
+    platterColumn->setSpacing(1);
+    platterColumn->addWidget(jogWheel_, 0, Qt::AlignHCenter);
+    platterColumn->addWidget(beatLabel_, 0, Qt::AlignHCenter);
+    performanceArea->addLayout(platterColumn);
     performanceArea->addLayout(padsSection);
     syncPerformancePadUi();
 
@@ -758,6 +843,8 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
     }
     loopRow->addSpacing(5);
     loopInBtn_ = mkLoopBtn(loopRow, tr("IN"), tr("Set loop in point"));
+    loopInBtn_->setObjectName(
+        QStringLiteral("deck%1LoopInButton").arg(deckIndex_));
     loopOutBtn_ = mkLoopBtn(loopRow, tr("OUT"), tr("Set loop out point + activate"));
     loopExitBtn_ = mkLoopBtn(loopRow, tr("EXIT"), tr("Exit the active loop"));
     connect(loopInBtn_, &QPushButton::pressed, this,
@@ -967,6 +1054,8 @@ DeckWidget::DeckWidget(int deckIndex, ControlBus* bus, AudioEngine* engine,
         QStringLiteral("color:%1; font-size:10px;").arg(themeDimText().name()));
     tempoCol->addWidget(tempoCaption);
     tempoRangeBtn_ = new FitToolButton(this);
+    tempoRangeBtn_->setObjectName(
+        QStringLiteral("deck%1TempoRange").arg(deckIndex_));
     tempoRangeBtn_->setPopupMode(QToolButton::InstantPopup);
     tempoRangeBtn_->setFixedWidth(54);
     tempoRangeBtn_->setToolTip(
@@ -1064,14 +1153,24 @@ void DeckWidget::setTemporaryTransitionCues(
     const std::array<double, 8>& endSeconds,
     const QStringList& labels, const QStringList& colors)
 {
+    const bool available = std::any_of(
+        startSeconds.begin(), startSeconds.end(), [](double sec) {
+            return std::isfinite(sec) && sec >= 0.0;
+        });
+    const bool newlyAvailable = available && !temporaryTransitionCuesAvailable_;
+    // Release through the old bank before replacing it, so a held preview
+    // cannot get stranded or send its release to a different kind of pad.
+    if (newlyAvailable || (usesTransitionCustomBank() &&
+        (startSeconds != temporaryTransitionCueSecs_ ||
+         endSeconds != temporaryTransitionLoopEndSecs_)))
+        releaseCustomPads();
     temporaryTransitionCueSecs_ = startSeconds;
     temporaryTransitionLoopEndSecs_ = endSeconds;
     temporaryTransitionCueLabels_ = labels;
     temporaryTransitionCueColors_ = colors;
-    temporaryTransitionCuesActive_ = std::any_of(
-        startSeconds.begin(), startSeconds.end(), [](double sec) {
-            return std::isfinite(sec) && sec >= 0.0;
-        });
+    temporaryTransitionCuesAvailable_ = available;
+    if (newlyAvailable) customPadBank_ = CustomPadBank::Transition;
+    if (!available) customPadBank_ = CustomPadBank::Normal;
     engine_->deck(deckIndex_).setTransitionPerformanceSlots(
         startSeconds, endSeconds);
     syncPerformancePadUi();
@@ -1079,17 +1178,44 @@ void DeckWidget::setTemporaryTransitionCues(
 
 void DeckWidget::clearTemporaryTransitionCues()
 {
-    for (int pad = 0; pad < kPerformancePadCount; ++pad)
-        if (padIsPressed_[pad] &&
-            pressedPadModes_[pad] == PerformancePadMode::Sampler)
-            handlePerformancePad(pad, false);
-    temporaryTransitionCuesActive_ = false;
+    if (usesTransitionCustomBank()) releaseCustomPads();
+    temporaryTransitionCuesAvailable_ = false;
+    customPadBank_ = CustomPadBank::Normal;
     temporaryTransitionCueSecs_.fill(-1.0);
     temporaryTransitionLoopEndSecs_.fill(-1.0);
     temporaryTransitionCueLabels_.clear();
     temporaryTransitionCueColors_.clear();
     engine_->deck(deckIndex_).clearTransitionCues();
     syncPerformancePadUi();
+}
+
+bool DeckWidget::usesTransitionCustomBank() const
+{
+    return temporaryTransitionCuesAvailable_ &&
+           customPadBank_ == CustomPadBank::Transition;
+}
+
+void DeckWidget::releaseCustomPads()
+{
+    setPlayDropTargetVisible(false);
+    for (int pad = 0; pad < kPerformancePadCount; ++pad)
+        if (padIsPressed_[pad] &&
+            pressedPadModes_[pad] == PerformancePadMode::Sampler)
+            handlePerformancePad(pad, false);
+}
+
+void DeckWidget::setCustomPadBank(CustomPadBank bank)
+{
+    if (bank == CustomPadBank::Transition && !temporaryTransitionCuesAvailable_)
+        bank = CustomPadBank::Normal;
+    if (bank != customPadBank_) {
+        releaseCustomPads();
+        customPadBank_ = bank;
+    }
+    syncPerformancePadUi();
+    showPadFeedback(usesTransitionCustomBank()
+        ? tr("CUSTOM: TRANSITION · temporary cues/loops; edit in the transition editor")
+        : tr("CUSTOM: NORMAL · your saved loops/audio; right-click a pad to edit"));
 }
 
 QWidget* DeckWidget::controlWidget(ControlId control) const
@@ -1106,6 +1232,20 @@ QWidget* DeckWidget::controlWidget(ControlId control) const
     case ControlId::StemDrums:   return stemPads_[3];
     default:                     return nullptr;
     }
+}
+
+double DeckWidget::controlDisplayFraction(ControlId control, double value) const
+{
+    if (control == ControlId::Tempo) {
+        const double range = engine_->deck(deckIndex_).tempoRange.load(
+            std::memory_order_acquire);
+        const int position = ratioToSlider(value, range);
+        return std::clamp(
+            static_cast<double>(position - tempoSlider_->minimum()) /
+                std::max(1, tempoSlider_->maximum() - tempoSlider_->minimum()),
+            0.0, 1.0);
+    }
+    return std::clamp(value, 0.0, 1.0);
 }
 
 void DeckWidget::loadPerformancePadSettings()
@@ -1207,8 +1347,10 @@ void DeckWidget::setPerformancePadMode(PerformancePadMode mode)
         QLatin1String(performancePadModeLabel(padMode_));
     if (padMode_ == PerformancePadMode::Sampler) {
         showPadFeedback(
-            tr("CUSTOM · empty pad captures the active loop; filled loop "
-               "starts it; custom audio files remain programmable"));
+            usesTransitionCustomBank()
+                ? tr("CUSTOM: TRANSITION · temporary cues/loops; switch to NORMAL to edit your own pads")
+                : tr("CUSTOM: NORMAL · empty pad captures the active loop; filled loop "
+                     "starts it; right-click to edit"));
     } else if (padMode_ == PerformancePadMode::Keyboard ||
                padMode_ == PerformancePadMode::KeyShift) {
         showPadFeedback(tr("%1 is programmable; pitch-shift audio is not available yet")
@@ -1273,7 +1415,7 @@ unsigned int DeckWidget::performancePadLedMask(
     unsigned int mask = 0;
     for (int pad = 0; pad < kPerformancePadCount; ++pad) {
         if (mode == PerformancePadMode::Sampler &&
-            temporaryTransitionCuesActive_) {
+            usesTransitionCustomBank()) {
             if (std::isfinite(temporaryTransitionCueSecs_[pad]) &&
                 temporaryTransitionCueSecs_[pad] >= 0.0)
                 mask |= 1U << static_cast<unsigned int>(pad);
@@ -1331,6 +1473,18 @@ void DeckWidget::performanceMetadataChanged()
 
 void DeckWidget::syncPerformancePadUi()
 {
+    if (customBankCombo_) {
+        QSignalBlocker block(customBankCombo_);
+        customBankCombo_->setCurrentIndex(usesTransitionCustomBank() ? 1 : 0);
+        customBankCombo_->setVisible(padMode_ == PerformancePadMode::Sampler);
+        customBankCombo_->setEnabled(temporaryTransitionCuesAvailable_);
+        customBankCombo_->setToolTip(temporaryTransitionCuesAvailable_
+            ? tr("NORMAL: your editable saved loops and custom audio. "
+                 "TRANSITION: protected temporary cues/loops from the selected transition. "
+                 "Switching banks does not change either bank or transition playback.")
+            : tr("NORMAL: your editable saved loops and custom audio. "
+                 "Select a transition with cues/loops to enable the TRANSITION bank."));
+    }
     const QColor accent = deckAccent(deckIndex_);
     const QString modeBase = QStringLiteral(
         "QPushButton { padding:1px 4px; font-size:8px; }");
@@ -1376,7 +1530,7 @@ void DeckWidget::syncPerformancePadUi()
         QString color;
         QString tooltip;
         if (padMode_ == PerformancePadMode::Sampler &&
-            temporaryTransitionCuesActive_) {
+            usesTransitionCustomBank()) {
             const bool set = std::isfinite(temporaryTransitionCueSecs_[pad]) &&
                              temporaryTransitionCueSecs_[pad] >= 0.0;
             const QString label = temporaryTransitionCueLabels_.value(pad);
@@ -1519,7 +1673,7 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
         if (!padIsPressed_[pad]) return;
         const PerformancePadMode pressedMode = pressedPadModes_[pad];
         if (pressedMode == PerformancePadMode::Sampler &&
-            temporaryTransitionCuesActive_) {
+            usesTransitionCustomBank()) {
             dispatchPerformancePadGesture(pressedMode, pad);
             const auto id = static_cast<ControlId>(
                 static_cast<int>(ControlId::TransitionCue1) + pad);
@@ -1559,7 +1713,7 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
         padAssignments_[static_cast<int>(padMode_)][pad];
     TrackDataPtr track = engine_->deck(deckIndex_).track();
     if (padMode_ == PerformancePadMode::Sampler &&
-        temporaryTransitionCuesActive_) {
+        usesTransitionCustomBank()) {
         if (!track || !std::isfinite(temporaryTransitionCueSecs_[pad]) ||
             temporaryTransitionCueSecs_[pad] < 0.0) {
             showPadFeedback(tr("That transition cue slot is empty"));
@@ -1730,9 +1884,10 @@ void DeckWidget::showPadFeedback(const QString& text)
 {
     if (!padStatusLabel_) return;
     const int serial = ++padFeedbackSerial_;
-    padStatusLabel_->setText(text);
+    padStatusLabel_->setFullText(text);
     QTimer::singleShot(3500, this, [this, serial] {
-        if (serial == padFeedbackSerial_) padStatusLabel_->clear();
+        if (serial == padFeedbackSerial_)
+            padStatusLabel_->setFullText(QString());
     });
 }
 
@@ -1742,7 +1897,7 @@ bool DeckWidget::canDragHotCueToPlay(int pad) const
         return false;
     const PerformancePadMode pressedMode = pressedPadModes_[pad];
     if (pressedMode == PerformancePadMode::Sampler &&
-        temporaryTransitionCuesActive_)
+        usesTransitionCustomBank())
         return std::isfinite(temporaryTransitionCueSecs_[pad]) &&
                temporaryTransitionCueSecs_[pad] >= 0.0;
     const auto& assignment =
@@ -1770,7 +1925,7 @@ void DeckWidget::updateHotCuePlayDropTarget(
     if (overPlay && !playDropTargetVisible_) {
         const bool transitionLoop =
             pressedPadModes_[pad] == PerformancePadMode::Sampler &&
-            temporaryTransitionCuesActive_ &&
+            usesTransitionCustomBank() &&
             std::isfinite(temporaryTransitionLoopEndSecs_[pad]) &&
             temporaryTransitionLoopEndSecs_[pad] >
                 temporaryTransitionCueSecs_[pad];
@@ -1795,7 +1950,7 @@ void DeckWidget::finishHotCuePlayDrag(
     dispatch(ControlId::Play);
     const bool transitionLoop =
         pressedPadModes_[pad] == PerformancePadMode::Sampler &&
-        temporaryTransitionCuesActive_ &&
+        usesTransitionCustomBank() &&
         std::isfinite(temporaryTransitionLoopEndSecs_[pad]) &&
         temporaryTransitionLoopEndSecs_[pad] >
             temporaryTransitionCueSecs_[pad];
@@ -1808,9 +1963,10 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
 {
     if (pad < 0 || pad >= kPerformancePadCount) return;
     if (padMode_ == PerformancePadMode::Sampler &&
-        temporaryTransitionCuesActive_) {
+        usesTransitionCustomBank()) {
         showPadFeedback(
-            tr("Transition cues and loops are temporary; edit them in the transition"));
+            tr("CUSTOM: TRANSITION is protected. Edit in the transition editor, "
+               "or switch to CUSTOM: NORMAL above the pads to edit your own loops."));
         return;
     }
     TrackDataPtr track = engine_->deck(deckIndex_).track();
@@ -1839,7 +1995,7 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
 
         QMenu menu(this);
         QAction* heading = menu.addAction(
-            tr("CUSTOM · PAD %1").arg(pad + 1));
+            tr("CUSTOM: NORMAL · PAD %1").arg(pad + 1));
         heading->setEnabled(false);
         menu.addSeparator();
         QAction* capture = menu.addAction(
@@ -2401,6 +2557,19 @@ void DeckWidget::refresh()
     if (t && t->durationSec > 0.0) {
         double pos = deck.positionSec();
         if (jogWheel_) jogWheel_->setPositionSec(pos, true);
+        const bool hasGrid = std::isfinite(t->bpm) && t->bpm > 0.0 &&
+                             std::isfinite(t->firstBeatSec) &&
+                             std::isfinite(t->canonicalBeatOffset);
+        if (beatLabel_) {
+            if (hasGrid) {
+                double beat = t->canonicalBeatAtSec(pos);
+                if (std::fabs(beat) < 0.005) beat = 0.0;
+                beatLabel_->setText(
+                    tr("BEAT %1").arg(QString::number(beat, 'f', 2)));
+            } else {
+                beatLabel_->setText(tr("BEAT —"));
+            }
+        }
         timeLabel_->setText(formatTime(pos) + " / -" +
                             formatTime(t->durationSec - pos));
         double eff = deck.effectiveBpm();
@@ -2434,6 +2603,7 @@ void DeckWidget::refresh()
         lastWaveformPos_ = -1.0;
         timeLabel_->setText(tr("0:00.0 / -0:00.0"));
         if (jogWheel_) jogWheel_->setPositionSec(0.0, false);
+        if (beatLabel_) beatLabel_->setText(tr("BEAT —"));
     }
     syncLoopButtons();
     syncFxControls();

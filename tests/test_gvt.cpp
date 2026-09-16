@@ -127,6 +127,7 @@ bool filesEqual(const gvt::GvtFile& a, const gvt::GvtFile& b) {
         !initialEqual(a.initialFrom, b.initialFrom) ||
         !initialEqual(a.initialTo, b.initialTo) ||
         a.initialMixerCaptured != b.initialMixerCaptured ||
+        a.initialCrossfaderPresent != b.initialCrossfaderPresent ||
         !near(a.initialCrossfader, b.initialCrossfader)) return false;
     for (size_t i = 0; i < a.fromHotCueBeats.size(); ++i) {
         if (!near(a.fromHotCueBeats[i], b.fromHotCueBeats[i]) ||
@@ -266,6 +267,7 @@ int main() {
         GvtFile complete = f;
         complete.initialComplete = true;
         complete.initialMixerCaptured = true;
+        complete.initialCrossfaderPresent = true;
         complete.initialCrossfader = 0.23;
         complete.initialFrom.playing = true;
         complete.initialFrom.positionBeat = 224.0;

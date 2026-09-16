@@ -323,13 +323,6 @@ struct MidiEngine::Impl {
 
     void postMidiEvent(ControlEvent event) noexcept
     {
-        // After automatic replay, every FLX4 action is frozen except moving
-        // the absolute controls needed to pick up Gravitino's final state.
-        if (takeoverFrozen.load(std::memory_order_acquire) &&
-            !SoftTakeover::supports(event)) {
-            return;
-        }
-
         if (event.id == ControlId::PerformancePadMode) {
             const int mode = static_cast<int>(std::lround(event.value));
             if (event.deck < 0 || event.deck >= 2 || mode < 0 ||
@@ -534,12 +527,19 @@ struct MidiEngine::Impl {
     void handleMidiEventOnGui(const ControlEvent& event)
     {
         emit owner->hardwareControlObserved(event);
+        if (manualFrozen && SoftTakeover::supports(event)) {
+            takeover.rememberHardware(event);
+            emit owner->hardwareStateChanged();
+            return;
+        }
         bool changed = false;
         const bool accepted = takeover.acceptHardware(event, &changed);
         if (changed) {
             takeoverFrozen.store(takeover.active(), std::memory_order_release);
             emit owner->softTakeoverChanged();
         }
+        if (SoftTakeover::supports(event))
+            emit owner->hardwareStateChanged();
         if (accepted && bus != nullptr)
             bus->dispatch(event, Origin::Midi);
     }
@@ -589,12 +589,11 @@ struct MidiEngine::Impl {
 
         if (eventCount == 0)
             return;
-        ControlBus* const targetBus = bus;
         QMetaObject::invokeMethod(
-            targetBus,
-            [targetBus, events, eventCount] {
+            owner,
+            [this, events, eventCount] {
                 for (std::size_t index = 0; index < eventCount; ++index)
-                    targetBus->dispatch(events[index], Origin::Midi);
+                    handleMidiEventOnGui(events[index]);
             },
             Qt::QueuedConnection);
     }
@@ -612,6 +611,8 @@ struct MidiEngine::Impl {
             takeoverFrozen.store(takeover.active(), std::memory_order_release);
             emit owner->softTakeoverChanged();
         }
+        if (origin != Origin::Midi && SoftTakeover::supports(event))
+            emit owner->hardwareStateChanged();
 
         if (event.deck < 0 || event.deck > 1) {
             return;
@@ -973,8 +974,38 @@ struct MidiEngine::Impl {
         case ControlId::EqMid:  return target.eqMid.load(std::memory_order_relaxed);
         case ControlId::EqHigh: return target.eqHigh.load(std::memory_order_relaxed);
         case ControlId::Filter: return target.filter.load(std::memory_order_relaxed);
+        case ControlId::FxWet: return target.fxWet.load(std::memory_order_relaxed);
         default:                return 0.0;
         }
+    }
+
+    std::vector<ControlEvent> absoluteSoftwareTargets() const
+    {
+        std::vector<ControlEvent> result;
+        static constexpr ControlId deckControls[] = {
+            ControlId::Tempo, ControlId::Fader, ControlId::Trim,
+            ControlId::EqHigh, ControlId::EqMid, ControlId::EqLow,
+            ControlId::Filter, ControlId::FxWet};
+        result.reserve(17);
+        for (DeckId deck = 0; deck < 2; ++deck)
+            for (ControlId control : deckControls)
+                result.push_back({deck, control, engineValue(deck, control)});
+        result.push_back({kNoDeck, ControlId::Crossfader,
+                          engineValue(kNoDeck, ControlId::Crossfader)});
+        return result;
+    }
+
+    void setManualFrozen(bool frozen)
+    {
+        if (manualFrozen == frozen) return;
+        manualFrozen = frozen;
+        takeover.clear();
+        if (!manualFrozen)
+            takeover.arm(absoluteSoftwareTargets());
+        takeoverFrozen.store(takeover.active(), std::memory_order_release);
+        emit owner->hardwareInputFrozenChanged(manualFrozen);
+        emit owner->softTakeoverChanged();
+        emit owner->hardwareStateChanged();
     }
 
     void beginTakeoverTracking()
@@ -1004,6 +1035,15 @@ struct MidiEngine::Impl {
     void finishTakeoverTracking()
     {
         takeoverTracking = false;
+        if (manualFrozen) {
+            takeoverTouched.clear();
+            takeoverStartValues.clear();
+            takeover.clear();
+            takeoverFrozen.store(false, std::memory_order_release);
+            emit owner->softTakeoverChanged();
+            emit owner->hardwareStateChanged();
+            return;
+        }
         if (!connected || takeoverTouched.empty()) {
             takeover.clear();
             takeoverTouched.clear();
@@ -1079,6 +1119,7 @@ struct MidiEngine::Impl {
     std::set<std::pair<DeckId, unsigned int>> takeoverTouched;
     std::map<std::pair<DeckId, unsigned int>, double> takeoverStartValues;
     std::atomic_bool takeoverFrozen {false};
+    bool manualFrozen = false;
 };
 
 MidiEngine::MidiEngine(
@@ -1123,6 +1164,27 @@ void MidiEngine::cancelTransitionTakeoverTracking()
 std::vector<SoftTakeoverState> MidiEngine::pendingTakeovers() const
 {
     return impl_->takeover.pending();
+}
+
+std::vector<SoftTakeoverState> MidiEngine::hardwareControlStates() const
+{
+    return impl_->takeover.snapshot(impl_->absoluteSoftwareTargets());
+}
+
+void MidiEngine::refreshHardwareState()
+{
+    impl_->pollPorts();
+    emit hardwareStateChanged();
+}
+
+bool MidiEngine::hardwareInputFrozen() const
+{
+    return impl_->manualFrozen;
+}
+
+void MidiEngine::setHardwareInputFrozen(bool frozen)
+{
+    impl_->setManualFrozen(frozen);
 }
 
 bool MidiEngine::controllerConnected() const

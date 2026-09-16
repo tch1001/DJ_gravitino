@@ -16,4 +16,10 @@ void transitionPlayerSetMode(TransitionPlayer* player, PlayerMode mode);
 void transitionPlayerPreserveOutgoingSetupTempo(TransitionPlayer* player,
                                                 bool preserve);
 
+// Editor/offline adapter: use the SAME player and dispatch path, with a
+// caller-supplied monotonic musical clock instead of a running GUI timer.
+// Set before arm(). Advancing is GUI-thread-only and does not render audio.
+void transitionPlayerUseExternalClock(TransitionPlayer* player, bool external);
+void transitionPlayerAdvanceToBeat(TransitionPlayer* player, double beat);
+
 } // namespace gvt

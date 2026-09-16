@@ -19,6 +19,7 @@ bool SoftTakeover::supports(const ControlEvent& event) noexcept
     case ControlId::EqMid:
     case ControlId::EqHigh:
     case ControlId::Filter:
+    case ControlId::FxWet:
         return true;
     default:
         return false;
@@ -74,19 +75,11 @@ bool SoftTakeover::retarget(const ControlEvent& target)
     const double oldTarget = wasPending ? existing->second : 0.0;
     targets_[key] = target.value;
 
-    const auto allMatched = [this] {
-        for (const auto& [candidate, value] : targets_) {
-            const auto hardware = hardware_.find(candidate);
-            const ControlId control = candidate.control;
-            if (hardware == hardware_.end() || !hardware->second.known ||
-                std::fabs(hardware->second.value - value) >
-                    tolerance(control))
-                return false;
-        }
-        return true;
-    };
-    if (allMatched())
-        targets_.clear();
+    const auto hardware = hardware_.find(key);
+    if (hardware != hardware_.end() && hardware->second.known &&
+        std::fabs(hardware->second.value - target.value) <=
+            tolerance(target.id))
+        targets_.erase(key);
     return !wasPending || oldTarget != target.value || !active();
 }
 
@@ -94,7 +87,9 @@ bool SoftTakeover::acceptHardware(const ControlEvent& event,
                                   bool* stateChanged)
 {
     if (stateChanged) *stateChanged = false;
-    if (!supports(event)) return !active();
+    // Pickup gates only apply to absolute controls. Buttons and other
+    // relative inputs remain live while a knob is waiting for pickup.
+    if (!supports(event)) return true;
 
     const Key key = keyFor(event);
     if (!active()) {
@@ -103,20 +98,13 @@ bool SoftTakeover::acceptHardware(const ControlEvent& event,
     }
 
     hardware_[key] = HardwareValue {event.value, true};
+    const auto target = targets_.find(key);
+    if (target == targets_.end()) return true;
     if (stateChanged) *stateChanged = true;
-
-    bool allMatched = true;
-    for (const auto& [candidate, target] : targets_) {
-        const auto hardware = hardware_.find(candidate);
-        if (hardware == hardware_.end() || !hardware->second.known ||
-            std::fabs(hardware->second.value - target) >
-                tolerance(candidate.control)) {
-            allMatched = false;
-            break;
-        }
-    }
-    if (allMatched)
-        targets_.clear();
+    if (std::fabs(event.value - target->second) <= tolerance(event.id))
+        targets_.erase(target);
+    // Consume the crossing event so acquiring a control never introduces a
+    // small audible jump. Its next movement flows normally.
     return false;
 }
 
@@ -129,6 +117,7 @@ std::vector<SoftTakeoverState> SoftTakeover::pending() const
         state.deck = key.deck;
         state.control = key.control;
         state.targetValue = target;
+        state.pickupPending = true;
         const auto hardware = hardware_.find(key);
         if (hardware != hardware_.end() && hardware->second.known) {
             state.hardwareValue = hardware->second.value;
@@ -137,6 +126,29 @@ std::vector<SoftTakeoverState> SoftTakeover::pending() const
                 tolerance(key.control))
                 continue;
         }
+        result.push_back(state);
+    }
+    return result;
+}
+
+std::vector<SoftTakeoverState> SoftTakeover::snapshot(
+    const std::vector<ControlEvent>& softwareTargets) const
+{
+    std::vector<SoftTakeoverState> result;
+    result.reserve(softwareTargets.size());
+    for (const ControlEvent& target : softwareTargets) {
+        if (!supports(target)) continue;
+        SoftTakeoverState state;
+        state.deck = target.deck;
+        state.control = target.id;
+        state.targetValue = target.value;
+        const Key key = keyFor(target);
+        const auto hardware = hardware_.find(key);
+        if (hardware != hardware_.end() && hardware->second.known) {
+            state.hardwareValue = hardware->second.value;
+            state.hardwareKnown = true;
+        }
+        state.pickupPending = targets_.find(key) != targets_.end();
         result.push_back(state);
     }
     return result;

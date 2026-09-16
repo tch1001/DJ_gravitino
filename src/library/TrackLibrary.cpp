@@ -19,6 +19,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QThreadPool>
 #include <QtConcurrent/QtConcurrent>
@@ -310,6 +311,23 @@ QString formatDuration(double sec)
     return QStringLiteral("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QLatin1Char('0'));
 }
 
+QString naturalKeySortValue(const QString& key)
+{
+    static const QRegularExpression camelot(
+        QStringLiteral("^\\s*(\\d{1,2})\\s*([AaBb])\\s*$"));
+    const QRegularExpressionMatch match = camelot.match(key);
+    if (match.hasMatch()) {
+        return QStringLiteral("0:%1:%2")
+            .arg(match.captured(1).toInt(), 2, 10, QLatin1Char('0'))
+            .arg(match.captured(2).toUpper());
+    }
+    // Unknown/non-Camelot values remain stable and case-insensitive, after
+    // valid numbered Camelot keys.
+    return key.trimmed().isEmpty()
+               ? QStringLiteral("2:")
+               : QStringLiteral("1:") + key.trimmed().toCaseFolded();
+}
+
 } // namespace
 
 TrackLibrary::TrackLibrary(QObject* parent) : QAbstractTableModel(parent)
@@ -419,6 +437,7 @@ TrackLibrary::transitionsForTrack(int row) const
 void TrackLibrary::rebuildTransitionGraph(const TransitionStore& transitions)
 {
     state(this)->catalog.rebuildTransitionGraph(transitions.all());
+    emit transitionGraphChanged();
 }
 
 SongCatalog* TrackLibrary::songCatalog()
@@ -548,6 +567,26 @@ QVariant TrackLibrary::data(const QModelIndex& idx, int role) const
         if (idx.column() == ColBpm || idx.column() == ColKey || idx.column() == ColDuration)
             return QVariant(Qt::AlignRight | Qt::AlignVCenter);
         return {};
+    }
+    if (role == Qt::UserRole) {
+        switch (idx.column()) {
+        case ColTitle:
+            return r.track && !r.track->title.isEmpty()
+                       ? r.track->title
+                       : QFileInfo(r.path).completeBaseName();
+        case ColArtist:
+            return r.track ? r.track->artist : QString();
+        case ColBpm:
+            return (r.track && r.track->bpm > 0.0)
+                       ? QVariant(r.track->bpm) : QVariant();
+        case ColKey:
+            return naturalKeySortValue(
+                r.track ? r.track->camelotKey : QString());
+        case ColDuration:
+            return r.track ? QVariant(r.track->durationSec) : QVariant();
+        case ColStatus:
+            return r.status;
+        }
     }
     if (role != Qt::DisplayRole) return {};
 

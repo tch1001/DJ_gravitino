@@ -21,6 +21,7 @@ class CrateFilterProxy;   // path-prefix + title/artist search proxy
 class HistoryModel;       // table model over gvt::History (newest first)
 class TransitionEdgeModel; // all saved transitions as from -> to rows
 class TransitionSortProxy; // pins currently-playing FROM tracks above the rest
+class TransitionGraphWindow;
 
 // Serato-style library chrome: a collapsible left crate sidebar (one crate
 // per subdirectory of the scanned folder), a right-aligned [Library]
@@ -58,6 +59,7 @@ private slots:
     void showTransitionContextMenu(const QPoint& pos);
     void renameSelectedTransition();
     void deleteSelectedTransition();
+    void showTransitionGraph();
 
 private:
     int sourceRowFor(const QModelIndex& proxyIndex) const;
@@ -86,17 +88,20 @@ private:
     QLineEdit* search_ = nullptr;
     QCheckBox* legacyTransitionFilter_ = nullptr;
     QCheckBox* portableTransitionFilter_ = nullptr;
+    QCheckBox* recommendedFilter_ = nullptr;
     QPushButton* libraryTabBtn_ = nullptr;
     QPushButton* historyTabBtn_ = nullptr;
     QPushButton* transitionTabBtn_ = nullptr;
     QPushButton* renameTransitionBtn_ = nullptr;
     QPushButton* deleteTransitionBtn_ = nullptr;
+    QPushButton* transitionGraphBtn_ = nullptr;
     QPushButton* newTransitionBtn_ = nullptr;
     QPushButton* loadABtn_ = nullptr;
     QPushButton* loadBBtn_ = nullptr;
     QTimer* loadStateTimer_ = nullptr;
     bool transitionEditingEnabled_ = true;
     QString selectedTransitionPath_;
+    TransitionGraphWindow* transitionGraphWindow_ = nullptr;
 };
 
 } // namespace gvt

@@ -16,6 +16,7 @@ struct SoftTakeoverState {
     double targetValue = 0.0;
     double hardwareValue = 0.0;
     bool hardwareKnown = false;
+    bool pickupPending = false;
 };
 
 // Pure pickup/soft-takeover state machine. MidiEngine owns one instance and
@@ -38,6 +39,8 @@ public:
 
     bool active() const noexcept { return !targets_.empty(); }
     std::vector<SoftTakeoverState> pending() const;
+    std::vector<SoftTakeoverState> snapshot(
+        const std::vector<ControlEvent>& softwareTargets) const;
 
 private:
     struct Key {
@@ -59,9 +62,9 @@ private:
     }
 
     std::map<Key, HardwareValue> hardware_;
-    // Targets remain armed until every originally mismatched control is
-    // simultaneously inside tolerance. `pending()` derives the currently
-    // mismatched subset, allowing a knob that overshoots to light up again.
+    // Each target is independent and is removed as soon as that physical
+    // control reaches its software value. Its crossing event is consumed;
+    // the next movement regains authority without waiting for other controls.
     std::map<Key, double> targets_;
 };
 

@@ -90,6 +90,20 @@ int main()
     CHECK(catalog.transitionsForSong(manualSong).size() == 1);
     CHECK(catalog.transitionsForSong(manualSong)[0].outgoing);
 
+    TrackData undone = mp3;
+    undone.filePath = directory.filePath(QStringLiteral("undone.wav"));
+    undone.title = QStringLiteral("No transitions yet");
+    undone.structureFingerprint =
+        QStringLiteral("gvsf1:11111111111111111111111111111111");
+    undone.assetSha256 = QStringLiteral("bytes-undone");
+    { QFile file(undone.filePath); CHECK(file.open(QIODevice::WriteOnly)); }
+    const QString undoneSong = catalog.registerAsset(undone, &error);
+    CHECK(!undoneSong.isEmpty());
+    CHECK(undoneSong != songId);
+    CHECK(undoneSong != manualSong);
+    catalog.rebuildTransitionGraph({transition});
+    CHECK(catalog.transitionsForSong(undoneSong).empty());
+
     CHECK(QFile::remove(flac.filePath));
     CHECK(catalog.assetsForSong(songId).size() == 1);
 

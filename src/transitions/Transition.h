@@ -39,6 +39,14 @@ struct GvtEvent {
     QJsonObject inputExtraYaml;
 };
 
+// Transition files may carry crossfader automation for compatibility with
+// older Gravitino builds, but the transition subsystem deliberately treats it
+// as inert. The live crossfader remains a normal manual UI/MIDI control.
+inline bool transitionEventIsExecutable(const GvtEvent& event) noexcept
+{
+    return event.control != ControlId::Crossfader;
+}
+
 struct TransitionFingerprint {
     QString algorithm;
     QString value;
@@ -176,6 +184,7 @@ struct GvtFile {
     GvtInitialState initialFrom;
     GvtInitialState initialTo;
     bool initialMixerCaptured = false;
+    bool initialCrossfaderPresent = false; // inert compatibility field
     double initialCrossfader = 0.0; // role space: 0 = outgoing, 1 = incoming
     // Track-relative beat positions required by recorded hot-cue events.
     // NaN means that the transition does not contain a verified mapping for

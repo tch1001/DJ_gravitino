@@ -20,13 +20,13 @@ int main()
     using namespace gvt;
     SoftTakeover takeover;
 
-    // A known mismatch arms. Unrelated FLX4 input remains frozen, moving the
+    // A known mismatch arms. Unrelated FLX4 input remains live, moving the
     // knob toward target is consumed, and reaching the target releases it.
     takeover.rememberHardware({0, ControlId::EqHigh, 0.1});
     takeover.arm({{0, ControlId::EqHigh, 0.7}});
     CHECK(takeover.active());
     CHECK(takeover.pending().size() == 1);
-    CHECK(!takeover.acceptHardware({0, ControlId::Play, 1.0}));
+    CHECK(takeover.acceptHardware({0, ControlId::Play, 1.0}));
     bool changed = false;
     CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.5}, &changed));
     CHECK(changed && takeover.active());
@@ -34,8 +34,8 @@ int main()
     CHECK(changed && !takeover.active());
     CHECK(takeover.acceptHardware({0, ControlId::EqHigh, 0.72}));
 
-    // A matched control stays monitored while another target is unresolved.
-    // If it overshoots, it returns to the pending/highlighted set.
+    // Each control is released independently; acquiring one never holds or
+    // re-freezes it merely because another control is still pending.
     takeover.clearHardware();
     takeover.rememberHardware({0, ControlId::EqHigh, 0.1});
     takeover.rememberHardware({1, ControlId::EqLow, 0.1});
@@ -43,11 +43,20 @@ int main()
                   {1, ControlId::EqLow, 0.8}});
     CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.7}, &changed));
     CHECK(takeover.active() && takeover.pending().size() == 1);
-    CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.9}, &changed));
-    CHECK(takeover.active() && takeover.pending().size() == 2);
-    CHECK(!takeover.acceptHardware({0, ControlId::EqHigh, 0.7}, &changed));
+    CHECK(takeover.acceptHardware({0, ControlId::EqHigh, 0.9}, &changed));
+    CHECK(takeover.active() && takeover.pending().size() == 1);
     CHECK(!takeover.acceptHardware({1, ControlId::EqLow, 0.8}, &changed));
     CHECK(!takeover.active());
+
+    // Snapshots retain matched and unknown values for the ghost UI.
+    takeover.clearHardware();
+    takeover.rememberHardware({0, ControlId::FxWet, 0.25});
+    takeover.arm({{1, ControlId::Fader, 0.8}});
+    const auto snapshot = takeover.snapshot({
+        {0, ControlId::FxWet, 0.5}, {1, ControlId::Fader, 0.8}});
+    CHECK(snapshot.size() == 2);
+    CHECK(snapshot[0].hardwareKnown && !snapshot[0].pickupPending);
+    CHECK(!snapshot[1].hardwareKnown && snapshot[1].pickupPending);
 
     // Controls already matching at arm time do not create false alerts.
     takeover.rememberHardware({kNoDeck, ControlId::Crossfader, 0.5});

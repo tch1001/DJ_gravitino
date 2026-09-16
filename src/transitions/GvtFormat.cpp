@@ -187,6 +187,7 @@ void storeKnownKv(GvtFile& out, Section sec, const QString& secName,
         }
         if (key == QLatin1String("crossfader")) {
             out.initialMixerCaptured = true;
+            out.initialCrossfaderPresent = true;
             out.initialCrossfader = asDouble();
             return;
         }
@@ -480,11 +481,12 @@ QString gvtSerialize(const GvtFile& f) {
     s += QLatin1Char('\n');
 
     if (f.initialFrom.captured || f.initialTo.captured ||
-        f.initialMixerCaptured || !initialX.empty()) {
+        f.initialMixerCaptured || f.initialCrossfaderPresent ||
+        !initialX.empty()) {
         s += QStringLiteral("[initial]\n");
         if (f.initialComplete)
             s += kvLine(QStringLiteral("complete"), QStringLiteral("1"));
-        if (f.initialMixerCaptured)
+        if (f.initialCrossfaderPresent)
             s += kvLine(QStringLiteral("crossfader"),
                         fmtNum(f.initialCrossfader, 3, 6));
         const auto writeDeck = [&s](const GvtInitialState& state,

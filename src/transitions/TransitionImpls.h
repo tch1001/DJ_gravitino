@@ -9,6 +9,7 @@
 #include <vector>
 #include "TransitionEngine.h"
 #include "PlayerMath.h"
+#include "TransitionPlayback.h"
 
 namespace gvt {
 
@@ -33,7 +34,6 @@ struct TransitionRecorder::Impl {
         kUnmappedHotCueBeat, kUnmappedHotCueBeat};
     std::array<TransitionSavedLoop, 8> fromSavedLoops {};
     std::array<TransitionSavedLoop, 8> toSavedLoops {};
-    double initialCrossfader = 0.0; // role space
     bool   toAnchorSet = false;
     double toAnchorBeat = 0.0;
 
@@ -127,6 +127,7 @@ struct TransitionPlayer::Impl {
     QTimer       timer;
 
     bool       active = false;
+    bool       externalClock = false;
     PlayerMode mode = PlayerMode::Perform;
     GvtFile    file;
     int        fromDeck = 0, toDeck = 1;
@@ -134,6 +135,9 @@ struct TransitionPlayer::Impl {
     double     totalBeats = 0.0;
     double     completionBeat = 0.0;
     bool       preStateTransportApplied = false;
+    double     waitingLoopWrappedSeconds = 0.0;
+    double     waitingLoopStartSec = -1.0;
+    double     waitingLoopEndSec = -1.0;
     ControlId  incomingPreviewControl = ControlId::Count;
 
     std::vector<ScheduledEvent> sched;
@@ -177,7 +181,26 @@ struct TransitionPlayer::Impl {
                          : d.beatPosition();
         };
         if (!timelineStarted) {
-            const double raw = deckTrackBeat() - anchorFrom;
+            // Position alone can miss entry just before LOOP OUT: audio may
+            // cross entry and wrap before this timer ever sees raw >= 0.
+            // Use only wraps reported by audio, never infer one from a seek.
+            // Read the wrap counter first: audio publishes position before
+            // advancing that counter, so a new wrap cannot use an old position.
+            const double wrappedSeconds = d.loopWrappedSeconds();
+            const double wrappedDelta = wrappedSeconds - waitingLoopWrappedSeconds;
+            const double loopStart = d.loopStartSec.load();
+            const double loopEnd = d.loopEndSec.load();
+            double raw = deckTrackBeat() - anchorFrom;
+            const TrackDataPtr track = d.track();
+            if (wrappedDelta > 0.0 && track &&
+                loopStart == waitingLoopStartSec &&
+                loopEnd == waitingLoopEndSec && loopEnd > loopStart &&
+                anchorFrom < transitionBeatAtSec(file, *track, loopEnd)) {
+                raw += wrappedDelta * track->bpm / 60.0;
+            }
+            waitingLoopWrappedSeconds = wrappedSeconds;
+            waitingLoopStartSec = loopStart;
+            waitingLoopEndSec = loopEnd;
             if (raw < 0.0) return raw;
             timelineStarted = true;
             timelineRunning = d.playing.load();
@@ -252,24 +275,11 @@ struct TransitionPlayer::Impl {
 
     // Engine's current value for a (role, control) — glide start fallback.
     double engineValue(Role role, ControlId id) const {
-        if (role == Role::Mixer)
-            return (id == ControlId::Crossfader)
-                       ? xfaderRoleToPhysical(engine->crossfader.load()) // to role space (self-inverse)
-                       : 0.0;
-        const Deck& d = engine->deck(physicalDeck(role));
-        switch (id) {
-            case ControlId::Tempo:  return d.tempoRatio.load();
-            case ControlId::Fader:  return d.fader.load();
-            case ControlId::Trim:   return d.trim.load();
-            case ControlId::EqLow:  return d.eqLow.load();
-            case ControlId::EqMid:  return d.eqMid.load();
-            case ControlId::EqHigh: return d.eqHigh.load();
-            case ControlId::Filter: return d.filter.load();
-            default:                return 0.0;
-        }
+        return transitionEngineValue(*engine, fromDeck, role, id);
     }
 
     void dispatch(Role role, ControlId id, double value) {
+        if (id == ControlId::Crossfader) return;
         ControlEvent e;
         e.deck = physicalDeck(role);
         e.id = id;

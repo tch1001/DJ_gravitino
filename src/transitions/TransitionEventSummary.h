@@ -14,9 +14,9 @@ namespace gvt {
 
 // The replay keeps every recorded automation checkpoint, but a DJ-facing
 // sequence should describe each continuous move rather than expose its sample
-// density. Crossfader automation is one mixer move; EQ automation is grouped
-// independently by role and band so simultaneous outgoing/incoming moves keep
-// their own start and end rows.
+// density. Inert transition events never appear in either sequence view. EQ
+// automation is grouped independently by role and band so simultaneous
+// outgoing/incoming moves keep their own start and end rows.
 inline bool transitionSummaryIsEq(ControlId control) noexcept
 {
     return control == ControlId::EqLow || control == ControlId::EqMid ||
@@ -37,8 +37,8 @@ inline std::vector<int> summarizedTransitionEventIndices(const GvtFile& file)
 
     for (int i = 0; i < static_cast<int>(file.events.size()); ++i) {
         const GvtEvent& event = file.events[static_cast<std::size_t>(i)];
-        if (event.control != ControlId::Crossfader &&
-            !transitionSummaryIsEq(event.control))
+        if (!transitionEventIsExecutable(event)) continue;
+        if (!transitionSummaryIsEq(event.control))
             continue;
         auto [it, inserted] = endpoints.emplace(keyFor(event),
                                                 std::pair<int, int>{i, i});
@@ -49,8 +49,8 @@ inline std::vector<int> summarizedTransitionEventIndices(const GvtFile& file)
     indices.reserve(file.events.size());
     for (int i = 0; i < static_cast<int>(file.events.size()); ++i) {
         const GvtEvent& event = file.events[static_cast<std::size_t>(i)];
-        if (event.control == ControlId::Crossfader ||
-            transitionSummaryIsEq(event.control)) {
+        if (!transitionEventIsExecutable(event)) continue;
+        if (transitionSummaryIsEq(event.control)) {
             const auto it = endpoints.find(keyFor(event));
             if (it != endpoints.end() && i != it->second.first &&
                 i != it->second.second)
@@ -67,18 +67,16 @@ inline std::pair<int, int> transitionSummaryEndpoints(
     if (eventIndex < 0 || eventIndex >= static_cast<int>(file.events.size()))
         return {-1, -1};
     const GvtEvent& wanted = file.events[static_cast<std::size_t>(eventIndex)];
-    if (wanted.control != ControlId::Crossfader &&
-        !transitionSummaryIsEq(wanted.control))
+    if (!transitionEventIsExecutable(wanted)) return {-1, -1};
+    if (!transitionSummaryIsEq(wanted.control))
         return {eventIndex, eventIndex};
 
     int first = -1;
     int last = -1;
     for (int i = 0; i < static_cast<int>(file.events.size()); ++i) {
         const GvtEvent& candidate = file.events[static_cast<std::size_t>(i)];
-        const bool same = wanted.control == ControlId::Crossfader
-            ? candidate.control == ControlId::Crossfader
-            : candidate.control == wanted.control &&
-                  candidate.role == wanted.role;
+        const bool same = candidate.control == wanted.control &&
+                          candidate.role == wanted.role;
         if (!same) continue;
         if (first < 0) first = i;
         last = i;
@@ -125,6 +123,52 @@ inline bool humanTransitionIsHotCue(ControlId control) noexcept
     return control >= ControlId::HotCue1 && control <= ControlId::HotCue8;
 }
 
+inline bool humanTransitionIsTransitionCue(ControlId control) noexcept
+{
+    return control >= ControlId::TransitionCue1 &&
+           control <= ControlId::TransitionCue8;
+}
+
+inline bool humanTransitionIsLaunchCue(const GvtEvent& event) noexcept
+{
+    return humanTransitionIsHotCue(event.control) ||
+           (humanTransitionIsTransitionCue(event.control) &&
+            !event.cueId.isEmpty());
+}
+
+inline bool humanTransitionIsSameLaunchCue(const GvtEvent& left,
+                                           const GvtEvent& right) noexcept
+{
+    if (humanTransitionIsHotCue(left.control))
+        return right.control == left.control;
+    return humanTransitionIsTransitionCue(left.control) &&
+           humanTransitionIsTransitionCue(right.control) &&
+           !left.cueId.isEmpty() && left.cueId == right.cueId;
+}
+
+inline int humanTransitionLaunchCuePad(const GvtFile& file,
+                                       const GvtEvent& event) noexcept
+{
+    if (humanTransitionIsHotCue(event.control))
+        return static_cast<int>(event.control) -
+               static_cast<int>(ControlId::HotCue1) + 1;
+    if (event.gestureControl >= ControlId::PerformancePad1 &&
+        event.gestureControl <= ControlId::PerformancePad8)
+        return static_cast<int>(event.gestureControl) -
+               static_cast<int>(ControlId::PerformancePad1) + 1;
+
+    const auto allocated = transitionPerformanceSlots(file, event.role);
+    for (int slot = 0; slot < static_cast<int>(allocated.size()); ++slot) {
+        if (allocated[static_cast<std::size_t>(slot)].cue &&
+            allocated[static_cast<std::size_t>(slot)].cue->id == event.cueId)
+            return slot + 1;
+    }
+    if (humanTransitionIsTransitionCue(event.control))
+        return static_cast<int>(event.control) -
+               static_cast<int>(ControlId::TransitionCue1) + 1;
+    return 0;
+}
+
 inline bool humanTransitionIsSavedLoop(ControlId control) noexcept
 {
     return control >= ControlId::SavedLoop1 &&
@@ -136,6 +180,7 @@ inline bool humanTransitionLaunchConflict(ControlId control) noexcept
     return control == ControlId::Play || control == ControlId::Stop ||
            control == ControlId::Cue || control == ControlId::Load ||
            humanTransitionIsHotCue(control) ||
+           humanTransitionIsTransitionCue(control) ||
            humanTransitionIsSavedLoop(control);
 }
 
@@ -184,9 +229,13 @@ inline std::vector<HumanTransitionAction> humanTransitionActions(
     // disturb the pattern; conflicting transport on this deck does.
     for (int i = 0; i < static_cast<int>(file.events.size()); ++i) {
         const GvtEvent& press = file.events[static_cast<std::size_t>(i)];
+        if (!transitionEventIsExecutable(press)) {
+            consumed[static_cast<std::size_t>(i)] = true;
+            continue;
+        }
         if (consumed[static_cast<std::size_t>(i)] ||
             press.role == Role::Mixer ||
-            !humanTransitionIsHotCue(press.control) || press.value < 0.5)
+            !humanTransitionIsLaunchCue(press) || press.value < 0.5)
             continue;
 
         int playIndex = -1;
@@ -195,12 +244,13 @@ inline std::vector<HumanTransitionAction> humanTransitionActions(
             const GvtEvent& candidate =
                 file.events[static_cast<std::size_t>(j)];
             if (candidate.role != press.role) continue;
-            if (candidate.control == press.control) {
+            if (humanTransitionIsSameLaunchCue(press, candidate)) {
                 if (candidate.value < 0.5 && playIndex >= 0)
                     releaseIndex = j;
                 break;
             }
-            if (candidate.control == ControlId::Play && playIndex < 0) {
+            if (candidate.control == ControlId::Play &&
+                candidate.value >= 0.5 && playIndex < 0) {
                 playIndex = j;
                 continue;
             }
@@ -218,8 +268,7 @@ inline std::vector<HumanTransitionAction> humanTransitionActions(
         action.startValue = press.value;
         action.endValue =
             file.events[static_cast<std::size_t>(releaseIndex)].value;
-        action.hotCuePad = static_cast<int>(press.control) -
-                           static_cast<int>(ControlId::HotCue1) + 1;
+        action.hotCuePad = humanTransitionLaunchCuePad(file, press);
         action.eventIndices = {i, playIndex, releaseIndex};
         actions.push_back(action);
         consumed[static_cast<std::size_t>(i)] = true;
@@ -411,7 +460,30 @@ inline int humanTransitionRowForEventIndex(
 struct TransitionSequenceProgress {
     int row = -1;
     double fraction = 0.0;
+    double trackFraction = 0.0;
 };
+
+inline std::vector<double> transitionSequenceDurationFractions(
+    const std::vector<double>& rowBeats, double beatsTotal) noexcept
+{
+    std::vector<double> durations(rowBeats.size(), 0.0);
+    double longest = 0.0;
+    for (std::size_t row = 0; row < rowBeats.size(); ++row) {
+        const double start = rowBeats[row];
+        if (row + 1 < rowBeats.size() &&
+            rowBeats[row + 1] <= start + 0.0005)
+            continue;
+        const double finish = row + 1 < rowBeats.size()
+                                  ? rowBeats[row + 1]
+                                  : std::max(start, beatsTotal);
+        durations[row] = std::max(0.0, finish - start);
+        longest = std::max(longest, durations[row]);
+    }
+    if (longest > 0.0005)
+        for (double& duration : durations)
+            duration /= longest;
+    return durations;
+}
 
 // Resolve the row whose instruction has just been reached and how far time
 // has advanced toward the next distinct row. rowBeats includes the synthetic
@@ -443,7 +515,11 @@ inline TransitionSequenceProgress transitionSequenceProgressAt(
                                 : std::clamp((beatsIn - start) /
                                                  (finish - start),
                                              0.0, 1.0);
-    return {row, fraction};
+    const std::vector<double> tracks =
+        transitionSequenceDurationFractions(rowBeats, beatsTotal);
+    return {row, fraction,
+            row < static_cast<int>(tracks.size())
+                ? tracks[static_cast<std::size_t>(row)] : 0.0};
 }
 
 } // namespace gvt

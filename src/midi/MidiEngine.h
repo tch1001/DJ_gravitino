@@ -27,6 +27,13 @@ public:
     void finishTransitionTakeoverTracking();
     void cancelTransitionTakeoverTracking();
     std::vector<SoftTakeoverState> pendingTakeovers() const;
+    std::vector<SoftTakeoverState> hardwareControlStates() const;
+    // Re-poll the MIDI connection and publish the latest reported physical
+    // positions. Motorless controllers cannot be forced to transmit untouched
+    // absolute controls, so those remain explicitly unknown until moved.
+    void refreshHardwareState();
+    bool hardwareInputFrozen() const;
+    void setHardwareInputFrozen(bool frozen);
 signals:
     void connectionChanged(bool connected, const QString& name);
     // FLX4 browser controls are UI commands rather than transition/audio
@@ -38,6 +45,8 @@ signals:
     void performancePadRequested(int deck, int mode, int pad, bool pressed);
     void hotCueClearRequested(int deck, int pad);
     void softTakeoverChanged();
+    void hardwareStateChanged();
+    void hardwareInputFrozenChanged(bool frozen);
     void hardwareControlObserved(const gvt::ControlEvent& event);
 private:
     struct Impl; std::unique_ptr<Impl> impl_;

@@ -51,7 +51,7 @@ int main()
     file.initialComplete = true;
     file.initialFrom.captured = true;
     file.initialTo.captured = true;
-    file.initialMixerCaptured = true;
+    file.initialMixerCaptured = false;
     file.transitionCues.push_back(
         {QStringLiteral("incoming-launch"), Role::ToDeck, 32.125,
          QStringLiteral("Launch"), QStringLiteral("start-track"),
@@ -100,6 +100,7 @@ int main()
     CHECK(yaml.contains(QStringLiteral("control: \"deck.transition_loop\"")));
     CHECK(yaml.contains(QStringLiteral("start_track_beat: 48.125")));
     CHECK(yaml.contains(QStringLiteral("end_beat: 32.875")));
+    CHECK(!yaml.contains(QStringLiteral("crossfader")));
 
     GvtFile parsed;
     QString error;
@@ -147,6 +148,28 @@ int main()
               QStringLiteral("future_anchor")).toInt() == 4);
     CHECK(parsed.extensions.contains(QStringLiteral("example.vendor")));
     CHECK(transitionSerialize(parsed) == yaml);
+
+    // Crossfader compatibility data remains legal and round-trips exactly,
+    // but its optional initial field is absent from newly authored files.
+    GvtFile legacyCrossfader = file;
+    legacyCrossfader.initialMixerCaptured = true;
+    legacyCrossfader.initialCrossfaderPresent = true;
+    legacyCrossfader.initialCrossfader = 0.23;
+    legacyCrossfader.events.push_back(
+        {20.0, Role::Mixer, ControlId::Crossfader, 0.81, Curve::SCurve});
+    const QString legacyCrossYaml = transitionSerialize(legacyCrossfader);
+    CHECK(legacyCrossYaml.contains(QStringLiteral("crossfader: 0.23")));
+    CHECK(legacyCrossYaml.contains(
+        QStringLiteral("control: \"mixer.xfader\"")));
+    GvtFile parsedLegacyCrossfader;
+    CHECK(transitionParse(legacyCrossYaml, parsedLegacyCrossfader,
+                          &error, &warnings));
+    CHECK(parsedLegacyCrossfader.initialCrossfaderPresent);
+    CHECK(std::fabs(parsedLegacyCrossfader.initialCrossfader - 0.23) < 1e-12);
+    CHECK(parsedLegacyCrossfader.events.size() == 3);
+    CHECK(parsedLegacyCrossfader.events.back().control ==
+          ControlId::Crossfader);
+    CHECK(transitionSerialize(parsedLegacyCrossfader) == legacyCrossYaml);
 
     const QString unsupported = QString(yaml).replace(
         QStringLiteral("temporary-cues.v1"), QStringLiteral("warp-grid.v9"));

@@ -1,10 +1,12 @@
 #include "TransitionPanel.h"
+#include "../transitions/TransitionPlayback.h"
 #include "FitButton.h"
 #include "Flx4TutorialWidget.h"
 #include "../performance/PerformancePads.h"
 #include "../transitions/TransitionEventSummary.h"
 #include "../transitions/TransitionPrime.h"
 #include "../transitions/TransitionPlayerExt.h"
+#include "../transitions/PlayerMath.h"
 #include "Theme.h"
 
 #include <QHBoxLayout>
@@ -36,6 +38,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 
 namespace gvt {
@@ -50,6 +53,36 @@ QString compactNumber(double value, int decimals)
     if (text.endsWith(QLatin1Char('.'))) text.chop(1);
     if (text == QLatin1String("-0")) text = QStringLiteral("0");
     return text;
+}
+
+bool transitionInitialStateUsesStems(const GvtInitialState& state)
+{
+    constexpr double kUnityTolerance = 0.000001;
+    return std::fabs(state.stemVocals - 1.0) > kUnityTolerance ||
+           std::fabs(state.stemMelody - 1.0) > kUnityTolerance ||
+           std::fabs(state.stemBass - 1.0) > kUnityTolerance ||
+           std::fabs(state.stemDrums - 1.0) > kUnityTolerance;
+}
+
+bool transitionControlUsesStems(ControlId control)
+{
+    return control == ControlId::StemVocals ||
+           control == ControlId::StemMelody ||
+           control == ControlId::StemBass ||
+           control == ControlId::StemDrums;
+}
+
+bool transitionRoleUsesStems(const GvtFile& file, Role role)
+{
+    if (role != Role::FromDeck && role != Role::ToDeck) return false;
+    const GvtInitialState& initial = role == Role::FromDeck
+                                         ? file.initialFrom : file.initialTo;
+    if (file.initialComplete && transitionInitialStateUsesStems(initial))
+        return true;
+    return std::any_of(file.events.begin(), file.events.end(),
+                       [role](const GvtEvent& event) {
+        return event.role == role && transitionControlUsesStems(event.control);
+    });
 }
 
 class ToggleSelectionList final : public QListWidget {
@@ -74,12 +107,22 @@ class ProgressTableWidget final : public QTableWidget {
 public:
     using QTableWidget::QTableWidget;
 
+    void setDurationFractions(std::vector<double> fractions)
+    {
+        durationFractions_ = std::move(fractions);
+        viewport()->update();
+    }
+
     void setTimelineProgress(int row, double fraction)
     {
         const double clamped = std::clamp(fraction, 0.0, 1.0);
+        const double track = row >= 0 &&
+                                     row < static_cast<int>(durationFractions_.size())
+                                 ? durationFractions_[static_cast<std::size_t>(row)]
+                                 : 0.0;
         const int pixel = row >= 0
                               ? static_cast<int>(std::lround(
-                                    viewport()->width() * clamped))
+                                    viewport()->width() * track * clamped))
                               : -1;
         if (row == progressRow_ && pixel == progressPixel_) return;
         progressRow_ = row;
@@ -94,7 +137,25 @@ protected:
     void paintEvent(QPaintEvent* event) override
     {
         QTableWidget::paintEvent(event);
+        QPainter painter(viewport());
+        painter.setClipRect(viewport()->rect());
+        for (int row = 0; row < rowCount() &&
+                          row < static_cast<int>(durationFractions_.size()); ++row) {
+            const double scale = durationFractions_[static_cast<std::size_t>(row)];
+            if (scale <= 0.0) continue;
+            QRect track = visualRect(model()->index(row, 0));
+            if (!track.isValid() || track.bottom() < 0 ||
+                track.top() >= viewport()->height())
+                continue;
+            track.setLeft(0);
+            track.setWidth(static_cast<int>(std::lround(
+                (viewport()->width() - 1) * scale)));
+            painter.fillRect(track, QColor(0x35, 0xc8, 0xe8, 16));
+            painter.setPen(QPen(QColor(0x35, 0xc8, 0xe8, 45), 1));
+            painter.drawRect(track.adjusted(0, 0, -1, -1));
+        }
         if (progressRow_ < 0 || progressRow_ >= rowCount() ||
+            progressRow_ >= static_cast<int>(durationFractions_.size()) ||
             columnCount() <= 0)
             return;
 
@@ -103,10 +164,10 @@ protected:
             rowRect.top() >= viewport()->height())
             return;
         rowRect.setLeft(0);
-        rowRect.setRight(viewport()->width() - 1);
-
-        QPainter painter(viewport());
-        painter.setClipRect(viewport()->rect());
+        rowRect.setWidth(static_cast<int>(std::lround(
+            (viewport()->width() - 1) *
+            durationFractions_[static_cast<std::size_t>(progressRow_)])));
+        if (rowRect.width() <= 0) return;
         const int fillWidth = static_cast<int>(std::lround(
             rowRect.width() * progressFraction_));
         if (fillWidth > 0) {
@@ -127,6 +188,7 @@ private:
     int progressRow_ = -1;
     int progressPixel_ = -1;
     double progressFraction_ = 0.0;
+    std::vector<double> durationFractions_;
 };
 
 Flx4PadMode tutorialPadMode(int recordedMode)
@@ -242,6 +304,14 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
         tr("Show condensed, role-aware transition instructions"));
     rawModeBtn_->setToolTip(
         tr("Show the existing recorded event sequence"));
+    showImportantCuesCheck_ = new QCheckBox(tr("SHOW CUES"), previewPane);
+    showImportantCuesCheck_->setObjectName(
+        QStringLiteral("showImportantTransitionCues"));
+    showImportantCuesCheck_->setChecked(true);
+    showImportantCuesCheck_->setFixedHeight(18);
+    showImportantCuesCheck_->setToolTip(
+        tr("Show every condensed Human action on the overview and zoomed waveforms"));
+    previewHeaderRow->addWidget(showImportantCuesCheck_);
     editBtn_ = new FitPushButton(tr("EDIT TRANSITION…"));
     editBtn_->setFixedHeight(18);
     editBtn_->setToolTip(
@@ -287,9 +357,11 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
         "border-color:#30343c; }");
     stopSaveBtn_ = new FitPushButton(tr("■ STOP && SAVE"));
     performBtn_ = new FitPushButton(tr("▶ PERFORM"));
+    performBtn_->setObjectName(QStringLiteral("transitionPerform"));
     performBtn_->setStyleSheet(
         QStringLiteral("color:%1; font-weight:bold;").arg(deckAccent(0).name()));
     tutorialBtn_ = new FitPushButton(tr("TUTOR VIEW"));
+    tutorialBtn_->setObjectName(QStringLiteral("transitionTutorView"));
     tutorialBtn_->setCheckable(true);
     tutorialBtn_->setToolTip(
         tr("Open the compact tutorial view without starting playback.\n"
@@ -299,6 +371,8 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
         "font-weight:bold; }");
     abortBtn_ = new FitPushButton(tr("⏹ ABORT"));
     primeBtn_ = new FitPushButton(tr("⚡ PRIME"));
+    primeBtn_->setObjectName(QStringLiteral("transitionPrime"));
+    abortBtn_->setObjectName(QStringLiteral("transitionAbort"));
     primeBtn_->setToolTip(
         tr("Arm the selected transition without seeking: it fires\n"
            "automatically when playback reaches the marked entry beat\n"
@@ -319,6 +393,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
 
     auto* setupRow = new QHBoxLayout;
     setupLabel_ = new QLabel;
+    setupLabel_->setObjectName(QStringLiteral("transitionSetupStatus"));
     setupLabel_->setWordWrap(true);
     setupRow->addWidget(setupLabel_, 1);
     QSettings setupSettings;
@@ -348,6 +423,12 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
         tr("Restore the recorded pre-transition audio state across both "
            "decks and the mixer"));
     setupRow->addWidget(applySetupBtn_);
+    prepareStemsBtn_ = new FitPushButton(tr("PREPARE STEMS"), this);
+    prepareStemsBtn_->setObjectName(QStringLiteral("transitionPrepareStems"));
+    prepareStemsBtn_->setToolTip(
+        tr("Prepare the separated audio required by this transition"));
+    prepareStemsBtn_->hide();
+    setupRow->addWidget(prepareStemsBtn_);
     rightCol->addLayout(setupRow);
 
     auto* statusRow = new QHBoxLayout;
@@ -395,12 +476,15 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     connect(list_, &QListWidget::currentRowChanged, this,
             [this](int) {
                 const int idx = selectedMatch();
+                const QString nextPath =
+                    idx >= 0 ? matches_[(size_t)idx].file->filePath : QString();
+                if (nextPath != selectedPath_)
+                    setupGuidanceSuppressed_ = false;
                 if (!refreshingMatches_ && replayLifecycle_ != ReplayLifecycle::None &&
                     (idx < 0 || !replayLifecycleMatches(
                                     matches_[(size_t)idx])))
                     clearReplayLifecycle();
-                selectedPath_ = idx >= 0 ? matches_[(size_t)idx].file->filePath
-                                         : QString();
+                selectedPath_ = nextPath;
                 updatePreview();
                 announceEntryMarker();
                 updateSetupStatus();
@@ -413,12 +497,16 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     });
     connect(humanModeBtn_, &QPushButton::clicked, this, [this] {
         sequenceViewMode_ = SequenceViewMode::Human;
+        showImportantCuesCheck_->show();
         updatePreview();
     });
     connect(rawModeBtn_, &QPushButton::clicked, this, [this] {
         sequenceViewMode_ = SequenceViewMode::Raw;
+        showImportantCuesCheck_->hide();
         updatePreview();
     });
+    connect(showImportantCuesCheck_, &QCheckBox::toggled, this,
+            [this] { announceSelectedEventMarker(); });
     connect(tutorialBtn_, &QPushButton::toggled, this,
             &TransitionPanel::onTutorialViewToggled);
     connect(abortBtn_, &QPushButton::clicked, this, &TransitionPanel::onAbort);
@@ -429,6 +517,21 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
             &TransitionPanel::onLabelCue);
     connect(applySetupBtn_, &QPushButton::clicked, this,
             &TransitionPanel::onApplySetup);
+    connect(prepareStemsBtn_, &QPushButton::clicked, this, [this] {
+        const int idx = selectedMatch();
+        if (idx < 0) return;
+        const QList<int> decks =
+            missingStemDecks(matches_[static_cast<std::size_t>(idx)]);
+        if (decks.isEmpty()) return;
+        for (int deck : decks) emit stemPreparationRequested(deck);
+        emit statusMessage(
+            decks.size() == 1
+                ? tr("Preparing the stems required on Deck %1…")
+                      .arg(decks.front() == 0 ? QStringLiteral("A")
+                                              : QStringLiteral("B"))
+                : tr("Preparing the stems required on Decks A and B…"),
+            5000);
+    });
     connect(closeEnoughCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
         setupTolerances_.closeEnough = enabled;
         QSettings().setValue(
@@ -461,7 +564,7 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     // poll keeps enablement/preflight feedback correct even at EOF or after a
     // physical controller move that does not emit a dedicated state signal.
     stateTimer_ = new QTimer(this);
-    stateTimer_->setInterval(100);
+    stateTimer_->setInterval(50);
     connect(stateTimer_, &QTimer::timeout, this, [this] {
         updateControls();
         updateSetupStatus();
@@ -470,6 +573,8 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
             refreshTutorialLiveState();
             refreshTutorialGuideLabel();
         }
+        if (tutorialActive_)
+            emit tutorialTargetsChanged(tutorialControlTargets());
     });
     stateTimer_->start();
 
@@ -480,6 +585,11 @@ void TransitionPanel::setTutorialOverlayAnchor(QWidget* anchor)
 {
     tutorialOverlayAnchor_ = anchor;
     if (tutorialViewOpen_) layoutTutorialOverlay();
+}
+
+void TransitionPanel::setHardwareInputFrozen(bool frozen)
+{
+    hardwareInputFrozen_ = frozen;
 }
 
 void TransitionPanel::refreshMatches()
@@ -493,6 +603,7 @@ void TransitionPanel::refreshMatches()
     tutorialPreviewRow_ = -1;
     preview_->setRowCount(0);
     static_cast<ProgressTableWidget*>(preview_)->setTimelineProgress(-1, 0.0);
+    static_cast<ProgressTableWidget*>(preview_)->setDurationFractions({});
     configurePreviewColumns();
 
     TrackDataPtr a = engine_->deck(0).track();
@@ -580,6 +691,8 @@ void TransitionPanel::selectTransitionFile(const QString& filePath)
         if (!matches_[static_cast<std::size_t>(row)].file ||
             matches_[static_cast<std::size_t>(row)].file->filePath != filePath)
             continue;
+        if (selectedPath_ != filePath)
+            setupGuidanceSuppressed_ = false;
         selectedPath_ = filePath;
         if (list_->currentRow() == row) {
             updatePreview();
@@ -787,6 +900,12 @@ void TransitionPanel::announceEntryMarker()
 void TransitionPanel::announceSelectedEventMarker()
 {
     const int idx = selectedMatch();
+    if (idx >= 0 && sequenceViewMode_ == SequenceViewMode::Human &&
+        showImportantCuesCheck_ && showImportantCuesCheck_->isChecked()) {
+        announceAllHumanCueMarkers(
+            matches_[static_cast<std::size_t>(idx)]);
+        return;
+    }
     const int row = preview_ ? preview_->currentRow() : -1;
     if (idx < 0 || row < 0 || !preview_->item(row, 0)) {
         emit cueMarkersChanged(0, {}, {});
@@ -826,6 +945,71 @@ void TransitionPanel::announceSelectedEventMarker()
                                       : file.anchorToBeat;
             seconds.append(transitionSecAtBeat(
                 file, *track, anchor + event.beat));
+            labels.append(label);
+        }
+        emit cueMarkersChanged(deck, seconds, labels);
+    }
+}
+
+void TransitionPanel::announceAllHumanCueMarkers(const Match& match)
+{
+    if (!match.file) return;
+    const GvtFile& file = *match.file;
+    using Marker = std::pair<double, QString>;
+    std::array<std::vector<Marker>, kNumDecks> markers;
+
+    const auto append = [this, &file, &match, &markers](
+                            int deck, double relativeBeat,
+                            const QString& label) {
+        if (deck < 0 || deck >= kNumDecks || label.isEmpty()) return;
+        const TrackDataPtr track = engine_->deck(deck).track();
+        if (!track) return;
+        const double anchor = deck == match.fromDeck
+                                  ? file.anchorFromBeat : file.anchorToBeat;
+        markers[static_cast<std::size_t>(deck)].emplace_back(
+            transitionSecAtBeat(file, *track, anchor + relativeBeat), label);
+    };
+    const auto appendAction = [this, &append, &match, &file](
+                                  const HumanTransitionAction& action) {
+        const QString label = humanActionText(file, action);
+        if (action.role == Role::FromDeck)
+            append(match.fromDeck, action.startBeat, label);
+        else if (action.role == Role::ToDeck)
+            append(1 - match.fromDeck, action.startBeat, label);
+        else {
+            append(0, action.startBeat, label);
+            append(1, action.startBeat, label);
+        }
+    };
+
+    for (const HumanTransitionRow& row : humanPreviewRows_) {
+        if (row.outgoing) appendAction(*row.outgoing);
+        if (row.incoming) appendAction(*row.incoming);
+        if (row.shared) appendAction(*row.shared);
+    }
+    // Explicit annotations are timeline-level teaching cues, so they remain
+    // visible on both tracks even when there is no action on one role.
+    for (const GvtCue& cue : file.cues) {
+        append(0, cue.beat, cue.label);
+        append(1, cue.beat, cue.label);
+    }
+
+    for (int deck = 0; deck < kNumDecks; ++deck) {
+        auto& deckMarkers = markers[static_cast<std::size_t>(deck)];
+        std::stable_sort(deckMarkers.begin(), deckMarkers.end(),
+                         [](const Marker& left, const Marker& right) {
+            return left.first < right.first;
+        });
+        QList<double> seconds;
+        QStringList labels;
+        for (const auto& [second, label] : deckMarkers) {
+            if (!seconds.isEmpty() &&
+                std::fabs(seconds.back() - second) < 0.0005) {
+                if (!labels.back().contains(label))
+                    labels.back() += QStringLiteral(" · ") + label;
+                continue;
+            }
+            seconds.append(second);
             labels.append(label);
         }
         emit cueMarkersChanged(deck, seconds, labels);
@@ -878,6 +1062,7 @@ void TransitionPanel::updatePreview()
     previewRowBeats_.clear();
     tutorialPreviewRow_ = -1;
     static_cast<ProgressTableWidget*>(preview_)->setTimelineProgress(-1, 0.0);
+    static_cast<ProgressTableWidget*>(preview_)->setDurationFractions({});
     configurePreviewColumns();
     const int idx = selectedMatch();
     if (idx < 0) {
@@ -889,6 +1074,10 @@ void TransitionPanel::updatePreview()
         updateHumanPreview(file);
     else
         updateRawPreview(file);
+    const double displayEnd = file.endBeat.value_or(
+        previewRowBeats_.empty() ? 0.0 : previewRowBeats_.back() + 1.0);
+    static_cast<ProgressTableWidget*>(preview_)->setDurationFractions(
+        transitionSequenceDurationFractions(previewRowBeats_, displayEnd));
 
     preview_->clearSelection();
     preview_->setCurrentCell(-1, -1);
@@ -1485,7 +1674,9 @@ bool TransitionPanel::setupMatches(const Match& match,
                              ControlId control,
                              SetupToleranceField field =
                                  SetupToleranceField::Other,
-                             double strictTolerance = 0.015) {
+                             double strictTolerance = 0.015,
+                             double controlTarget =
+                                 std::numeric_limits<double>::quiet_NaN()) {
         if (!transitionSetupValueMatches(
                 actual, wanted, field, strictTolerance, tolerance)) {
             local.append(tr("%1 %2 → %3")
@@ -1494,7 +1685,9 @@ bool TransitionPanel::setupMatches(const Match& match,
                              .arg(wanted, 0, 'f', 2));
             if (mismatchControls && control != ControlId::Count)
                 mismatchControls->append(
-                    ControlEvent {physicalDeck, control, wanted});
+                    ControlEvent {
+                        physicalDeck, control,
+                        std::isfinite(controlTarget) ? controlTarget : wanted});
         }
     };
     const auto compareDeck = [&](bool fromRole) {
@@ -1513,14 +1706,15 @@ bool TransitionPanel::setupMatches(const Match& match,
             if (fromRole && match.file->masterBpm > 0.0)
                 compare(tr("%1 BPM").arg(deckName), deck.effectiveBpm(),
                         match.file->masterBpm, physical, ControlId::Tempo,
-                        SetupToleranceField::Bpm, 0.05);
+                        SetupToleranceField::Bpm, 0.05,
+                        match.file->masterBpm / track->bpm);
             return;
         }
 
         const double wantedRatio = expectedTempoRatio(match, fromRole);
         compare(tr("%1 BPM").arg(deckName), deck.effectiveBpm(),
                 track->bpm * wantedRatio, physical, ControlId::Tempo,
-                SetupToleranceField::Bpm, 0.05);
+                SetupToleranceField::Bpm, 0.05, wantedRatio);
         compare(tr("%1 fader").arg(deckName), deck.fader.load(), expected.fader,
                 physical, ControlId::Fader, SetupToleranceField::Volume);
         compare(tr("%1 low").arg(deckName), deck.eqLow.load(), expected.eqLow,
@@ -1569,8 +1763,58 @@ bool TransitionPanel::setupMatches(const Match& match,
                 expected.stemBass, physical, ControlId::StemBass);
         compare(tr("%1 drums").arg(deckName), deck.stemDrums.load(),
                 expected.stemDrums, physical, ControlId::StemDrums);
-        if (deck.loopActive.load() != expected.loopActive)
-            local.append(tr("%1 loop on/off").arg(deckName));
+        const bool loopActive = deck.loopActive.load();
+        if (loopActive != expected.loopActive) {
+            if (loopActive) {
+                local.append(
+                    tr("Deck %1 loop is ON — press 4 BEAT/EXIT on Deck %1 "
+                       "to turn it OFF")
+                        .arg(deckName));
+            } else {
+                const Role role = fromRole ? Role::FromDeck : Role::ToDeck;
+                const auto performanceSlots = transitionPerformanceSlots(
+                    *match.file, role);
+                int matchingPad = -1;
+                QString matchingLabel;
+                for (int pad = 0;
+                     pad < static_cast<int>(performanceSlots.size()); ++pad) {
+                    const TransitionSavedLoop* loop =
+                        performanceSlots[static_cast<std::size_t>(pad)].loop;
+                    if (!loop ||
+                        std::fabs(loop->startTrackBeat -
+                                  expected.loopStartBeat) > 0.02 ||
+                        std::fabs(loop->endTrackBeat -
+                                  expected.loopEndBeat) > 0.02)
+                        continue;
+                    matchingPad = pad;
+                    matchingLabel = loop->label;
+                    break;
+                }
+                if (matchingPad >= 0) {
+                    const QString label = matchingLabel.isEmpty()
+                        ? QString()
+                        : tr(" (%1)").arg(matchingLabel);
+                    local.append(
+                        tr("Deck %1 loop is OFF — select CUSTOM, then tap "
+                           "pad %2%3 on Deck %1 to turn it ON")
+                            .arg(deckName)
+                            .arg(matchingPad + 1)
+                            .arg(label));
+                } else if (expected.loopEndBeat > expected.loopStartBeat) {
+                    local.append(
+                        tr("Deck %1 loop is OFF — press LOOP IN at beat %2, "
+                           "then LOOP OUT at beat %3 on Deck %1")
+                            .arg(deckName)
+                            .arg(expected.loopStartBeat, 0, 'f', 2)
+                            .arg(expected.loopEndBeat, 0, 'f', 2));
+                } else {
+                    local.append(
+                        tr("Deck %1 loop is OFF — activate the required loop "
+                           "on Deck %1, then press PRIME again")
+                            .arg(deckName));
+                }
+            }
+        }
         if (expected.loopActive) {
             compare(tr("%1 loop start").arg(deckName),
                     transitionBeatAtSec(*match.file, *track,
@@ -1592,9 +1836,8 @@ bool TransitionPanel::setupMatches(const Match& match,
 
     compareDeck(true);
     if (complete) compareDeck(false);
-    // The live crossfader is deliberately not a PRIME prerequisite. Its
-    // recorded value is applied at transition beat zero, alongside the replay,
-    // so preparing an incoming deck never forces an audible master change.
+    // The crossfader is live DJ state, not transition setup. Compatibility
+    // data from older files is preserved by the repository but never compared.
     if (differences) *differences = local;
     return local.isEmpty();
 }
@@ -1661,6 +1904,19 @@ QStringList TransitionPanel::primeReadinessIssues(const Match& match) const
     return issues;
 }
 
+QList<int> TransitionPanel::missingStemDecks(const Match& match) const
+{
+    QList<int> missing;
+    if (!match.file) return missing;
+    for (Role role : {Role::FromDeck, Role::ToDeck}) {
+        if (!transitionRoleUsesStems(*match.file, role)) continue;
+        const int deck = role == Role::FromDeck ? match.fromDeck
+                                                : 1 - match.fromDeck;
+        if (!engine_->deck(deck).stemsAttached()) missing.append(deck);
+    }
+    return missing;
+}
+
 void TransitionPanel::updateSetupStatus()
 {
     const int idx = selectedMatch();
@@ -1673,33 +1929,52 @@ void TransitionPanel::updateSetupStatus()
     }
 
     const Match& match = matches_[(size_t)idx];
+    const bool blocked = replayLifecycleMatches(match) &&
+                         replayLifecycle_ == ReplayLifecycle::Blocked;
     if (replayLifecycleMatches(match)) {
-        emit setupMismatchControlsChanged({});
         switch (replayLifecycle_) {
         case ReplayLifecycle::Done:
+            emit setupMismatchControlsChanged({});
             setupLabel_->setText(
                 tr("Transition done — %1").arg(replayDirectionText(match)));
             setupLabel_->setStyleSheet("color:#4cd964; font-weight:600;");
             return;
         case ReplayLifecycle::Running:
+            emit setupMismatchControlsChanged({});
             setupLabel_->setText(
                 tr("Transition in progress — %1")
                     .arg(replayDirectionText(match)));
             setupLabel_->setStyleSheet("color:#67c8ff; font-weight:600;");
             return;
         case ReplayLifecycle::Armed:
+            emit setupMismatchControlsChanged({});
             setupLabel_->setText(
                 tr("Transition armed — %1").arg(replayDirectionText(match)));
             setupLabel_->setStyleSheet("color:#67c8ff; font-weight:600;");
             return;
         case ReplayLifecycle::Blocked:
-            setupLabel_->setText(
-                tr("PRIME not armed — %1").arg(replayLifecycleDetail_));
-            setupLabel_->setStyleSheet("color:#e8a835; font-weight:600;");
-            return;
+            break;
         case ReplayLifecycle::None:
             break;
         }
+    }
+    const QList<int> missingStems = missingStemDecks(match);
+    if (!missingStems.isEmpty()) {
+        QList<ControlEvent> mismatchControls;
+        setupMatches(match, nullptr, true, &mismatchControls);
+        emit setupMismatchControlsChanged(
+            setupGuidanceSuppressed_ ? QList<ControlEvent>()
+                                     : mismatchControls);
+        QStringList decks;
+        for (int deck : missingStems)
+            decks.append(deck == 0 ? QStringLiteral("A")
+                                   : QStringLiteral("B"));
+        setupLabel_->setText(blocked
+            ? tr("PRIME not armed — %1").arg(replayLifecycleDetail_)
+            : tr("This transition uses stems. Prepare stems for Deck %1 before Perform or Prime.")
+                  .arg(decks.join(tr(" and Deck "))));
+        setupLabel_->setStyleSheet("color:#e8a835; font-weight:600;");
+        return;
     }
     QStringList differences;
     QList<ControlEvent> mismatchControls;
@@ -1707,7 +1982,8 @@ void TransitionPanel::updateSetupStatus()
         match, &differences, true, &mismatchControls);
     if (player_->isActive() || recorder_->isRecording())
         mismatchControls.clear();
-    emit setupMismatchControlsChanged(mismatchControls);
+    emit setupMismatchControlsChanged(
+        setupGuidanceSuppressed_ ? QList<ControlEvent>() : mismatchControls);
     const bool strictlyReady = ready && setupTolerances_.closeEnough
         ? setupMatches(match, nullptr, false) : ready;
     const QString acceptedSuffix = ready && !strictlyReady
@@ -1722,7 +1998,10 @@ void TransitionPanel::updateSetupStatus()
                                  .arg(acceptedSuffix)
                            : tr("Outgoing setup: %1; EQ was not stored in this older transition")
                                  .arg(differences.join(QStringLiteral(", ")));
-        setupLabel_->setText(text);
+        setupLabel_->setText(blocked
+                                 ? tr("PRIME not armed — %1")
+                                       .arg(replayLifecycleDetail_)
+                                 : text);
         setupLabel_->setStyleSheet("color:#e8a835;");
         return;
     }
@@ -1739,8 +2018,12 @@ void TransitionPanel::updateSetupStatus()
                      : tr("Outgoing setup: %1").arg(summary));
     if (!ready && !mismatchControls.isEmpty())
         setupText += tr(" — adjust the amber-highlighted controls");
-    setupLabel_->setText(setupText);
-    setupLabel_->setStyleSheet(ready ? "color:#4cd964;" : "color:#e8a835;");
+    setupLabel_->setText(blocked
+                             ? tr("PRIME not armed — %1")
+                                   .arg(replayLifecycleDetail_)
+                             : setupText);
+    setupLabel_->setStyleSheet(
+        ready && !blocked ? "color:#4cd964;" : "color:#e8a835;");
 }
 
 void TransitionPanel::updateControls()
@@ -1748,7 +2031,8 @@ void TransitionPanel::updateControls()
     const bool recording = recorder_->isRecording();
     const bool replaying = player_->isActive();
     const bool busy = recording || replaying;
-    const bool selected = selectedMatch() >= 0;
+    const int selectedIndex = selectedMatch();
+    const bool selected = selectedIndex >= 0;
     const bool tracksLoaded = engine_->deck(0).track() && engine_->deck(1).track();
     const bool aPlaying = engine_->deck(0).playing.load();
     const bool bPlaying = engine_->deck(1).playing.load();
@@ -1756,10 +2040,14 @@ void TransitionPanel::updateControls()
 
     recBtn_->setEnabled(!busy && tracksLoaded && oneOutgoing);
     stopSaveBtn_->setEnabled(recording && capturedCount_ > 0);
-    performBtn_->setEnabled(selected && !busy);
+    const QList<int> missingStems = selected
+        ? missingStemDecks(matches_[static_cast<std::size_t>(selectedIndex)])
+        : QList<int>();
+    const bool stemsReady = missingStems.isEmpty();
+    performBtn_->setEnabled(selected && !busy && stemsReady);
     bool primeTimingReady = false;
     if (selected && !busy) {
-        const Match& match = matches_[(size_t)selectedMatch()];
+        const Match& match = matches_[static_cast<std::size_t>(selectedIndex)];
         const Deck& outgoing = engine_->deck(match.fromDeck);
         const TrackDataPtr track = outgoing.track();
         const double beat = track
@@ -1770,7 +2058,7 @@ void TransitionPanel::updateControls()
                                ? beat <= match.file->anchorFromBeat + 0.05
                                : beat < match.file->anchorFromBeat - 0.05;
     }
-    primeBtn_->setEnabled(selected && !busy && primeTimingReady);
+    primeBtn_->setEnabled(selected && !busy && primeTimingReady && stemsReady);
     // The checked TUTOR VIEW remains closable during a guided run. It cannot be
     // opened on top of an unrelated automatic Perform or while recording.
     tutorialBtn_->setEnabled(
@@ -1793,8 +2081,14 @@ void TransitionPanel::updateControls()
         selectedPreviewItem->data(Qt::UserRole).toInt() >= 0;
     labelCueBtn_->setEnabled(selected && eventSelected && !busy);
 
+    prepareStemsBtn_->setVisible(selected && !stemsReady);
+    prepareStemsBtn_->setEnabled(selected && tracksLoaded && !busy &&
+                                 !stemsReady);
+
     bool setupReady = true;
-    if (selected) setupReady = setupMatches(matches_[(size_t)selectedMatch()]);
+    if (selected)
+        setupReady = setupMatches(
+            matches_[static_cast<std::size_t>(selectedIndex)]);
     applySetupBtn_->setEnabled(selected && !busy && !setupReady);
     closeEnoughCheck_->setEnabled(!busy);
     toleranceBtn_->setEnabled(!busy);
@@ -1818,6 +2112,9 @@ void TransitionPanel::updateControls()
             : tr("Stop recording and save the captured transition"));
     if (!selected)
         primeBtn_->setToolTip(tr("Select a transition first"));
+    else if (!stemsReady)
+        primeBtn_->setToolTip(
+            tr("Click PREPARE STEMS before priming this transition"));
     else if (!primeTimingReady && !busy)
         primeBtn_->setToolTip(
             tr("Prime requires the outgoing deck to be before the entry marker"));
@@ -1825,97 +2122,30 @@ void TransitionPanel::updateControls()
         primeBtn_->setToolTip(
             tr("Verify and restore the complete pre-transition state, then arm "
                "the transition at its entry marker"));
+    if (!selected)
+        performBtn_->setToolTip(tr("Select a transition first"));
+    else if (!stemsReady)
+        performBtn_->setToolTip(
+            tr("Click PREPARE STEMS before performing this transition"));
+    else
+        performBtn_->setToolTip(
+            tr("Replay the selected transition from its recorded entry point"));
 }
 
 void TransitionPanel::applyInitialSetup(const Match& match, bool announce,
                                         bool prepareFromTransport,
                                         bool prepareToTransport,
                                         bool applyFromTempo,
-                                        bool applyCrossfader)
+                                        bool applyHardwareFacingState)
 {
-    const auto applyDeck = [&](bool fromRole, bool prepareTransport) {
-        const int deckIndex = fromRole ? match.fromDeck : 1 - match.fromDeck;
-        Deck& deck = engine_->deck(deckIndex);
-        const GvtInitialState& setup = fromRole ? match.file->initialFrom
-                                                : match.file->initialTo;
-        if (!setup.captured) return;
-        if (prepareTransport)
-            bus_->dispatch({deckIndex, ControlId::Stop, 1.0}, Origin::System);
-        if (!fromRole || applyFromTempo)
-            bus_->dispatch({deckIndex, ControlId::Tempo,
-                            expectedTempoRatio(match, fromRole)},
-                           Origin::System);
-        const std::pair<ControlId, double> values[] = {
-            {ControlId::Fader, setup.fader},
-            {ControlId::EqLow, setup.eqLow},
-            {ControlId::EqMid, setup.eqMid},
-            {ControlId::EqHigh, setup.eqHigh},
-            {ControlId::Filter, setup.filter},
-        };
-        for (const auto& [control, value] : values)
-            bus_->dispatch({deckIndex, control, value}, Origin::System);
-        if (!match.file->initialComplete) return;
-        const std::pair<ControlId, double> extended[] = {
-            {ControlId::FxType, (double)setup.fxType},
-            {ControlId::FxOn, setup.fxOn ? 1.0 : 0.0},
-            {ControlId::FxWet, setup.fxWet},
-            {ControlId::FxBeats, setup.fxBeats},
-            {ControlId::StemVocals, setup.stemVocals},
-            {ControlId::StemMelody, setup.stemMelody},
-            {ControlId::StemBass, setup.stemBass},
-            {ControlId::StemDrums, setup.stemDrums},
-        };
-        for (const auto& [control, value] : extended)
-            bus_->dispatch({deckIndex, control, value}, Origin::System);
-        if (setup.quantizeCaptured)
-            bus_->dispatch({deckIndex, ControlId::Quantize,
-                            setup.quantize ? 1.0 : 0.0}, Origin::System);
-
-        if (TrackDataPtr track = deck.track()) {
-            deck.cuePointSec.store(transitionSecAtBeat(
-                *match.file, *track, setup.cueBeat));
-            deck.loopStartSec.store(transitionSecAtBeat(
-                *match.file, *track, setup.loopStartBeat));
-            deck.loopEndSec.store(transitionSecAtBeat(
-                *match.file, *track, setup.loopEndBeat));
-            deck.loopActive.store(setup.loopActive &&
-                                  setup.loopEndBeat > setup.loopStartBeat);
-            if (prepareTransport)
-                deck.seekSec(transitionSecAtBeat(
-                    *match.file, *track, setup.positionBeat));
-        }
-    };
-
-    applyDeck(true, prepareFromTransport);
-    if (match.file->initialComplete)
-        applyDeck(false, prepareToTransport);
-    else if (prepareToTransport) {
-        const int incoming = 1 - match.fromDeck;
-        bus_->dispatch({incoming, ControlId::Stop, 1.0}, Origin::System);
-        if (TrackDataPtr track = engine_->deck(incoming).track())
-            engine_->deck(incoming).seekSec(transitionSecAtBeat(
-                *match.file, *track, match.file->anchorToBeat));
-    }
-    if (applyCrossfader && match.file->initialComplete &&
-        match.file->initialMixerCaptured) {
-        const double physical = match.fromDeck == 0
-                                    ? match.file->initialCrossfader
-                                    : 1.0 - match.file->initialCrossfader;
-        bus_->dispatch({kNoDeck, ControlId::Crossfader, physical},
-                       Origin::System);
-    } else if (applyFromTempo && !match.file->initialFrom.captured) {
-        const int outgoing = match.fromDeck;
-        if (TrackDataPtr track = engine_->deck(outgoing).track();
-            track && track->bpm > 0.0 && match.file->masterBpm > 0.0)
-            bus_->dispatch({outgoing, ControlId::Tempo,
-                            match.file->masterBpm / track->bpm},
-                           Origin::System);
-    }
+    prepareTransitionSetup(*bus_, *engine_, *match.file, match.fromDeck,
+        {prepareFromTransport, prepareToTransport, applyFromTempo,
+         applyHardwareFacingState});
     updateSetupStatus();
     updateControls();
     if (announce)
         emit statusMessage(match.file->initialComplete
-                               ? tr("Matched both decks and mixer to the recorded pre-state")
+                               ? tr("Matched both decks to the recorded pre-state")
                                : tr("Matched the available legacy outgoing setup"),
                            4000);
 }
@@ -1924,8 +2154,10 @@ void TransitionPanel::onApplySetup()
 {
     const int idx = selectedMatch();
     if (idx >= 0) {
+        setupGuidanceSuppressed_ = false;
         clearReplayLifecycle();
-        applyInitialSetup(matches_[(size_t)idx], true);
+        applyInitialSetup(matches_[(size_t)idx], true, false, false, true,
+                          !tutorialViewOpen_);
     }
 }
 
@@ -2132,6 +2364,19 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         return;
     }
     const Match& m = matches_[(size_t)idx];
+    setupGuidanceSuppressed_ = false;
+    const QList<int> missingStems = missingStemDecks(m);
+    if (!missingStems.isEmpty()) {
+        QStringList decks;
+        for (int deck : missingStems)
+            decks.append(deck == 0 ? QStringLiteral("A")
+                                   : QStringLiteral("B"));
+        emit statusMessage(
+            tr("This transition needs prepared stems on Deck %1. Click PREPARE STEMS first.")
+                .arg(decks.join(tr(" and Deck "))),
+            8000);
+        return;
+    }
     // A new Prime/Perform request explicitly begins another pass through this
     // edge. Until it arms successfully, resume showing preflight readiness.
     clearReplayLifecycle();
@@ -2146,6 +2391,8 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
             return event.control == ControlId::Play ||
                    (event.control >= ControlId::HotCue1 &&
                     event.control <= ControlId::HotCue8) ||
+                   (event.control >= ControlId::TransitionCue1 &&
+                    event.control <= ControlId::TransitionCue8) ||
                    (event.control >= ControlId::SavedLoop1 &&
                     event.control <= ControlId::SavedLoop8);
         });
@@ -2212,13 +2459,14 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
     }
 
     if (prime) {
-        // PRIME leaves the outgoing song's live position alone, but restores
-        // every recorded audible parameter and fully prepares the incoming
-        // deck's transport before validating the result.
+        // PRIME leaves the outgoing song's live position alone. Perform mode
+        // may restore recorded deck controls; Tutor only prepares software-
+        // owned transport/cues/loop bounds before validating physical setup.
         applyInitialSetup(m, false, /*prepareFromTransport=*/false,
                           /*prepareToTransport=*/true,
                           /*applyFromTempo=*/false,
-                          /*applyCrossfader=*/false);
+                          /*applyHardwareFacingState=*/
+                              mode == PlayerMode::Perform);
         const QStringList issues = primeReadinessIssues(m);
         if (!issues.isEmpty()) {
             if (takeoverTrackingActive_) {
@@ -2237,8 +2485,13 @@ void TransitionPanel::startReplay(PlayerMode mode, bool prime)
         // Arm first, then start the outgoing deck, so beat-zero events cannot
         // be missed between the seek and scheduler activation.
         applyInitialSetup(m, false, /*prepareFromTransport=*/true,
-                          /*prepareToTransport=*/true);
-        if (TrackDataPtr track = engine_->deck(m.fromDeck).track()) {
+                          /*prepareToTransport=*/true,
+                          /*applyFromTempo=*/true,
+                          /*applyHardwareFacingState=*/
+                              mode == PlayerMode::Perform);
+        if (mode == PlayerMode::Perform) {
+            positionTransitionPerform(*engine_, *m.file, m.fromDeck);
+        } else if (TrackDataPtr track = engine_->deck(m.fromDeck).track()) {
             // Guided Perform starts eight beats before the entry whenever the
             // track has that much runway. This makes button countdowns useful
             // even for a recorded action at transition beat zero.
@@ -2338,9 +2591,12 @@ void TransitionPanel::onAbort()
         announceEntryMarker();
     }
     progress_->setValue(0);
+    clearReplayLifecycle();
+    setupGuidanceSuppressed_ = true;
     clearSequenceProgress();
     if (banner_) banner_->hide();
     finishTutorialRun();
+    updateSetupStatus();
     updateControls();
 }
 
@@ -2529,6 +2785,7 @@ QStringList TransitionPanel::tutorialWarnings(const Match& match) const
     QStringList warnings;
     QSet<QString> seen;
     for (const GvtEvent& event : match.file->events) {
+        if (!transitionEventIsExecutable(event)) continue;
         const QString warning = tutorialWarningForEvent(match, event);
         if (warning.isEmpty() || seen.contains(warning)) continue;
         seen.insert(warning);
@@ -2583,6 +2840,7 @@ bool TransitionPanel::tutorialEventCanActivate(
 std::optional<Flx4TutorialMapping>
 TransitionPanel::tutorialMappingForEvent(const GvtEvent& event) const
 {
+    if (!transitionEventIsExecutable(event)) return std::nullopt;
     if (event.gestureControl >= ControlId::PerformancePad1 &&
         event.gestureControl <= ControlId::PerformancePad8) {
         const int pad = static_cast<int>(event.gestureControl) -
@@ -2603,10 +2861,7 @@ ControlEvent TransitionPanel::tutorialPhysicalEvent(const GvtEvent& event) const
                         : (event.role == Role::FromDeck
                                ? tutorialFromDeck_ : 1 - tutorialFromDeck_);
     physical.id = event.control;
-    physical.value = event.control == ControlId::Crossfader &&
-                             tutorialFromDeck_ == 1
-                         ? 1.0 - event.value
-                         : event.value;
+    physical.value = event.value;
     return physical;
 }
 
@@ -2847,6 +3102,13 @@ void TransitionPanel::layoutTutorialOverlay()
 void TransitionPanel::onTutorialViewToggled(bool open)
 {
     if (open) {
+        if (hardwareInputFrozen_) {
+            QSignalBlocker block(tutorialBtn_);
+            tutorialBtn_->setChecked(false);
+            emit statusMessage(
+                tr("Unfreeze hardware before opening Tutor View"), 5000);
+            return;
+        }
         if (player_->isActive() && !tutorialActive_) {
             QSignalBlocker block(tutorialBtn_);
             tutorialBtn_->setChecked(false);
@@ -2918,6 +3180,7 @@ void TransitionPanel::refreshTutorialView()
 void TransitionPanel::finishTutorialRun()
 {
     tutorialActive_ = false;
+    emit tutorialTargetsChanged({});
     tutorialPrompts_.clear();
     setTutorialPreviewEvent(nullptr);
     if (tutorialViewOpen_)
@@ -2929,6 +3192,7 @@ void TransitionPanel::finishTutorialRun()
 void TransitionPanel::closeTutorialOverlay()
 {
     tutorialActive_ = false;
+    emit tutorialTargetsChanged({});
     tutorialViewOpen_ = false;
     tutorialPrompts_.clear();
     setTutorialPreviewEvent(nullptr);
@@ -2938,6 +3202,87 @@ void TransitionPanel::closeTutorialOverlay()
     }
     if (tutorialGuideLabel_) tutorialGuideLabel_->hide();
     if (tutorialOverlay_) tutorialOverlay_->hide();
+}
+
+QList<ControlEvent> TransitionPanel::tutorialControlTargets() const
+{
+    QList<ControlEvent> result;
+    const int idx = selectedMatch();
+    if (!tutorialActive_ || idx < 0) return result;
+    const Match& match = matches_[static_cast<std::size_t>(idx)];
+    if (!match.file) return result;
+    const GvtFile& file = *match.file;
+
+    using Key = std::pair<int, int>;
+    std::map<Key, double> targets;
+    const auto add = [&targets](int deck, ControlId control, double value) {
+        targets[{deck, static_cast<int>(control)}] = value;
+    };
+    const auto addInitial = [&](Role role, const GvtInitialState& state) {
+        if (!state.captured) return;
+        const int deck = role == Role::FromDeck
+                             ? match.fromDeck : 1 - match.fromDeck;
+        add(deck, ControlId::Tempo,
+            expectedTempoRatio(match, role == Role::FromDeck));
+        add(deck, ControlId::Fader, state.fader);
+        add(deck, ControlId::EqLow, state.eqLow);
+        add(deck, ControlId::EqMid, state.eqMid);
+        add(deck, ControlId::EqHigh, state.eqHigh);
+        add(deck, ControlId::Filter, state.filter);
+        if (!file.initialComplete) return;
+        add(deck, ControlId::Quantize, state.quantize ? 1.0 : 0.0);
+        add(deck, ControlId::FxType, static_cast<double>(state.fxType));
+        add(deck, ControlId::FxOn, state.fxOn ? 1.0 : 0.0);
+        add(deck, ControlId::FxWet, state.fxWet);
+        add(deck, ControlId::StemVocals, state.stemVocals);
+        add(deck, ControlId::StemMelody, state.stemMelody);
+        add(deck, ControlId::StemBass, state.stemBass);
+        add(deck, ControlId::StemDrums, state.stemDrums);
+    };
+    addInitial(Role::FromDeck, file.initialFrom);
+    addInitial(Role::ToDeck, file.initialTo);
+
+    std::vector<GvtEvent> events;
+    std::copy_if(file.events.begin(), file.events.end(),
+                 std::back_inserter(events), [](const GvtEvent& event) {
+                     return transitionEventIsExecutable(event) &&
+                            event.role != Role::Mixer &&
+                            !controlIsTrigger(event.control);
+                 });
+    for (GvtEvent& event : events) {
+        if (event.control != ControlId::Tempo) continue;
+        event.value = event.role == Role::FromDeck
+            ? transitionReplayTempoEvent(
+                  event.value, file.from,
+                  engine_->deck(match.fromDeck).track())
+            : transitionReplayTempoEvent(
+                  event.value, file.to,
+                  engine_->deck(1 - match.fromDeck).track());
+    }
+    const auto schedule = buildSchedule(
+        events, [&targets, &match](Role role, ControlId control) {
+            const int deck = role == Role::FromDeck
+                                 ? match.fromDeck : 1 - match.fromDeck;
+            const auto found = targets.find(
+                {deck, static_cast<int>(control)});
+            return found == targets.end() ? 0.0 : found->second;
+        });
+    for (const ScheduledEvent& scheduled : schedule) {
+        const double beat = tutorialBeatsIn_;
+        if (beat < scheduled.startBeat) continue;
+        double value = scheduled.e.value;
+        if (scheduledIsGlide(scheduled) && beat < scheduled.e.beat)
+            value = glideValueAt(scheduled, beat);
+        else if (beat < scheduled.e.beat)
+            continue;
+        const int deck = scheduled.e.role == Role::FromDeck
+                             ? match.fromDeck : 1 - match.fromDeck;
+        add(deck, scheduled.e.control, value);
+    }
+
+    for (const auto& [key, value] : targets)
+        result.append({key.first, static_cast<ControlId>(key.second), value});
+    return result;
 }
 
 void TransitionPanel::refreshTutorialLiveState()
@@ -2996,7 +3341,7 @@ void TransitionPanel::refreshTutorialGuideLabel()
     if (!tutorialGuideDetail_.isEmpty())
         lines.append(tutorialGuideDetail_);
     if (!tutorialTakeovers_.empty()) {
-        lines.append(tr("⚠ Reset the %1 highlighted FLX4 control(s). They stay monitored until every control is correct at the same time.")
+        lines.append(tr("⚠ Match the %1 highlighted FLX4 control(s). Each one reconnects independently when it reaches software.")
                          .arg(tutorialTakeovers_.size()));
     } else if (!tutorialGuideWarning_.isEmpty()) {
         lines.append(QStringLiteral("⚠ ") + tutorialGuideWarning_);

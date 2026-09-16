@@ -192,10 +192,13 @@ int runSelfTest(const QStringList& args) {
     struct Step { double atSec; ControlEvent e; };
     const Step steps[] = {
         {1.0, {1, ControlId::Play, 1.0}},
-        {2.0, {kNoDeck, ControlId::Crossfader, 0.3}},
-        {4.0, {kNoDeck, ControlId::Crossfader, 0.7}},
+        {2.0, {1, ControlId::Fader, 0.3}},
+        // Crossfader remains manual DJ state and must never enter a newly
+        // recorded transition, even though the live mixer still accepts it.
+        {3.0, {kNoDeck, ControlId::Crossfader, 0.8}},
+        {4.0, {0, ControlId::Fader, 0.7}},
         {5.0, {0, ControlId::EqLow, 0.0}},
-        {6.0, {kNoDeck, ControlId::Crossfader, 1.0}},
+        {6.0, {1, ControlId::Fader, 1.0}},
     };
     size_t next = 0;
     for (int64_t rendered = 0; rendered < (int64_t)(8.0 * kSampleRate); rendered += chunk) {
@@ -212,8 +215,14 @@ int runSelfTest(const QStringList& args) {
                 recd.events.size(), recd.anchorFromBeat, recd.masterBpm);
     if (recd.events.size() < 5) { std::printf("FAIL: recorder lost events\n"); return 1; }
     if (!recd.initialComplete || !recd.initialFrom.captured ||
-        !recd.initialTo.captured || !recd.initialMixerCaptured) {
+        !recd.initialTo.captured || recd.initialMixerCaptured) {
         std::printf("FAIL: recorder lost complete pre-transition snapshot\n"); return 1;
+    }
+    if (std::any_of(recd.events.begin(), recd.events.end(),
+                    [](const GvtEvent& event) {
+                        return event.control == ControlId::Crossfader;
+                    }) || recd.initialCrossfaderPresent) {
+        std::printf("FAIL: recorder serialized crossfader state\n"); return 1;
     }
     if (!recd.initialFrom.playing || recd.initialTo.playing) {
         std::printf("FAIL: recorder lost initial transport state\n"); return 1;
@@ -228,7 +237,7 @@ int runSelfTest(const QStringList& args) {
     if (!loadTransitionFile(recordedPath, recd2, &err, nullptr) ||
         recd2.events.size() != recd.events.size() ||
         !recd2.initialComplete || !recd2.initialTo.captured ||
-        !recd2.initialMixerCaptured) {
+        recd2.initialMixerCaptured || recd2.initialCrossfaderPresent) {
         std::printf("FAIL: recorded round-trip\n"); return 1;
     }
     std::printf("OK: recorder round-trip (selftest_recorded.transition)\n");

@@ -40,6 +40,7 @@ public:
     // MainWindow supplies the dedicated large Tutor region. The tutorial
     // surface remains owned by this panel but is laid out over that region.
     void setTutorialOverlayAnchor(QWidget* anchor);
+    bool tutorialViewOpen() const noexcept { return tutorialViewOpen_; }
 
 signals:
     void statusMessage(const QString& msg, int timeoutMs);
@@ -67,10 +68,17 @@ signals:
     // MainWindow owns the full-size editor and routes both panel and library
     // edit requests through this single path.
     void transitionEditRequested(const QString& filePath);
+    // MainWindow owns StemSeparator; the panel identifies the physical decks
+    // required by the selected transition and asks the normal deck stem path
+    // to prepare them.
+    void stemPreparationRequested(int deck);
     // Exact visible controls currently outside the selected transition's
     // accepted pre-state tolerance. Empty clears all highlights.
     void setupMismatchControlsChanged(
         const QList<gvt::ControlEvent>& controls);
+    // Derived, physical-deck targets for the advisory green overlays on the
+    // main controls. Never serialized and never applied to audio.
+    void tutorialTargetsChanged(const QList<gvt::ControlEvent>& controls);
 
 public slots:
     void refreshMatches();  // call on trackLoaded / store changed
@@ -84,6 +92,7 @@ public slots:
     void observePerformancePadState(int deck, int mode,
                                     unsigned int enabledMask,
                                     unsigned int pressedMask);
+    void setHardwareInputFrozen(bool frozen);
 
 public:
     void setHardwareTakeovers(
@@ -135,6 +144,7 @@ private:
     void setReplayBlocked(const Match& match, const QString& reason);
     void announceEntryMarker();    // emit entryMarkerChanged for selection
     void announceSelectedEventMarker();
+    void announceAllHumanCueMarkers(const Match& match);
     void updatePreview();
     void configurePreviewColumns();
     void addSequenceStartRow(const GvtFile& file);
@@ -155,11 +165,12 @@ private:
                            bool prepareFromTransport = false,
                            bool prepareToTransport = false,
                            bool applyFromTempo = true,
-                           bool applyCrossfader = true);
+                           bool applyHardwareFacingState = true);
     bool setupMatches(const Match& match, QStringList* differences = nullptr,
                       bool honorCloseEnough = true,
                       QList<ControlEvent>* mismatchControls = nullptr) const;
     QStringList primeReadinessIssues(const Match& match) const;
+    QList<int> missingStemDecks(const Match& match) const;
     double expectedTempoRatio(const Match& match, bool fromRole) const;
     QString automaticCueLabel(const GvtEvent& event) const;
     QString cueLabelAt(const GvtFile& file, double beat) const;
@@ -182,6 +193,7 @@ private:
     void closeTutorialOverlay();
     void refreshTutorialLiveState();
     void refreshTutorialGuideLabel();
+    QList<ControlEvent> tutorialControlTargets() const;
 
     ControlBus* bus_;
     AudioEngine* engine_;
@@ -204,7 +216,9 @@ private:
     QPushButton* labelCueBtn_ = nullptr;
     QPushButton* humanModeBtn_ = nullptr;
     QPushButton* rawModeBtn_ = nullptr;
+    QCheckBox* showImportantCuesCheck_ = nullptr;
     QPushButton* applySetupBtn_ = nullptr;
+    QPushButton* prepareStemsBtn_ = nullptr;
     QCheckBox* closeEnoughCheck_ = nullptr;
     QPushButton* toleranceBtn_ = nullptr;
     QProgressBar* progress_ = nullptr;
@@ -225,6 +239,8 @@ private:
     double tutorialBeatsIn_ = 0.0;
     bool tutorialActive_ = false;
     bool tutorialViewOpen_ = false;
+    bool hardwareInputFrozen_ = false;
+    bool setupGuidanceSuppressed_ = false;
     bool takeoverTrackingActive_ = false;
     bool refreshingMatches_ = false;
     bool transitionEditingEnabled_ = false;

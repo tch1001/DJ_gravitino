@@ -59,16 +59,34 @@ committed and pushed after validation. Never include the untracked `tmp/` tree.
   above a permanent full-width event sequence, and accepts canonical file-path
   selection after the edge loader resolves physical deck direction. The
   visible sequence retains only start/end rows for each role-specific LOW/MID/
-  HIGH EQ move and the crossfader, without modifying `.gvt` checkpoints or
+  HIGH EQ move, without modifying `.gvt` checkpoints or
   replay. Selecting the transition itself emits no yellow cue markers;
   selecting one visible event emits exactly that aligned marker. During Tutor,
   the next summarized action is highlighted gold and centered in the visible
   sequence. The ordinary deck layout places narrowed pads/modes beside compact
   Loop/Jump, FX, and Stems controls.
-- **Crossfader-safe PRIME:** setup readiness no longer compares or highlights
-  the live crossfader, and PRIME does not move it while preparing the decks.
-  The recorded initial crossfader is still scheduled at transition beat zero,
-  preserving replay semantics without changing the live master early.
+- **Crossfader-excluded transitions:** setup readiness, recording, PRIME,
+  replay, Tutorial, summaries/cues, editor lanes, and editor preview never use
+  crossfader data. Older optional fields/events remain readable and round-trip
+  unchanged, but are inert. Mouse and MIDI crossfader control remain live.
+- **Guided setup and live hardware truth:** the mixer top strip reports
+  SYNC/MISMATCH/PARTIAL/FROZEN, a SHOW HW checkbox displays cyan last-reported
+  physical positions, GET HW STATE refreshes and reports the snapshot, and
+  FREEZE HW decouples only absolute musical controls while
+  leaving buttons live. Unfreeze and post-Perform recovery use independent
+  jump-free pickup per control. PRIME mismatches show exact amber slider/dial
+  targets and persist across failures; Tutor refuses manual freeze, prepares
+  only transport/cue/loop/cue-bank state, and adds advisory interpolated green
+  targets to the main controls. Event rows have normalized faint duration
+  tracks, with only the active row filling to the next distinct action.
+  When no controller is connected, SHOW HW, GET HW STATE, and FREEZE HW are
+  all disabled. The virtual deck transport mirrors the FLX4's vertical
+  small-SHIFT / CUE / larger-PLAY stack, with the non-existent dedicated
+  VINYL-mode control removed.
+  PRIME loop mismatch text now names the physical correction: 4 BEAT/EXIT to
+  turn an unwanted loop off, or the allocated CUSTOM pad / exact LOOP IN and
+  LOOP OUT beats to enable a required loop. Tutor transport preparation
+  preserves active loop state and bounds until the user makes that correction.
 - **Reliable PRIME reachability and FLX4 lifecycle:** active-loop readiness now
   distinguishes a future loop from one already containing the playhead. A
   transition entry before LOOP IN is reachable and may be armed; an entry
@@ -98,7 +116,7 @@ committed and pushed after validation. Never include the untracked `tmp/` tree.
   60`) cycles the same per-deck range, and subsequent physical fader packets are
   expanded using that selection.
 - **Visual pre-transition mismatch guidance:** while a transition is selected
-  and idle, every visible tempo, channel-fader, EQ, filter, crossfader, FX,
+  and idle, every visible tempo, channel-fader, EQ, filter, FX,
   Quantize, or stem control outside the accepted setup tolerance receives a
   pulsing amber overlay. The 100 ms readiness poll removes a highlight as soon
   as the control is correct and restores it if the control drifts or overshoots.
@@ -172,10 +190,10 @@ committed and pushed after validation. Never include the untracked `tmp/` tree.
 - **Selective, persistent post-transition pickup:** MidiEngine snapshots the
   pre-transition virtual controls and only arms physical pickup for absolute
   controls the replay actually changed. Reconciliation uses the last observed
-  physical position instead of assuming the whole FLX4 is wrong. A matched
-  knob is not forgotten until every pending control is simultaneously within
-  tolerance, so overshooting it makes its white target/highlight reappear.
-  Pickup moves stay audio-silent while the link is frozen.
+  physical position instead of assuming the whole FLX4 is wrong. Each target
+  is acquired and released independently; its crossing packet remains
+  audio-silent, then the next move flows normally while other targets may
+  still be pending.
 
 - **Centered mixer and compact deck controls:** the `TRIM → HIGH → MID → LOW →
   FILTER` channel strips and volume faders now occupy a narrow center panel in
@@ -199,12 +217,12 @@ committed and pushed after validation. Never include the untracked `tmp/` tree.
   hot-cue deletion all consult every stored transition and require explicit
   confirmation when that cue is referenced.
 
-- **Post-transition FLX4 soft takeover:** Perform tracks replay/setup changes
-  to the physical TEMPO, channel fader, HIGH/MID/LOW, FILTER, and crossfader
-  controls. At the final event, the entire FLX4→Gravitino input link freezes if
-  any changed control's physical position differs. Only pickup moves are
-  consumed until every target is simultaneously within tolerance; the pickup
-  event itself is not applied, so audio never jumps. A blinking white status alert lists
+- **Hardware shadow, manual freeze, and per-control pickup:** MidiEngine tracks
+  last-reported physical values for absolute musical controls. FREEZE HW blocks
+  only those absolute packets while buttons remain live; unfreezing arms an
+  independent pickup gate for each mismatch/unknown control. Perform uses the
+  same per-control pickup for controls changed by replay. The pickup packet
+  itself is not applied, so audio never jumps. A blinking white status alert lists
   hardware→target values and white-static veils mark the affected virtual
   controls. Software edits retarget the pending pickup, disconnect clears it,
   and no gate appears without a connected controller. Tutorial's full FLX4
@@ -241,10 +259,10 @@ committed and pushed after validation. Never include the untracked `tmp/` tree.
   transition/library vertical splitter still persists its position.
 - **Configurable Close Enough transition setup:** the transition panel has a
   persisted CLOSE ENOUGH checkbox plus a TOLERANCE… dialog. Strict matching
-  remains the default. When enabled, BPM, volume controls (channel fader and
-  crossfader), and LOW/MID/HIGH EQ can differ from the recorded
+  remains the default. When enabled, BPM, channel-fader volume, and
+  LOW/MID/HIGH EQ can differ from the recorded
   pre-state by independently configurable margins (defaults: ±0.5 BPM,
-  ±5% channel/crossfader volume, ±5% EQ). Track identity, transport/loop state, FX state and
+  ±5% channel volume, ±5% EQ). Track identity, transport/loop state, FX state and
   type, filters, stems, cue/loop timing, and other setup remain strict. The
   live readiness label says explicitly when a state was accepted only because
   it was close enough; PRIME uses the same readiness policy after its robust

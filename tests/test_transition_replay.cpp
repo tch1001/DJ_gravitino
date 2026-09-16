@@ -41,12 +41,86 @@ gvt::TrackDataPtr makeTrack(double bpm = 120.0)
         static_cast<std::size_t>(gvt::kSampleRate) * 8U * 2U);
     return track;
 }
+
+void prime_detects_entry_crossed_between_polls(bool keyLock, int fromDeck,
+                                               int renderFrames)
+{
+    using namespace gvt;
+    ControlBus bus;
+    AudioEngine engine(&bus);
+    const int toDeck = 1 - fromDeck;
+    auto track = makeTrack();
+    track->firstBeatSec = 0.25;
+    track->canonicalBeatOffset = 0.5;
+    engine.deck(fromDeck).loadTrack(track);
+    engine.deck(toDeck).loadTrack(makeTrack());
+    Deck& outgoing = engine.deck(fromDeck);
+    outgoing.preservePitch.store(keyLock);
+    outgoing.loopStartSec.store(2.0);
+    outgoing.loopEndSec.store(4.0);
+    outgoing.loopActive.store(true);
+    outgoing.seekSec(3.9);
+    outgoing.play();
+    GvtFile file;
+    constexpr double entrySeconds = 3.9975;
+    file.anchorFromBeat = transitionBeatAtSec(file, *track, entrySeconds);
+    file.anchorToBeat = 2.0;
+    file.masterBpm = 120.0;
+    file.endBeat = 20.0;
+    file.events = {{0.0, Role::ToDeck, ControlId::Play, 1.0, Curve::Step}};
+    TransitionPlayer player(&bus, &engine);
+    QString error;
+    double progress = -100.0;
+    QObject::connect(&player, &TransitionPlayer::progressChanged,
+                     [&](double beat, double) { progress = beat; });
+    CHECK(player.arm(file, fromDeck, false, &error));
+    // A backward seek inside an active loop is not evidence of crossing entry.
+    outgoing.seekSec(2.4);
+    spinEvents(10);
+    CHECK(progress < 0.0);
+    CHECK(!engine.deck(toDeck).playing.load());
+    CHECK(outgoing.loopWrappedSeconds() == 0.0);
+    outgoing.seekSec(3.9);
+    spinEvents(10);
+    CHECK(!engine.deck(toDeck).playing.load());
+
+    std::vector<float> audio(static_cast<std::size_t>(renderFrames) * 2);
+    // Withhold scheduler polls across one or several actual audio loop wraps.
+    engine.renderOffline(audio.data(), renderFrames);
+    const double wrapped = outgoing.loopWrappedSeconds();
+    CHECK(wrapped > 0.0);
+    CHECK(outgoing.positionSec() < entrySeconds);
+    spinEvents(10);
+    CHECK(engine.deck(toDeck).playing.load());
+    const double expected = (3.9 + static_cast<double>(renderFrames) / kSampleRate
+                             - entrySeconds) * 2.0;
+    CHECK(std::fabs(progress - expected) < 0.05);
+    player.abort();
+    outgoing.stop();
+    outgoing.seekSec(2.2);
+    engine.renderOffline(audio.data(), 256);
+    CHECK(outgoing.loopWrappedSeconds() == wrapped);
+    // A new arm must not inherit wrap distance from the previous run.
+    engine.deck(toDeck).stop();
+    outgoing.play();
+    CHECK(player.arm(file, fromDeck, false, &error));
+    spinEvents(10);
+    CHECK(progress < 0.0);
+    CHECK(!engine.deck(toDeck).playing.load());
+    player.abort();
+}
 }
 
 int main(int argc, char** argv)
 {
     using namespace gvt;
     QCoreApplication app(argc, argv);
+
+    for (bool keyLock : {false, true})
+        for (int fromDeck : {0, 1}) {
+            prime_detects_entry_crossed_between_polls(keyLock, fromDeck, 7200);
+            prime_detects_entry_crossed_between_polls(keyLock, fromDeck, 201600);
+        }
 
     // A future loop does not block a transition entry that occurs before LOOP
     // IN. This is the exact Titanium -> Don't You Worry Child PRIME layout:
@@ -77,7 +151,7 @@ int main(int argc, char** argv)
     };
     const std::vector<int> compact =
         summarizedTransitionEventIndices(denseSequence);
-    const std::vector<int> wantedCompact {0, 1, 4, 5, 6, 8, 9};
+    const std::vector<int> wantedCompact {0, 1, 4, 5, 9};
     CHECK(compact == wantedCompact);
     CHECK(denseSequence.events.size() == 10);
     ControlBus bus;
@@ -90,6 +164,8 @@ int main(int argc, char** argv)
     GvtFile file;
     file.initialComplete = true;
     file.initialMixerCaptured = true;
+    file.initialCrossfaderPresent = true;
+    file.initialCrossfader = 1.0;
     file.anchorFromBeat = 0.0;
     file.anchorToBeat = 2.0; // one second at 120 BPM
     file.masterBpm = 120.0;
@@ -103,6 +179,8 @@ int main(int argc, char** argv)
     file.initialTo.positionBeat = 7.0; // deliberately not the play anchor
     file.events.push_back(
         {0.12, Role::ToDeck, ControlId::Play, 1.0, Curve::Step});
+    file.events.push_back(
+        {0.0, Role::Mixer, ControlId::Crossfader, 0.9, Curve::Step});
 
     TransitionPlayer player(&bus, &engine);
     QString error;
@@ -111,10 +189,12 @@ int main(int argc, char** argv)
     engine.deck(0).seekSec(0.99); // just before the outgoing loop wraps
     engine.deck(1).seekSec(3.0);
     engine.deck(1).play();
+    engine.crossfader.store(0.37f);
     CHECK(player.arm(file, 0, true, &error));
     spinEvents(25);
     CHECK(error.isEmpty());
     CHECK(!engine.deck(1).playing.load());
+    CHECK(std::fabs(engine.crossfader.load() - 0.37) < 0.0001);
     // A simulated loop wrap must not rewind the transition's monotonic clock.
     engine.deck(0).seekSec(0.0);
     spinEvents(60);

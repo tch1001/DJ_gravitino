@@ -122,7 +122,8 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
             e.id == ControlId::HeadphoneCue ||
             e.id == ControlId::MasterCue ||
             e.id == ControlId::HeadphoneMix ||
-            e.id == ControlId::Trim)
+            e.id == ControlId::Trim ||
+            e.id == ControlId::Crossfader)
             return;
 
         if (e.deck >= 0 && e.deck < kNumDecks &&
@@ -182,10 +183,7 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
         g.beat = std::max(0.0, beat);
         g.role = roleForDeck(e.deck, im.fromDeck);
         g.control = e.id;
-        // Crossfader is stored in ROLE space (0 = from-deck, 1 = to-deck) so
-        // a transition replays correctly when the pair is loaded swapped.
-        g.value = (e.id == ControlId::Crossfader && im.fromDeck != 0)
-                      ? 1.0 - e.value : e.value;
+        g.value = e.value;
         g.curve = Curve::Step;
         if (im.gesturePending && im.gestureDeck == e.deck) {
             g.gestureControl = im.gestureControl;
@@ -236,9 +234,6 @@ void TransitionRecorder::start(int fromDeck) {
     im.masterBpm = im.engine->deck(fromDeck).effectiveBpm();
     im.initialFrom = captureDeckState(im.engine->deck(fromDeck));
     im.initialTo = captureDeckState(im.engine->deck(im.toDeck));
-    const double physicalCrossfader = im.engine->crossfader.load();
-    im.initialCrossfader = fromDeck == 0 ? physicalCrossfader
-                                         : 1.0 - physicalCrossfader;
     im.toAnchorSet = false;
     im.toAnchorBeat = 0.0;
     // If the incoming deck is already rolling, its anchor is NOW — waiting for
@@ -335,8 +330,8 @@ GvtFile TransitionRecorder::finish() {
     f.initialComplete = true;
     f.initialFrom = im.initialFrom;
     f.initialTo = im.initialTo;
-    f.initialMixerCaptured = true;
-    f.initialCrossfader = im.initialCrossfader;
+    f.initialMixerCaptured = false;
+    f.initialCrossfader = 0.0;
     f.fromHotCueBeats = im.fromHotCueBeats;
     f.toHotCueBeats = im.toHotCueBeats;
 
@@ -459,7 +454,6 @@ GvtFile TransitionRecorder::finish() {
     };
     quantizeState(f.initialFrom);
     quantizeState(f.initialTo);
-    f.initialCrossfader = q(f.initialCrossfader, 0.001);
     for (auto* mappings : {&f.fromHotCueBeats, &f.toHotCueBeats})
         for (double& beat : *mappings)
             if (hotCueBeatIsMapped(beat)) beat = q(beat, kPrecise);

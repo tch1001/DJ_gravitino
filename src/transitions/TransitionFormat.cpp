@@ -2,6 +2,7 @@
 // the compatibility adapter that keeps the replay engine format-neutral.
 
 #include "Transition.h"
+#include "TransitionFields.h"
 #include "../analysis/TrackData.h"
 #include "../performance/PerformancePads.h"
 
@@ -9,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QLocale>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
@@ -680,7 +682,8 @@ QString scalarYaml(const QJsonValue& value)
     if (value.isNull() || value.isUndefined()) return QStringLiteral("null");
     if (value.isBool()) return value.toBool() ? QStringLiteral("true")
                                                : QStringLiteral("false");
-    if (value.isDouble()) return QString::number(value.toDouble(), 'g', 15);
+    if (value.isDouble())
+        return QString::number(value.toDouble(), 'g', QLocale::FloatingPointShortest);
     return quoteYaml(value.toString());
 }
 
@@ -1088,6 +1091,8 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
     file.initialComplete = boolAt(initial, "complete");
     const QJsonObject mixer = initial.value(QStringLiteral("mixer")).toObject();
     file.initialMixerCaptured = boolAt(mixer, "captured", !mixer.isEmpty());
+    file.initialCrossfaderPresent =
+        mixer.contains(QStringLiteral("crossfader"));
     file.initialCrossfader = numberAt(mixer, "crossfader");
     file.mixerInitialExtraYaml = without(mixer, {"captured", "crossfader"});
     parseInitialDeck(initial.value(QStringLiteral("outgoing")).toObject(),
@@ -1452,7 +1457,8 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
     if (file.endBeat.has_value()) {
         double latestBeat = 0.0;
         for (const GvtEvent& event : file.events)
-            latestBeat = std::max(latestBeat, event.beat);
+            if (transitionEventIsExecutable(event))
+                latestBeat = std::max(latestBeat, event.beat);
         for (const GvtCue& cue : file.cues)
             latestBeat = std::max(latestBeat, cue.beat);
         if (*file.endBeat < latestBeat) {
@@ -1482,7 +1488,7 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
     return true;
 }
 
-QString transitionSerialize(const GvtFile& source)
+QJsonObject transitionDocumentFields(const GvtFile& source)
 {
     GvtFile file = source;
     ensurePortableDefaults(file);
@@ -1524,9 +1530,18 @@ QString transitionSerialize(const GvtFile& source)
     QJsonObject initial = file.initialStateExtraYaml;
     initial.insert(QStringLiteral("complete"), file.initialComplete);
     QJsonObject mixer = file.mixerInitialExtraYaml;
-    mixer.insert(QStringLiteral("captured"), file.initialMixerCaptured);
-    mixer.insert(QStringLiteral("crossfader"), file.initialCrossfader);
-    initial.insert(QStringLiteral("mixer"), mixer);
+    if (file.initialMixerCaptured || file.initialCrossfaderPresent ||
+        !mixer.isEmpty()) {
+        mixer.insert(QStringLiteral("captured"), file.initialMixerCaptured);
+    }
+    if (file.initialCrossfaderPresent)
+        mixer.insert(QStringLiteral("crossfader"), file.initialCrossfader);
+    else
+        mixer.remove(QStringLiteral("crossfader"));
+    if (mixer.isEmpty())
+        initial.remove(QStringLiteral("mixer"));
+    else
+        initial.insert(QStringLiteral("mixer"), mixer);
     initial.insert(QStringLiteral("outgoing"), initialDeckJson(file.initialFrom));
     initial.insert(QStringLiteral("incoming"), initialDeckJson(file.initialTo));
     performance.insert(QStringLiteral("initial_state"), initial);
@@ -1620,10 +1635,20 @@ QString transitionSerialize(const GvtFile& source)
     root.insert(QStringLiteral("performance"), performance);
     root.insert(QStringLiteral("extensions"), file.extensions);
 
+    return root;
+}
+
+QString transitionFieldsYaml(const QJsonObject& root)
+{
     QString output;
     output += QStringLiteral("# Gravitino portable transition — beat positions may be fractional.\n");
     emitYamlObject(output, root, 0);
     return output;
+}
+
+QString transitionSerialize(const GvtFile& source)
+{
+    return transitionFieldsYaml(transitionDocumentFields(source));
 }
 
 bool transitionLoadFile(const QString& path, GvtFile& out, QString* error,

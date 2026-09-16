@@ -41,6 +41,9 @@ public:
 signals:
     void trackReady(int row);
     void scanProgress(int analyzed, int total);
+    // Emitted after the rebuildable song -> transition reverse index changes.
+    // Smart library views use this to refresh transition coverage.
+    void transitionGraphChanged();
 };
 
 // Portable .transition files and readable legacy .gvt files.

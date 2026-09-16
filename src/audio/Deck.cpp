@@ -100,6 +100,7 @@ struct Deck::Impl {
     TrackDataPtr ownedTrack;
     std::atomic<TrackData*> audioTrack { nullptr };
     std::atomic<double> positionFrames { 0.0 };
+    std::atomic<double> loopWrappedSeconds { 0.0 };
     std::atomic<double> trackBpm { 0.0 };
     std::atomic<double> firstBeatSec { 0.0 };
     std::atomic<int64_t> trackFrameCount { 0 };
@@ -979,6 +980,7 @@ void Deck::render(float* out, int frames, float* preFaderOut)
         ? std::max(0.0, startPosition)
         : 0.0;
     bool reachedEnd = false;
+    double wrappedFrames = 0.0;
 
     if (renderTrack) {
         double scratchAdvance = 0.0;
@@ -1046,6 +1048,7 @@ void Deck::render(float* out, int frames, float* preFaderOut)
             if (loopEnabled && position >= loopEndFrame) {
                 const double overshoot =
                     std::fmod(position - loopStartFrame, loopLengthFrames);
+                wrappedFrames += position - loopStartFrame - overshoot;
                 position = loopStartFrame + (overshoot >= 0.0
                     ? overshoot : overshoot + loopLengthFrames);
             }
@@ -1272,6 +1275,10 @@ void Deck::render(float* out, int frames, float* preFaderOut)
             impl_->positionFrames.compare_exchange_strong(
                 expectedPosition, position, std::memory_order_release,
                 std::memory_order_relaxed);
+        if (positionCommitted && wrappedFrames > 0.0)
+            impl_->loopWrappedSeconds.fetch_add(
+                wrappedFrames / static_cast<double>(kSampleRate),
+                std::memory_order_release);
         if (reachedEnd && positionCommitted)
             playing.store(false, std::memory_order_release);
     }
@@ -1281,6 +1288,11 @@ double Deck::positionSec() const
 {
     return impl_->positionFrames.load(std::memory_order_acquire) /
            static_cast<double>(kSampleRate);
+}
+
+double Deck::loopWrappedSeconds() const
+{
+    return impl_->loopWrappedSeconds.load(std::memory_order_acquire);
 }
 
 void Deck::seekSec(double sec)

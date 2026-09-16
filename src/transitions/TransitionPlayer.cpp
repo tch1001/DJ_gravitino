@@ -4,6 +4,7 @@
 #include "TransitionEngine.h"
 #include "TransitionImpls.h"
 #include "TransitionPlayerExt.h"
+#include "TransitionTransportTrace.h"
 #include "../performance/PerformancePads.h"
 
 #include <cmath>
@@ -75,53 +76,7 @@ TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
     im.timer.setTimerType(Qt::PreciseTimer);
 
     connect(&im.timer, &QTimer::timeout, this, [this] {
-        Impl& im2 = *impl_;
-        if (!im2.active) return;
-        const double rel = im2.currentRel();
-
-        // PRIME may sit armed for many bars. Reassert transport-dependent
-        // pre-state at the actual entry boundary so an incoming deck touched
-        // after arming cannot make replay skip its recorded cue position.
-        if (im2.mode == PlayerMode::Perform &&
-            !im2.preStateTransportApplied && rel >= 0.0) {
-            im2.restorePreStateTransportAtAnchor();
-            im2.preStateTransportApplied = true;
-        }
-
-        for (size_t i = 0; i < im2.sched.size(); ++i) {
-            if (im2.done[i]) continue;
-            ScheduledEvent& s = im2.sched[i];
-            const double due = s.e.beat;
-
-            if (im2.mode == PlayerMode::Tutorial) {
-                if (!im2.prompted[i] && rel >= due - kTutorialLead) {
-                    im2.prompted[i] = 1;
-                    emit tutorialPrompt(s.e, due - rel);
-                }
-                if (rel > due + kTutorialMiss) { // human missed it — advance
-                    im2.done[i] = 1;
-                    emit tutorialScored(s.e, kTutorialMiss, 0.0);
-                }
-                continue;
-            }
-
-            if (rel >= due) {
-                im2.fireFinal(s);
-                im2.done[i] = 1;
-            } else if (scheduledIsGlide(s) && rel > s.startBeat) {
-                im2.dispatch(s.e.role, s.e.control, glideValueAt(s, rel));
-            }
-        }
-
-        // Report negative pre-anchor time too. The UI clamps its progress bar,
-        // while Tutorial uses the raw value for an honest 8-beat countdown.
-        emit progressChanged(rel, im2.totalBeats);
-
-        if (rel >= im2.completionBeat) {
-            im2.active = false;
-            im2.timer.stop();
-            emit finished(true);
-        }
+        if (impl_->active) advanceToBeat(impl_->currentRel());
     });
 
     // Tutorial scoring: match the human's live events against pending ones.
@@ -164,6 +119,54 @@ TransitionPlayer::TransitionPlayer(ControlBus* bus, AudioEngine* engine,
         im2.done[best] = 1;
         emit tutorialScored(s.e, beatError, valueError);
     });
+}
+
+void TransitionPlayer::advanceToBeat(double rel) {
+    Impl& im2 = *impl_;
+    if (!im2.active || !std::isfinite(rel)) return;
+    // PRIME may sit armed for many bars. Reassert transport-dependent
+    // pre-state at the actual entry boundary so an incoming deck touched
+    // after arming cannot make replay skip its recorded cue position.
+    if (im2.mode == PlayerMode::Perform &&
+        !im2.preStateTransportApplied && rel >= 0.0) {
+        im2.restorePreStateTransportAtAnchor();
+        im2.preStateTransportApplied = true;
+    }
+
+    for (size_t i = 0; i < im2.sched.size(); ++i) {
+        if (im2.done[i]) continue;
+        ScheduledEvent& s = im2.sched[i];
+        const double due = s.e.beat;
+
+        if (im2.mode == PlayerMode::Tutorial) {
+            if (!im2.prompted[i] && rel >= due - kTutorialLead) {
+                im2.prompted[i] = 1;
+                emit tutorialPrompt(s.e, due - rel);
+            }
+            if (rel > due + kTutorialMiss) { // human missed it — advance
+                im2.done[i] = 1;
+                emit tutorialScored(s.e, kTutorialMiss, 0.0);
+            }
+            continue;
+        }
+
+        if (rel >= due) {
+            im2.fireFinal(s);
+            im2.done[i] = 1;
+        } else if (scheduledIsGlide(s) && rel > s.startBeat) {
+            im2.dispatch(s.e.role, s.e.control, glideValueAt(s, rel));
+        }
+    }
+
+    // Report negative pre-anchor time too. The UI clamps its progress bar,
+    // while Tutorial uses the raw value for an honest 8-beat countdown.
+    emit progressChanged(rel, im2.totalBeats);
+
+    if (rel >= im2.completionBeat) {
+        im2.active = false;
+        im2.timer.stop();
+        emit finished(true);
+    }
 }
 
 TransitionPlayer::~TransitionPlayer() {
@@ -211,81 +214,24 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
         preserveIt->second;
 
     std::vector<GvtEvent> events;
-    events.reserve(f.events.size());
-    std::copy_if(f.events.begin(), f.events.end(),
-                 std::back_inserter(events), [](const GvtEvent& event) {
-                     // Old files remain readable, but gain staging is no
-                     // longer applied as part of a transition.
-                     return event.control != ControlId::Trim;
-                 });
-    const auto preparePerformanceSlots = [&](Role role, int physicalDeck,
-                                              const TrackDataPtr& track) {
-        std::array<double, 8> startSeconds {
-            -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
-        std::array<double, 8> endSeconds {
-            -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
-        const auto allocated = transitionPerformanceSlots(f, role);
-        for (int slotIndex = 0; slotIndex < 8; ++slotIndex) {
-            const TransitionPerformanceSlot& slot =
-                allocated[static_cast<std::size_t>(slotIndex)];
-            if (!track) continue;
-            if (slot.cue) {
-                startSeconds[static_cast<std::size_t>(slotIndex)] =
-                    transitionSecAtBeat(f, *track, slot.cue->trackBeat);
-            } else if (slot.loop) {
-                startSeconds[static_cast<std::size_t>(slotIndex)] =
-                    transitionSecAtBeat(f, *track, slot.loop->startTrackBeat);
-                endSeconds[static_cast<std::size_t>(slotIndex)] =
-                    transitionSecAtBeat(f, *track, slot.loop->endTrackBeat);
+    if (!resolveTransitionPlaybackEvents(f, im.engine->deck(fromDeck).track(),
+                                        im.engine->deck(toDeck).track(),
+                                        events, error)) return false;
+    for (Role role : {Role::FromDeck, Role::ToDeck}) {
+        const int physical = im.physicalDeck(role);
+        const auto track = im.engine->deck(physical).track();
+        std::array<double, 8> starts {-1,-1,-1,-1,-1,-1,-1,-1};
+        std::array<double, 8> ends {-1,-1,-1,-1,-1,-1,-1,-1};
+        const auto allocations = transitionPerformanceSlots(f, role);
+        for (int i = 0; i < 8 && track; ++i) {
+            const auto& slot = allocations[static_cast<std::size_t>(i)];
+            if (slot.cue) starts[i] = transitionSecAtBeat(f, *track, slot.cue->trackBeat);
+            else if (slot.loop) {
+                starts[i] = transitionSecAtBeat(f, *track, slot.loop->startTrackBeat);
+                ends[i] = transitionSecAtBeat(f, *track, slot.loop->endTrackBeat);
             }
         }
-        im.engine->deck(physicalDeck).setTransitionPerformanceSlots(
-            startSeconds, endSeconds);
-        return allocated;
-    };
-    const auto fromPerformanceSlots = preparePerformanceSlots(
-        Role::FromDeck, fromDeck, im.engine->deck(fromDeck).track());
-    const auto toPerformanceSlots = preparePerformanceSlots(
-        Role::ToDeck, toDeck, im.engine->deck(toDeck).track());
-    for (GvtEvent& event : events) {
-        if ((event.cueId.isEmpty() && event.loopId.isEmpty()) ||
-            event.role == Role::Mixer)
-            continue;
-        const auto& allocated = event.role == Role::FromDeck
-                                ? fromPerformanceSlots : toPerformanceSlots;
-        const auto found = std::find_if(
-            allocated.begin(), allocated.end(), [&event](const auto& slot) {
-                return (!event.cueId.isEmpty() && slot.cue &&
-                        slot.cue->id == event.cueId) ||
-                       (!event.loopId.isEmpty() && slot.loop &&
-                        slot.loop->id == event.loopId);
-            });
-        if (found == allocated.end()) {
-            if (error) *error = QStringLiteral(
-                "timeline refers to unallocated transition pad '%1'")
-                                    .arg(event.cueId.isEmpty()
-                                             ? event.loopId : event.cueId);
-            return false;
-        }
-        const int slot = static_cast<int>(
-            std::distance(allocated.begin(), found));
-        event.control = static_cast<ControlId>(
-            static_cast<int>(ControlId::TransitionCue1) + slot);
-        event.gestureControl = static_cast<ControlId>(
-            static_cast<int>(ControlId::PerformancePad1) + slot);
-        event.gesturePadMode = static_cast<int>(PerformancePadMode::Sampler);
-    }
-    // A library re-scan or manual regrid can change the loaded track's native
-    // BPM after recording. Preserve every recorded effective BPM, including
-    // later tempo moves, rather than blindly replaying a now-wrong ratio.
-    for (GvtEvent& event : events) {
-        if (event.control != ControlId::Tempo) continue;
-        if (event.role == Role::FromDeck)
-            event.value = transitionReplayTempoEvent(
-                event.value, f.from, im.engine->deck(fromDeck).track());
-        else if (event.role == Role::ToDeck)
-            event.value = transitionReplayTempoEvent(
-                event.value, f.to, im.engine->deck(toDeck).track());
+        im.engine->deck(physical).setTransitionPerformanceSlots(starts, ends);
     }
     // Setup snapshots are replay actions, not tutorial gestures.  In Perform
     // mode they fire at the anchor (including when PRIME has waited there), so
@@ -302,12 +248,6 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
             toSetup.tempoRatio = transitionReplayTempoRatio(
                 toSetup, f.to, im.engine->deck(toDeck).track());
             prependInitialState(events, toSetup, Role::ToDeck, true);
-            if (f.initialMixerCaptured) {
-                events.insert(events.begin(),
-                              GvtEvent {0.0, Role::Mixer,
-                                        ControlId::Crossfader,
-                                        f.initialCrossfader, Curve::Step});
-            }
         }
     }
     std::stable_sort(events.begin(), events.end(),
@@ -348,9 +288,13 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     }
     im.preStateTransportApplied = false;
     im.incomingPreviewControl = ControlId::Count;
+    const Deck& outgoing = im.engine->deck(fromDeck);
+    im.waitingLoopWrappedSeconds = outgoing.loopWrappedSeconds();
+    im.waitingLoopStartSec = outgoing.loopStartSec.load();
+    im.waitingLoopEndSec = outgoing.loopEndSec.load();
 
     im.active = true;
-    im.timer.start();
+    if (!im.externalClock) im.timer.start();
     return true;
 }
 
@@ -366,6 +310,17 @@ bool TransitionPlayer::isActive() const { return impl_->active; }
 
 void transitionPlayerSetMode(TransitionPlayer* player, PlayerMode mode) {
     modeTable()[player] = mode;
+}
+
+void transitionPlayerUseExternalClock(TransitionPlayer* player, bool external) {
+    if (!player || player->impl_->active) return;
+    player->impl_->externalClock = external;
+}
+
+void transitionPlayerAdvanceToBeat(TransitionPlayer* player, double beat) {
+    if (!player || !player->impl_->externalClock) return;
+    player->impl_->lastBeat = beat;
+    player->advanceToBeat(beat);
 }
 
 void transitionPlayerPreserveOutgoingSetupTempo(TransitionPlayer* player,

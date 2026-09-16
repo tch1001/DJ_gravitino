@@ -95,9 +95,40 @@ int main()
     const HumanTransitionRow* loopRow = rowContaining(launchRows, 6);
     CHECK(loopRow && loopRow->incoming->kind == HumanActionKind::Event);
     const HumanTransitionRow* mixerRow = rowContaining(launchRows, 1);
-    CHECK(mixerRow && mixerRow->shared.has_value());
+    CHECK(mixerRow == nullptr);
     CHECK(coveredIndices(launchRows) ==
-          std::vector<int>({0, 1, 2, 3, 4, 5, 6}));
+          std::vector<int>({0, 2, 3, 4, 5, 6}));
+
+    // Portable transitions address their own semantic cues by ID. The Human
+    // launch recognizer must follow that ID (not the placeholder control enum)
+    // and resolve the temporary CUSTOM-bank pad used for teaching.
+    GvtFile portableLaunch;
+    TransitionHotCue portableCue;
+    portableCue.id = QStringLiteral("incoming-launch");
+    portableCue.role = Role::ToDeck;
+    portableCue.trackBeat = 64.0;
+    portableCue.preferredPad = 4;
+    portableLaunch.transitionCues.push_back(portableCue);
+    portableLaunch.events = {
+        {1.0, Role::ToDeck, ControlId::TransitionCue1, 1.0, Curve::Step,
+         ControlId::Count, -1, QStringLiteral("incoming-launch")},
+        {1.2, Role::Mixer, ControlId::Crossfader, 0.2, Curve::Step},
+        {1.5, Role::FromDeck, ControlId::EqLow, 0.4, Curve::Step},
+        {2.0, Role::ToDeck, ControlId::Play, 1.0, Curve::Step},
+        {3.0, Role::ToDeck, ControlId::TransitionCue1, 0.0, Curve::Step,
+         ControlId::Count, -1, QStringLiteral("incoming-launch")},
+    };
+    const auto portableLaunchRows = humanTransitionRows(portableLaunch);
+    const HumanTransitionRow* portableLaunchRow =
+        rowContaining(portableLaunchRows, 0);
+    CHECK(portableLaunchRow && portableLaunchRow->incoming.has_value());
+    CHECK(portableLaunchRow && portableLaunchRow->incoming->kind ==
+                                   HumanActionKind::HotCueStart);
+    CHECK(portableLaunchRow && portableLaunchRow->incoming->hotCuePad == 5);
+    CHECK(portableLaunchRow && portableLaunchRow->incoming->eventIndices ==
+                                   std::vector<int>({0, 3, 4}));
+    CHECK(humanTransitionRowForEventIndex(portableLaunchRows, 3) ==
+          humanTransitionRowForEventIndex(portableLaunchRows, 0));
 
     GvtFile conflict;
     conflict.events = {
@@ -156,15 +187,25 @@ int main()
         transitionSequenceProgressAt(rowBeats, 1.0, 9.0);
     CHECK(startProgress.row == 0);
     CHECK(std::fabs(startProgress.fraction - 0.5) < 1.0e-9);
+    CHECK(std::fabs(startProgress.trackFraction - 0.5) < 1.0e-9);
     const TransitionSequenceProgress simultaneous =
         transitionSequenceProgressAt(rowBeats, 2.0, 9.0);
     CHECK(simultaneous.row == 2);
     CHECK(std::fabs(simultaneous.fraction) < 1.0e-9);
+    CHECK(std::fabs(simultaneous.trackFraction - 0.75) < 1.0e-9);
     const TransitionSequenceProgress finalProgress =
         transitionSequenceProgressAt(rowBeats, 7.0, 9.0);
     CHECK(finalProgress.row == 3);
     CHECK(std::fabs(finalProgress.fraction - 0.5) < 1.0e-9);
+    CHECK(finalProgress.trackFraction == 1.0);
     CHECK(transitionSequenceProgressAt(rowBeats, 9.0, 9.0).fraction == 1.0);
+    const auto durationFractions =
+        transitionSequenceDurationFractions(rowBeats, 9.0);
+    CHECK(durationFractions.size() == 4);
+    CHECK(std::fabs(durationFractions[0] - 0.5) < 1.0e-9);
+    CHECK(durationFractions[1] == 0.0);
+    CHECK(std::fabs(durationFractions[2] - 0.75) < 1.0e-9);
+    CHECK(durationFractions[3] == 1.0);
 
     if (failures) return 1;
     std::puts("test_transition_summary: human grouping passed");

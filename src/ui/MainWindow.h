@@ -9,6 +9,7 @@
 #include "../transitions/TransitionEngine.h"
 
 class QLabel;
+class QCheckBox;
 class QActionGroup;
 class QMenu;
 class QPushButton;
@@ -28,6 +29,8 @@ class TransitionPanel;
 class TransitionEditorWindow;
 class PickupFuzzOverlay;
 class SetupMismatchOverlay;
+class HardwareGhostOverlay;
+class TutorialTargetOverlay;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -65,6 +68,9 @@ private slots:
     void refreshSoftTakeoverUi();
     void refreshSetupMismatchUi(
         const QList<gvt::ControlEvent>& controls);
+    void refreshHardwareStateUi();
+    void refreshTutorialTargetUi(
+        const QList<gvt::ControlEvent>& controls);
 
 private:
     ControlBus* bus_;
@@ -88,6 +94,10 @@ private:
     QLabel* midiLabel_ = nullptr;
     QLabel* rateLabel_ = nullptr;
     QLabel* pickupLabel_ = nullptr;
+    QLabel* hardwareSyncLabel_ = nullptr;
+    QCheckBox* showHardwareCheck_ = nullptr;
+    QPushButton* getHardwareStateBtn_ = nullptr;
+    QCheckBox* freezeHardwareCheck_ = nullptr;
     QMenu* audioOutputMenu_ = nullptr;
     QActionGroup* audioOutputGroup_ = nullptr;
 
@@ -101,7 +111,11 @@ private:
     QTimer* setupMismatchTimer_ = nullptr;
     QList<SetupMismatchOverlay*> setupMismatchOverlays_;
     QList<ControlEvent> setupMismatchControls_;
+    QList<double> setupMismatchFractions_;
     bool setupMismatchPulse_ = false;
+    QList<HardwareGhostOverlay*> hardwareGhostOverlays_;
+    QList<TutorialTargetOverlay*> tutorialTargetOverlays_;
+    bool hardwareControlsAvailable_ = false;
 
     // Stem separation (null stems_ = STEMS button stays inert).
     // Results are matched to decks by track fingerprint: a deck whose track
@@ -109,6 +123,10 @@ private:
     // dropped (the WAV cache keeps it for the next load).
     StemSeparator* stems_ = nullptr;
     DeckWidget* deckWidget(int i) { return i == 0 ? deckA_ : deckB_; }
+    QWidget* controlTargetWidget(const ControlEvent& event) const;
+    double controlDisplayFraction(const ControlEvent& event) const;
+    double softwareControlValue(const ControlEvent& event) const;
+    QString controlValueText(ControlId control, double value) const;
     void updateAudioOutputLabel();
 };
 

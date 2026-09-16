@@ -16,6 +16,7 @@
 
 #include <QDesktopServices>
 #include <QActionGroup>
+#include <QCheckBox>
 #include <QSplitter>
 #include <QTimer>
 #include <QFileDialog>
@@ -24,6 +25,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QUrl>
@@ -113,6 +115,43 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     deckA_ = new DeckWidget(0, bus_, engine_);
     deckB_ = new DeckWidget(1, bus_, engine_);
     mixer_ = new MixerWidget(bus_);
+    auto* hardwareHost = new QWidget(mixer_);
+    auto* hardwareLayout = new QVBoxLayout(hardwareHost);
+    hardwareLayout->setContentsMargins(2, 1, 2, 1);
+    hardwareLayout->setSpacing(1);
+    hardwareSyncLabel_ = new QLabel(tr("HW UNKNOWN"), hardwareHost);
+    hardwareSyncLabel_->setObjectName(QStringLiteral("hardwareSyncStatus"));
+    hardwareSyncLabel_->setAlignment(Qt::AlignCenter);
+    hardwareSyncLabel_->setStyleSheet(
+        QStringLiteral("color:%1; font-size:9px; font-weight:bold;")
+            .arg(themeDimText().name()));
+    hardwareLayout->addWidget(hardwareSyncLabel_);
+    auto* hardwareButtons = new QHBoxLayout;
+    hardwareButtons->setContentsMargins(0, 0, 0, 0);
+    hardwareButtons->setSpacing(3);
+    showHardwareCheck_ = new QCheckBox(tr("SHOW HW"), hardwareHost);
+    showHardwareCheck_->setObjectName(QStringLiteral("showHardwareState"));
+    showHardwareCheck_->setFixedHeight(18);
+    showHardwareCheck_->setToolTip(
+        tr("Overlay the last physical positions reported by the controller"));
+    freezeHardwareCheck_ = new QCheckBox(tr("FREEZE HW"), hardwareHost);
+    freezeHardwareCheck_->setObjectName(QStringLiteral("freezeHardwareInput"));
+    freezeHardwareCheck_->setFixedHeight(18);
+    freezeHardwareCheck_->setToolTip(
+        tr("Keep knobs and absolute faders from changing software; buttons remain live"));
+    hardwareButtons->addWidget(showHardwareCheck_);
+    hardwareButtons->addWidget(freezeHardwareCheck_);
+    hardwareLayout->addLayout(hardwareButtons);
+    getHardwareStateBtn_ = new FitPushButton(
+        tr("GET HW STATE"), hardwareHost);
+    getHardwareStateBtn_->setObjectName(
+        QStringLiteral("getHardwareState"));
+    getHardwareStateBtn_->setFixedHeight(18);
+    getHardwareStateBtn_->setToolTip(
+        tr("Refresh the controller connection and compare the latest reported "
+           "physical positions. Move an unknown knob or fader once to capture it."));
+    hardwareLayout->addWidget(getHardwareStateBtn_);
+    mixer_->setTopWidget(hardwareHost);
     auto* deckRow = new QHBoxLayout;
     deckRow->setSpacing(6);
     deckRow->addWidget(deckA_, 1);
@@ -309,6 +348,58 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             &MainWindow::onMidiConnection);
     connect(midi_, &MidiEngine::softTakeoverChanged, this,
             &MainWindow::refreshSoftTakeoverUi);
+    connect(midi_, &MidiEngine::hardwareStateChanged, this,
+            &MainWindow::refreshHardwareStateUi);
+    connect(midi_, &MidiEngine::hardwareInputFrozenChanged,
+            transitionPanel_, &TransitionPanel::setHardwareInputFrozen);
+    connect(midi_, &MidiEngine::hardwareInputFrozenChanged, this,
+            [this](bool frozen) {
+                QSignalBlocker block(freezeHardwareCheck_);
+                freezeHardwareCheck_->setChecked(frozen);
+                refreshHardwareStateUi();
+            });
+    connect(showHardwareCheck_, &QCheckBox::toggled, this,
+            [this] { refreshHardwareStateUi(); });
+    connect(getHardwareStateBtn_, &QPushButton::clicked, this, [this] {
+        midi_->refreshHardwareState();
+        if (!midi_->controllerConnected()) {
+            statusBar()->showMessage(
+                tr("No controller connected — hardware state is unknown"),
+                5000);
+            return;
+        }
+        const std::vector<SoftTakeoverState> states =
+            midi_->hardwareControlStates();
+        const int known = static_cast<int>(std::count_if(
+            states.begin(), states.end(),
+            [](const SoftTakeoverState& state) {
+                return state.hardwareKnown;
+            }));
+        if (known < static_cast<int>(states.size())) {
+            statusBar()->showMessage(
+                tr("Hardware state: %1/%2 controls known — move each unknown "
+                   "knob or fader once")
+                    .arg(known)
+                    .arg(states.size()),
+                6500);
+        } else {
+            const int mismatched = static_cast<int>(std::count_if(
+                states.begin(), states.end(),
+                [](const SoftTakeoverState& state) {
+                    return std::fabs(state.hardwareValue -
+                                     state.targetValue) >
+                           SoftTakeover::tolerance(state.control);
+                }));
+            statusBar()->showMessage(
+                mismatched == 0
+                    ? tr("Hardware state captured: all controls match software")
+                    : tr("Hardware state captured: %1 control(s) differ")
+                          .arg(mismatched),
+                5000);
+        }
+    });
+    connect(freezeHardwareCheck_, &QCheckBox::toggled, midi_,
+            &MidiEngine::setHardwareInputFrozen);
     connect(transitionPanel_,
             &TransitionPanel::hardwareTakeoverTrackingStarted, midi_,
             &MidiEngine::beginTransitionTakeoverTracking);
@@ -321,6 +412,20 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     connect(transitionPanel_,
             &TransitionPanel::setupMismatchControlsChanged, this,
             &MainWindow::refreshSetupMismatchUi);
+    connect(bus_, &ControlBus::eventDispatched, this,
+            [this](const ControlEvent& event, Origin) {
+                // The authored target is unchanged, but its position on the
+                // fader moves when the range changes (from either UI or MIDI).
+                if (event.id == ControlId::TempoRange)
+                    refreshSetupMismatchUi(setupMismatchControls_);
+            });
+    connect(transitionPanel_, &TransitionPanel::tutorialTargetsChanged, this,
+            &MainWindow::refreshTutorialTargetUi);
+    connect(transitionPanel_, &TransitionPanel::tutorialViewChanged, this,
+            [this](bool open) {
+                freezeHardwareCheck_->setEnabled(
+                    hardwareControlsAvailable_ && !open);
+            });
     connect(midi_, &MidiEngine::hardwareControlObserved, transitionPanel_,
             &TransitionPanel::observeTutorialHardwareControl);
     connect(midi_, &MidiEngine::connectionChanged, this,
@@ -352,6 +457,8 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     headphoneRetryTimer->start();
     connect(engine_, &AudioEngine::outputDeviceChanged, this,
             [this](const QString&, bool) { updateAudioOutputLabel(); });
+    transitionPanel_->setHardwareInputFrozen(midi_->hardwareInputFrozen());
+    refreshHardwareStateUi();
 
     // Cross-widget wiring.
     store_->setSongCatalog(library_->songCatalog());
@@ -692,6 +799,8 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
             &MainWindow::onStemsRequested);
     connect(deckB_, &DeckWidget::stemsRequested, this,
             &MainWindow::onStemsRequested);
+    connect(transitionPanel_, &TransitionPanel::stemPreparationRequested,
+            this, &MainWindow::onStemsRequested);
     if (stems_) {
         auto forEachMatchingDeck = [this](const QString& fingerprint,
                                           auto&& fn) {
@@ -764,10 +873,8 @@ void MainWindow::refreshSoftTakeoverUi()
 
     QStringList instructions;
     for (const SoftTakeoverState& state : pending) {
-        QWidget* target = state.control == ControlId::Tempo &&
-                                  (state.deck == 0 || state.deck == 1)
-                              ? deckWidget(state.deck)->controlWidget(state.control)
-                              : mixer_->controlWidget(state.deck, state.control);
+        QWidget* target = controlTargetWidget(
+            {state.deck, state.control, state.targetValue});
         if (target) {
             auto* overlay = new PickupFuzzOverlay(target);
             overlay->setPulse(pickupPulse_);
@@ -788,20 +895,209 @@ void MainWindow::refreshSoftTakeoverUi()
     if (instructions.size() > 4)
         detail += tr(" · +%1 more").arg(instructions.size() - 4);
     pickupLabel_->setText(
-        tr("⚠ FLX4 INPUT FROZEN — MATCH CONTROLS: %1").arg(detail));
+        tr("⚠ MATCH FOR PICKUP — KNOBS/FADERS ONLY: %1").arg(detail));
     pickupLabel_->show();
     pickupPulse_ = false;
     pickupTimer_->start();
 }
 
+QWidget* MainWindow::controlTargetWidget(const ControlEvent& event) const
+{
+    if (event.deck == 0 || event.deck == 1) {
+        if (QWidget* deckControl =
+                (event.deck == 0 ? deckA_ : deckB_)->controlWidget(event.id))
+            return deckControl;
+    }
+    return mixer_->controlWidget(event.deck, event.id);
+}
+
+double MainWindow::controlDisplayFraction(const ControlEvent& event) const
+{
+    if (event.deck == 0 || event.deck == 1)
+        return (event.deck == 0 ? deckA_ : deckB_)
+            ->controlDisplayFraction(event.id, event.value);
+    return std::clamp(event.value, 0.0, 1.0);
+}
+
+double MainWindow::softwareControlValue(const ControlEvent& event) const
+{
+    if (event.id == ControlId::Crossfader)
+        return engine_->crossfader.load();
+    if (event.deck < 0 || event.deck >= kNumDecks) return 0.0;
+    const Deck& deck = engine_->deck(event.deck);
+    switch (event.id) {
+    case ControlId::Tempo: return deck.tempoRatio.load();
+    case ControlId::Fader: return deck.fader.load();
+    case ControlId::Trim: return deck.trim.load();
+    case ControlId::EqLow: return deck.eqLow.load();
+    case ControlId::EqMid: return deck.eqMid.load();
+    case ControlId::EqHigh: return deck.eqHigh.load();
+    case ControlId::Filter: return deck.filter.load();
+    case ControlId::Quantize: return deck.quantizeHotCues.load() ? 1.0 : 0.0;
+    case ControlId::FxType: return static_cast<double>(deck.fxType.load());
+    case ControlId::FxOn: return deck.fxOn.load() ? 1.0 : 0.0;
+    case ControlId::FxWet: return deck.fxWet.load();
+    case ControlId::FxBeats: return deck.fxBeats.load();
+    case ControlId::StemVocals: return deck.stemVocals.load();
+    case ControlId::StemMelody: return deck.stemMelody.load();
+    case ControlId::StemBass: return deck.stemBass.load();
+    case ControlId::StemDrums: return deck.stemDrums.load();
+    default: return 0.0;
+    }
+}
+
+QString MainWindow::controlValueText(ControlId control, double value) const
+{
+    switch (control) {
+    case ControlId::Tempo:
+        return tr("×%1 (%2%3%)")
+            .arg(value, 0, 'f', 3)
+            .arg(value >= 1.0 ? QStringLiteral("+") : QString())
+            .arg((value - 1.0) * 100.0, 0, 'f', 1);
+    case ControlId::FxType:
+        return QStringList {tr("Echo"), tr("Reverb"), tr("Flanger")}
+            .value(std::clamp(static_cast<int>(std::lround(value)), 0, 2));
+    case ControlId::FxOn:
+    case ControlId::Quantize:
+        return value >= 0.5 ? tr("On") : tr("Off");
+    default:
+        return tr("%1%").arg(value * 100.0, 0, 'f', 1);
+    }
+}
+
+void MainWindow::refreshTutorialTargetUi(
+    const QList<ControlEvent>& controls)
+{
+    for (TutorialTargetOverlay* overlay : tutorialTargetOverlays_)
+        if (overlay) overlay->deleteLater();
+    tutorialTargetOverlays_.clear();
+    for (const ControlEvent& targetValue : controls) {
+        if (targetValue.id == ControlId::Crossfader) continue;
+        QWidget* target = controlTargetWidget(targetValue);
+        if (!target) continue;
+        const double tolerance = targetValue.id == ControlId::Tempo
+                                     ? 0.002
+                                 : (targetValue.id == ControlId::FxType ||
+                                    targetValue.id == ControlId::FxOn ||
+                                    targetValue.id == ControlId::Quantize)
+                                     ? 0.001
+                                     : 0.04;
+        const bool mismatch = std::fabs(
+            softwareControlValue(targetValue) - targetValue.value) > tolerance;
+        auto* overlay = new TutorialTargetOverlay(
+            target, controlDisplayFraction(targetValue), mismatch,
+            tr("Tutorial target: %1")
+                .arg(controlValueText(targetValue.id, targetValue.value)));
+        tutorialTargetOverlays_.append(overlay);
+    }
+}
+
+void MainWindow::refreshHardwareStateUi()
+{
+    for (HardwareGhostOverlay* overlay : hardwareGhostOverlays_)
+        if (overlay) overlay->deleteLater();
+    hardwareGhostOverlays_.clear();
+
+    if (!midi_->controllerConnected()) {
+        const bool frozen = midi_->hardwareInputFrozen();
+        hardwareSyncLabel_->setText(
+            frozen ? tr("HW FROZEN · NO CONTROLLER") : tr("HW UNKNOWN"));
+        hardwareSyncLabel_->setStyleSheet(
+            QStringLiteral("color:%1; font-size:9px; font-weight:bold;")
+                .arg(frozen ? QStringLiteral("#67c8ff")
+                            : themeDimText().name()));
+        hardwareSyncLabel_->setToolTip(
+            frozen ? tr("Absolute hardware controls will remain frozen after reconnection")
+                   : tr("Connect a controller to compare its physical controls with software"));
+        return;
+    }
+
+    const std::vector<SoftTakeoverState> states =
+        midi_->hardwareControlStates();
+    int known = 0;
+    int mismatched = 0;
+    QStringList detail;
+    for (const SoftTakeoverState& state : states) {
+        if (state.hardwareKnown) {
+            ++known;
+            if (std::fabs(state.hardwareValue - state.targetValue) >
+                SoftTakeover::tolerance(state.control))
+                ++mismatched;
+        }
+        const QString scope = state.deck == 0 ? QStringLiteral("A")
+                              : state.deck == 1 ? QStringLiteral("B")
+                                                : tr("MIX");
+        if (!state.hardwareKnown)
+            detail.append(tr("%1 %2 unknown")
+                              .arg(scope,
+                                   QString::fromLatin1(controlName(state.control))));
+        else if (std::fabs(state.hardwareValue - state.targetValue) >
+                 SoftTakeover::tolerance(state.control))
+            detail.append(tr("%1 %2 HW %3 / SW %4")
+                              .arg(scope,
+                                   QString::fromLatin1(controlName(state.control)))
+                              .arg(controlValueText(state.control,
+                                                    state.hardwareValue),
+                                   controlValueText(state.control,
+                                                    state.targetValue)));
+
+        if (showHardwareCheck_->isChecked()) {
+            ControlEvent physical {state.deck, state.control,
+                                   state.hardwareValue};
+            QWidget* target = controlTargetWidget(physical);
+            if (!target) continue;
+            auto* overlay = new HardwareGhostOverlay(
+                target, controlDisplayFraction(physical), state.hardwareKnown,
+                state.hardwareKnown
+                    ? tr("Hardware: %1")
+                          .arg(controlValueText(state.control,
+                                                state.hardwareValue))
+                    : tr("Hardware position unknown"));
+            hardwareGhostOverlays_.append(overlay);
+        }
+    }
+
+    QString color;
+    if (midi_->hardwareInputFrozen()) {
+        hardwareSyncLabel_->setText(
+            tr("HW FROZEN · %1 DIFFER").arg(mismatched));
+        color = QStringLiteral("#67c8ff");
+    } else if (known < static_cast<int>(states.size())) {
+        hardwareSyncLabel_->setText(
+            tr("HW PARTIAL %1/%2").arg(known).arg(states.size()));
+        color = QStringLiteral("#aab1bd");
+    } else if (mismatched > 0) {
+        hardwareSyncLabel_->setText(
+            tr("HW MISMATCH · %1").arg(mismatched));
+        color = QStringLiteral("#e8a835");
+    } else {
+        hardwareSyncLabel_->setText(tr("HW ↔ SW SYNC"));
+        color = QStringLiteral("#4cd964");
+    }
+    hardwareSyncLabel_->setStyleSheet(
+        QStringLiteral("color:%1; font-size:9px; font-weight:bold;")
+            .arg(color));
+    hardwareSyncLabel_->setToolTip(
+        detail.isEmpty()
+            ? tr("All reported physical controls match software")
+            : detail.mid(0, 10).join(QStringLiteral("\n")));
+}
+
 void MainWindow::refreshSetupMismatchUi(
     const QList<ControlEvent>& controls)
 {
+    QList<double> fractions;
+    fractions.reserve(controls.size());
+    for (const ControlEvent& control : controls)
+        fractions.append(controlDisplayFraction(control));
     const auto sameControls = [&] {
         if (controls.size() != setupMismatchControls_.size()) return false;
+        if (fractions != setupMismatchFractions_) return false;
         for (qsizetype index = 0; index < controls.size(); ++index) {
             if (controls[index].deck != setupMismatchControls_[index].deck ||
-                controls[index].id != setupMismatchControls_[index].id)
+                controls[index].id != setupMismatchControls_[index].id ||
+                std::fabs(controls[index].value -
+                          setupMismatchControls_[index].value) > 1.0e-9)
                 return false;
         }
         return true;
@@ -812,6 +1108,7 @@ void MainWindow::refreshSetupMismatchUi(
         if (overlay) overlay->deleteLater();
     setupMismatchOverlays_.clear();
     setupMismatchControls_ = controls;
+    setupMismatchFractions_ = fractions;
 
     if (controls.isEmpty()) {
         setupMismatchTimer_->stop();
@@ -820,13 +1117,12 @@ void MainWindow::refreshSetupMismatchUi(
     }
 
     for (const ControlEvent& mismatch : controls) {
-        QWidget* target = nullptr;
-        if (mismatch.deck == 0 || mismatch.deck == 1)
-            target = deckWidget(mismatch.deck)->controlWidget(mismatch.id);
-        if (!target)
-            target = mixer_->controlWidget(mismatch.deck, mismatch.id);
+        QWidget* target = controlTargetWidget(mismatch);
         if (!target) continue;
-        auto* overlay = new SetupMismatchOverlay(target);
+        auto* overlay = new SetupMismatchOverlay(
+            target, controlDisplayFraction(mismatch),
+            tr("PRIME target: %1")
+                .arg(controlValueText(mismatch.id, mismatch.value)));
         overlay->setPulse(setupMismatchPulse_);
         setupMismatchOverlays_.append(overlay);
     }
@@ -977,6 +1273,11 @@ void MainWindow::about()
 
 void MainWindow::onMidiConnection(bool connected, const QString& name)
 {
+    hardwareControlsAvailable_ = connected;
+    showHardwareCheck_->setEnabled(connected);
+    getHardwareStateBtn_->setEnabled(connected);
+    freezeHardwareCheck_->setEnabled(
+        connected && !transitionPanel_->tutorialViewOpen());
     if (connected) {
         midiLabel_->setText(
             tr("%1 connected").arg(name.isEmpty() ? tr("controller") : name));
@@ -986,6 +1287,7 @@ void MainWindow::onMidiConnection(bool connected, const QString& name)
         midiLabel_->setStyleSheet(
             QStringLiteral("color:%1;").arg(themeDimText().name()));
     }
+    refreshHardwareStateUi();
 }
 
 void MainWindow::onRecClicked()

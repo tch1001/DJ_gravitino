@@ -103,7 +103,6 @@ performance:
     incoming: {track_beat: 96.0}
   initial_state:
     complete: true
-    mixer: {captured: true, crossfader: 0.0}
     outgoing:
       captured: true
       playing: true
@@ -202,12 +201,6 @@ performance:
       input_hint:
         control: "host.performance_pad_5"
         pad_mode: "custom"
-    - at_beat: 24.625
-      target: "mixer"
-      control: "mixer.xfader"
-      value: 1.0
-      curve: "scurve"
-
 extensions: {}
 ```
 
@@ -296,16 +289,52 @@ Controls use stable namespaces. Current portable timeline controls are:
   `deck.fx_wet` (`0..1`), `deck.fx_beats` (`0.25..4`), and
   `deck.stem_vocals`, `deck.stem_melody`, `deck.stem_bass`,
   `deck.stem_drums` (`0..1`).
-- Mixer: `mixer.xfader` (`0..1` in role space: outgoing to incoming).
+- Compatibility-only mixer data: `mixer.xfader` (`0..1` in historical role
+  space). It is accepted and preserved but is not executable.
 
 Trigger/state values use `1` for press/on and `0` for release/off. Curves are
 `step`, `linear`, or `scurve`; trigger controls must be `step`. A non-step
 event is the destination of a glide from the preceding event/value in the same
 `(role, control)` stream. Interleaved controls do not split that stream.
 
+### Crossfader compatibility boundary
+
+Crossfader state is intentionally not part of transition semantics. New
+recordings and editor-created transitions omit both the optional
+`performance.initial_state.mixer.crossfader` field and `mixer.xfader` timeline
+events. Readers continue accepting both forms from older `.transition` and
+`.gvt` files, and save paths preserve the optional field, value, curve, and
+unknown extension data. A centralized executability filter excludes those
+entries from PRIME, Perform, Tutorial prompts/summaries, waveform cues, editor
+lanes, and editor preview. The live crossfader remains fully controllable by
+mouse or MIDI; its position is never changed by loading or running a
+transition. This is an inert compatibility rule, not a format-version change.
+
 `input_hint` records how a state change was produced or should preferably be
 taught. Replay executes `control`; input hints never make a controller model a
 playback dependency.
+
+### Editing time versus source position
+
+The editor's **When: transition beat** changes `timeline[].at_beat`; its
+read-only song position is derived from transport. **Cues / Loops** edits source
+track positions. A held transition cue starts/jumps on its press, and PLAY
+while held latches it without rewinding. The inspector can move press, PLAY,
+and release together without changing the cue's source beat.
+
+For Perform (including preview), outgoing `anchors.outgoing.track_beat` is
+authoritative entry and the outgoing deck starts playing. An older outgoing
+`initial_state.position_beat` or `playing` value remains preserved on save but
+does not override that entry. A standalone incoming PLAY seeks its incoming
+anchor; a cue launch uses the referenced cue instead. Initial incoming
+position/playing and the ordinary CUE return remain separate useful fields.
+Changing `master_bpm` does not automatically update incoming tempo.
+
+Preview and Perform share setup and replay logic, including live trim/key-lock/
+crossfader context. PRIME intentionally retains live outgoing tempo. Identical
+offline clock steps produce matching audio; current live timer scheduling and
+pre-existing effect history are not a sample-accurate equivalence guarantee.
+No files are migrated or rewritten merely to display the clarified editor.
 
 ## Compatibility and safe parsing
 

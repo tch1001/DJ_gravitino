@@ -42,6 +42,24 @@ GUI startup takes a per-user `QLockFile` before constructing `AudioEngine`.
 Only one Gravitino GUI process may own a CoreAudio stream at a time; headless
 `--selftest` runs before that guard and remains independently runnable.
 
+After QApplication construction, `QtAccessibilityWorkaround.mm` installs a
+process-local compatibility repair for Cocoa on Qt 6.11.0/6.11.1 only. Qt's
+synthesized table rows, columns and placeholder cells borrow the table's
+accessibility ID, but these releases remove that ID when disposing them.
+This can recursively destroy a table/cell during a proxy layout refresh
+(`QAccessibleCache::deleteInterface`), including the playing-FROM timer.
+The repair checks the runtime version and Objective-C ivar layout, then guards
+the two native cleanup methods so only real elements remove owned IDs.
+It neither disables accessibility nor changes sorting/model notifications,
+and does not modify the installed Qt libraries. Offscreen/other Qt versions
+are untouched. Review/remove this narrow workaround when upgrading Qt; do not
+blindly widen its version gate. The relevant upstream implementation is
+[Qt's Cocoa accessibility element](https://code.qt.io/cgit/qt/qtbase.git/tree/src/plugins/platforms/cocoa/qcocoaaccessibilityelement.mm?h=v6.11.1).
+`test_library_accessibility_native` exercises the native bridge with temporary
+fixtures (requires a macOS GUI session); the offscreen counterpart alone cannot
+catch this bug. Its explicit `--native --unpatched` diagnostic mode reproduces
+the old failure and must not be used as a passing test.
+
 Qt is used in: library, ui, app, and for signals in ControlBus (QObject).
 audio/analysis/transitions core logic must stay Qt-light (QString/QObject OK,
 no widgets) so they stay testable headless.
@@ -69,6 +87,16 @@ no widgets) so they stay testable headless.
   queued signal.
 - Transition Player runs on a GUI-thread QTimer (~5 ms) reading the master
   deck's beat position from the audio engine (atomic double).
+  Its event-step implementation is also used by editor audition through the
+  internal external-clock adapter in `TransitionPlayerExt.h`; preview no
+  longer owns a second scheduler/dispatch implementation. The pinned player
+  header adds private adapter friends only; public signals/arm remain unchanged.
+- `Deck::loopWrappedSeconds()` is a read-only cumulative counter of source
+  time skipped by actual forward loop wraps. Audio publishes it only after a
+  successful position commit; seeks, scratches, and paused renders do not
+  increment it. The player samples the counter before position, so PRIME can
+  recognize an entry crossed between polls even if one or more loops have
+  already wrapped back below the anchor. The counter is runtime-only.
 
 ## Audio pipeline (per render callback, 48 kHz stereo f32)
 
@@ -134,11 +162,14 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
 2. Recorder notes the *anchor*: beat position in A when recording starts, and
    the first beat position at which B is playing. It also captures a complete
    role-based pre-transition snapshot: both decks' transport/cue, tempo,
-   channel/EQ/filter, loop, FX and stem state, plus the mixer crossfader. TRIM
-   is deliberately excluded because input gain remains live DJ state.
-3. Every ControlEvent is logged with a timestamp in **beats relative to anchor**
-   (master-deck beats). Beats, not seconds — so a transition recorded at 120 BPM
-   replays correctly at 128. When a performance pad caused the audible event,
+   channel/EQ/filter, loop, FX and stem state. TRIM and crossfader are
+   deliberately excluded because input gain and master blending remain live
+   DJ state.
+3. Every executable transition ControlEvent is logged with a timestamp in
+   **beats relative to anchor** (master-deck beats). Beats, not seconds — so a
+   transition recorded at 120 BPM replays correctly at 128. Crossfader, trim,
+   jog, browsing, and monitor-only input are filtered at capture. When a
+   performance pad caused the audible event,
    the recorder also stores an optional physical input hint. Replay
    remains state-based; Tutorial can therefore say “CUSTOM pad 3” instead of
    misleadingly reducing the gesture to its resulting `play` event.
@@ -146,7 +177,12 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
    normalize/thin continuous streams → save a typed v1 YAML
    `.transition`. Semantic hot cues and saved loops (canonical IN/OUT beats)
    are allocated together into an isolated temporary CUSTOM bank without
-   changing permanent per-track cues or loop slots.
+   changing permanent per-track cues or loop slots. The deck's CUSTOM selector
+   explicitly distinguishes NORMAL (editable track loops/custom audio) from
+   TRANSITION (protected temporary slots). Bank selection changes pad display,
+   input routing, and LEDs, not replay's isolated slots. Held pads are released
+   through their original bank before switching, and routine transition-bank
+   refreshes preserve the user's choice.
 5. Replay: user loads the same pair (confirmed catalog binding, encode-tolerant
    structural fingerprint, checked recording ID, or explicit manual confirmation), picks
    a transition, then uses **Perform** to reconstruct the recorded pre-state
@@ -154,23 +190,33 @@ See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
    position and wait for A to cross the anchor. The player reasserts incoming
    transport at that boundary, then fires events on schedule with linear/
    s-curve interpolation between sparse values.
-6. Perform records which FLX4 absolute controls were changed by setup/replay.
-   At the final event, `SoftTakeover` compares their last known physical
-   positions with engine truth. If any differ, all controller input is frozen
-   while only TEMPO/channel fader/HIGH/MID/LOW/FILTER/crossfader pickup moves
-   are consumed. Only controls whose virtual value actually changed are armed.
-   Originally mismatched targets stay monitored until every one is
-   simultaneously inside tolerance, so an aligned knob that is overshot lights
-   up again. The final pickup re-enables the controller without ever applying a
-   discontinuous hardware value to audio.
+   Waiting is seeded afresh on every arm, including retries after setup
+   failures. Actual audio loop-wrap distance bridges otherwise-missed entry
+   crossings; a backward seek alone never counts as a wrap or starts replay.
+6. `MidiEngine` keeps a shadow for every absolute musical control: last
+   physical value/known state, current software truth, and independent pickup
+   state. Perform records which executable controls setup/replay changed and
+   arms pickup for those controls afterward. Manual FREEZE HW is separate: it
+   keeps observing physical tempo, channel fader, trim, EQ, filter, FX wet, and
+   crossfader values while preventing only those inputs from reaching audio;
+   buttons, pads, transport, loading, and browsing stay live. Unfreezing arms
+   every mismatched or unknown absolute control. Each control regains authority
+   only after reaching software, and its crossing packet is consumed, so one
+   knob never waits for another and no pickup creates an audible jump.
 
 The top workspace is `Deck A | compact FLX4 mixer | Deck B`; the centered mixer
 starts below the overview-waveform baseline, followed by the full-width detail
-waveform. Each deck includes a position-driven rotating platter. A mouse drag
-sends `PlatterScratch` without `PlatterTouch`, selecting the engine's direct
-position-adjustment path without changing PLAY state. This permits
-millisecond-scale beat-matching during automated replay (roughly 45 ms per
-quarter turn). The FLX4's touch-gated mapping is unchanged. A mapped
+waveform. Each deck includes a position-driven rotating platter and a
+two-decimal canonical beat counter. A mouse drag is projected onto a diagonal
+axis: bottom-left moves forward, top-right moves backward, and perpendicular
+motion is ignored. Each projected pixel sends 0.02 `PlatterScratch` tick
+(0.2 ms) without `PlatterTouch`, selecting the engine's direct
+position-adjustment path
+without changing PLAY state. Pointer deltas are incremental, so direction can
+reverse within a gesture while the disc rotation continues to follow actual
+track position. The FLX4's touch-gated mapping is unchanged. Transient pad-bank
+feedback is fixed-height, horizontally ignored, and elided with its full text
+in a tooltip, so long CUSTOM help cannot alter the deck's width. A mapped
 HOT CUE pad also remains held while dragged to PLAY; dropping there dispatches
 PLAY before releasing the cue, reusing the engine's hardware latch semantics.
 TUTOR VIEW is persistent UI state, not a replay command: opening it
@@ -181,31 +227,190 @@ showable through a permanent status-bar toggle immediately left of the
 controller connection text; transient messages cannot cover it. Event Sequence
 opens in Human mode: independent role/control streams become start-to-end actions,
 overlapping outgoing/incoming moves share a two-lane row, and common hot-cue
-launch gestures become one instruction. Raw mode retains the prior recorded
-event table; both views derive from the same typed timeline and never alter
-serialized checkpoints.
+launch gestures become one instruction. Portable launch recognition follows
+the semantic cue ID and its allocated temporary pad, so mixer and other-deck
+events may interleave without splitting the gesture. Human mode also defaults
+to showing every condensed action start as a labeled cue on the relevant
+deck's overview and zoomed waveforms; a header checkbox can hide them. Raw
+mode retains the prior recorded event table; both views derive from the same
+typed timeline and never alter serialized checkpoints.
+The mixer's former top spacer is a hardware-state strip. It distinguishes
+SYNC, MISMATCH, PARTIAL/UNKNOWN, and FROZEN; the SHOW HW checkbox adds cyan
+last-reported physical markers/tooltips, GET HW STATE refreshes the MIDI
+connection and reports snapshot completeness, while FREEZE HW explicitly decouples absolute
+hardware from authoritative software. Freeze is session-only, survives
+controller hot-plugging, blocks Tutor View, and cannot be enabled while Tutor
+View is open.
+All three hardware-state controls are disabled while no controller is
+connected. The virtual FLX4 transport follows the physical vertical stack on
+both decks: a small SHIFT button above CUE above the larger PLAY/PAUSE button.
+There is no invented VINYL-mode button because the FLX4 surface does not have
+one.
 The Library's Transitions tab keeps legacy and portable files as distinct rows
-and exposes independent `.gvt` and `.transition` checkboxes, both enabled by
-default. This makes migration comparisons explicit instead of hiding the
-legacy source behind its portable counterpart. `--convert-transitions` creates
-only missing portable counterparts and is safe to run repeatedly.
-During Perform and Tutorial, a translucent bar fills across the most recently
-reached row until the next distinct action beat, so the row change itself is
-the timing cue. A derived, non-actionable beat-zero “Transition starts” row
-provides the first countdown interval; simultaneous actions do not create
-zero-length visual countdowns. Neither the marker nor its progress is written
-to `.transition` or legacy `.gvt`.
+and exposes independent `.gvt` and `.transition` checkboxes. Portable files are
+shown by default; legacy `.gvt` rows are opt-in so converted counterparts do
+not clutter normal use. This makes migration comparisons available without
+hiding the legacy source. `--convert-transitions` creates only missing portable
+counterparts and is safe to run repeatedly. The crate sidebar also includes an
+automatic **Undone** smart folder: once a track is analyzed, it appears there
+only when the catalog's rebuildable reverse graph has neither an incoming nor
+outgoing transition for its canonical song identity. Transition reloads and
+track-analysis completion refresh this coverage without touching audio tags.
+Library sorting uses typed model roles: BPM and duration compare numerically,
+while Camelot keys compare by their numeric wheel position and A/B suffix.
+The Library page's default-on **Recommended** mode is a view-only priority
+layer over that chosen sort. While either deck is playing, candidates matching
+the exact Camelot code and a native BPM within an inclusive +/-10 range form
+the first tier; BPM-only matches form the second; all other songs retain the
+normal third tier. A candidate already loaded on a playing deck is not treated
+as its own recommendation. With two playing decks, its best result against
+either is used. The user's selected column and direction remain the secondary
+order inside every tier, and the delegate draws boundaries only where adjacent
+visible tiers change. Disabling Recommended, or having no playing deck,
+restores the ungrouped sort. The transition edge list uses the same boundary
+treatment between its pinned playing-FROM group and other edges.
+A Graph button immediately left of New opens a separate force-directed set
+planner. Canonical endpoint identities become labeled song nodes and logical
+transitions become directed edges labeled with their transition names; a
+legacy source and its converted portable counterpart share one logical edge.
+Edge names are small, faint captions without boxes, leaving song titles and
+route highlights visually dominant. Light pairwise repulsion, edge
+springs, center gravity, node dragging, panning, and zooming keep the graph
+organizable. Hover computes and highlights the longest-duration feasible simple
+route, excluding repeated songs so cycles remain finite and excluding a next
+edge when its outgoing anchor has already passed at the carried arrival beat.
+The estimate starts at the source asset's beginning, uses native BPM for the
+music between transitions, uses each edge's authored end beat/master BPM for
+the overlap, carries the incoming launch position into the next song, and
+includes the final song's remaining duration.
+Songs currently loaded on Deck A and Deck B retain cyan and magenta outer
+highlights, respectively, with explicit A/B badges. The graph polls the two
+live deck track identities while its window is open, so direct loads, replay
+loads, and controller-driven loads all update without coupling the audio engine
+to graph UI signals. These deck markers remain visible underneath the separate
+hover-route treatment.
+During Perform and Tutorial, every positive-duration row receives a faint cyan
+track whose maximum width is normalized against the longest gap in the current
+Human or Raw sequence. Only the active row fills, reaching its track end at the
+next distinct action beat. A derived, non-actionable beat-zero “Transition
+starts” row provides the first countdown interval; simultaneous actions do not
+create fake intervals. Neither the marker nor its progress is written to
+`.transition` or legacy `.gvt`.
 The full-size Transition Editor is the creation/editing surface for the same
 typed model consumed by replay. A single undoable working copy drives two
 waveforms, an action lane, independent `(role, control)` automation lanes,
 semantic cue/loop and initial-state inspectors, and an advanced safe-YAML
 view. Timeline points, cue markers, loop edges, labels, and the explicit END
 marker are directly draggable; grid snapping never changes stored precision.
+The inspector uses a persistent section selector, not an overflowing tab strip,
+with Tempo / Setup, Cues / Loops and All fields shortcuts. Initial State exposes
+incoming playback BPM/ratio directly; Cues / Loops exposes the selected start,
+end and calculated repeat length without horizontally scrolling the table.
+Numbers in these controls, editable tables and YAML use shortest round-trippable
+decimals, retaining full double precision. `TransitionFieldsEditor` builds a searchable typed tree from
+`transitionDocumentFields`, the same structured root used by YAML serialization.
+It exposes every saved field, including unknown mappings, arrays, metadata and
+extensions; format/version are visible but read-only. Compatibility crossfader
+fields are visible only as inert data here, not restored to playback controls.
+Field changes are staged, validated with the existing safe parser, then applied
+as one document/Undo operation. Preview and Save first apply a valid field draft;
+concurrent document edits block stale draft application. Leaving offers an
+explicit apply/discard/cancel choice. Only Save writes the transition, and
+identity/endpoint changes still require Save As. Endpoint edits and Undo/Redo
+re-resolve preview assets to avoid auditioning the previous endpoint's audio.
+Its stacked waveforms are projected through a derived per-deck transport trace
+rather than a linear anchor offset. Audible loop passes therefore unroll on the
+monotonic transition clock with repeated canonical beat grids and pass badges;
+stopped spans stay dark and unused saved loops remain definition overlays. The
+trace and repeat counts are editor data only and never change the serialized
+transition. Plain wheel input pans horizontally and Command-wheel zooms around
+the beat beneath the pointer. Selecting a timeline event opens its exact Events
+inspector and retains identity across chronological re-sorting. Placing the
+playhead between events selects and centers the next executable action; the
+same selection follows preview playback, while compatibility-only crossfader
+rows stay hidden. Deleting an automation point selects the next point in its
+own `(role, control)` lane, or the previous point in that lane at the end; an
+empty lane clears selection instead of targeting another knob/deck. Discrete
+action-card deletion retains chronological following. Both the button and
+Delete/Backspace keys support rapid cleanup.
 Starting preview reconstructs cursor state by rendering the private graph from
-beat zero, then routes only that graph to MASTER. A Write Automation take
+beat zero, then routes only that graph to MASTER. It can resolve the currently
+loaded deck assets while the library scan catches up and does not mutate the
+application-wide cursor during preparation. A Write Automation take
 punch-replaces touched streams as one undo command. Autosave drafts, source
 hash conflict detection, forced Save As for legacy/endpoint edits, and
 schema-level validation keep library files non-destructive and reopenable.
+Live setup and editor audition now share `TransitionPlayback` preparation,
+including Tutor's transport-only restrictions. Perform and preview both use
+the outgoing anchor and roll that deck; historical outgoing initial position
+and playing fields remain preserved, not alternative playback-start controls.
+The transport trace follows that same entry rule. `TransitionPlayer` supplies
+both paths' cue/loop allocation, grid-adjusted tempo, setup events, held-cue
+PLAY latch, interpolation, and compatibility exclusions. Complete starting
+value lookups include FX and stems, including legacy partial-state ramps.
+Preview inherits role-mapped live trim, key lock and crossfader (which remain
+outside the file), without changing the live engine or permanent song cues.
+Its ring carries musical timestamps, so the cursor follows consumed audio,
+not the producer's buffered future. Cursor reconstruction clips the last
+render to a sample instead of overshooting by a whole preview block.
+
+Parity means the same recipe and starting controls: synthetic offline renders
+and the actual editor MASTER-ring path are compared at identical clock steps.
+It is not a promise of sample-identical live-device output. Live Perform still
+dispatches on the GUI timer, preview dispatches at render-block boundaries,
+PRIME intentionally retains accepted live outgoing tempo, and an already
+playing deck can have FX/stretch history or manual changes absent from a fresh
+audition. Audio-clock event scheduling and a defined DSP-history policy remain
+necessary for a stronger sample-accurate guarantee.
+
+The editor explicitly labels WHEN (elapsed transition beats) versus WHERE
+(canonical song beats), explains value units and ramp destinations, and links
+launch gestures to their source cue. A default-on gesture checkbox moves cue
+press/PLAY/release together on an inspector timing edit; raw editing remains
+available, sort preserves same-beat order/selection, and the group edit is one
+undo step. Outgoing setup position/playing/tempo are read-only derived values
+in Initial State; Transition details edits their authoritative controls.
+Drag snapping defaults Off; precise numeric fields step by 0.01 beat. Optional
+controller teaching hints collapse to keep the common inspector compact.
+During cue, loop-boundary, label, action or automation drags, a thin cyan
+center guide crosses both waveform lanes and the automation area. Its live
+readout distinguishes source-song beats from transition time and stays inside
+the visible scroll viewport. The guide follows actual snapping/clamping and
+the selected loop repetition, not the pointer's off-center grab position.
+Discrete action cards now follow the pending drag too. This is paint-only
+feedback until release, which remains one undoable edit; no replay/data format
+or permanent song-cue changes are involved.
+The editor also offers whole-mix keyboard transport: held C auditions from the
+cursor and returns on release, Space while held latches that audition, and an
+ordinary Space starts or pauses preview. The play-from-cursor button establishes
+the same audition cue; STOP and natural preview completion return the playhead
+to it, while pause/resume preserves it. These shortcuts work after clicking
+buttons or tables, while text and value editors retain normal keyboard input.
+Selecting a transition with stem controls or non-unity initial stem levels
+shows a setup warning and PREPARE STEMS action for the affected physical decks;
+Perform and Prime remain gated until those stems are attached rather than
+silently falling back to full-track audio.
+PRIME mismatches use a separate amber layer on the main controls: sliders get
+an exact target line/handle, dials a radial marker, and discrete states a target
+tooltip. Targets are recomputed continuously and disappear individually when
+resolved. Tempo-range changes from either the UI or MIDI immediately reproject
+the amber marker, including a target previously clipped at the old range limit;
+the overlay cache includes displayed fractions as well as authored values.
+A failed PRIME keeps useful targets visible until correction,
+selection change, or Abort. Outside Tutor, PRIME may restore deck setup (never
+crossfader). Tutor PRIME and Tutor Perform prepare only transport positions,
+cue positions, loop bounds, and temporary transition cues/loops; hardware-
+facing musical controls must be matched physically. Tutor PRIME is strict and
+requires a second explicit click after correction, while Tutor Perform treats
+setup differences as advisory. During an armed/running Tutorial, a distinct
+green layer interpolates authored step/linear/S-curve targets on the main
+controls without changing audio or scoring.
+Discrete loop failures are action-oriented: an unwanted active loop names the
+FLX4 4 BEAT/EXIT button, while a required inactive loop names its allocated
+CUSTOM pad when available or gives the exact LOOP IN/OUT beats. Tutor setup
+also preserves a currently active loop and its bounds across position
+preparation, preventing the preflight itself from silently resolving the
+mismatch.
 The virtual FLX4 mirrors live controls, pad state, LEDs, and channel meters;
 prose/countdown/reset guidance lives in the transition control panel above
 CLOSE ENOUGH. Perform gives the guided run up to eight beats of pre-anchor
@@ -232,8 +437,10 @@ The two five-segment channel meters use the documented `B0/B1 02` output and
 receive dB-scaled post-EQ/filter/FX, pre-fader peaks every 40 ms.
 Hot-plug: MidiEngine polls port list every 2 s; connect/disconnect anytime.
 Controller disconnect clears any pending soft-takeover gate. Tutorial mode
-does not arm takeover: its FLX4 diagram instead animates continuous controls
-toward their recorded targets and keeps the prompt alive until the value is
-actually reached. Recorded performance-pad `via=` hints illuminate the actual
+does not arm post-replay takeover. Manual FREEZE HW remains selected across a
+disconnect/reconnect, with all physical values returning to unknown until the
+controller reports them again. Tutorial's virtual FLX4 diagram still mirrors
+and scores gestures, while the main controls carry the independent green live
+target layer. Recorded performance-pad `via=` hints illuminate the actual
 pad layer and pad number, while transition-critical hot-cue mappings are
 checked before a cue can be deleted.

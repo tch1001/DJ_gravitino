@@ -49,7 +49,12 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(4, 4, 4, 4);
     root->setSpacing(2);
-    root->addSpacing(57);
+    topArea_ = new QWidget(this);
+    topArea_->setFixedHeight(57);
+    auto* topLayout = new QVBoxLayout(topArea_);
+    topLayout->setContentsMargins(0, 0, 0, 0);
+    topLayout->setSpacing(0);
+    root->addWidget(topArea_);
     auto* mixerLabel = new QLabel(tr("MIXER"), this);
     mixerLabel->setAlignment(Qt::AlignCenter);
     mixerLabel->setStyleSheet(
@@ -230,6 +235,19 @@ QWidget* MixerWidget::controlWidget(DeckId deck, ControlId control) const
     case ControlId::Filter: return strip.filter;
     default:                return nullptr;
     }
+}
+
+void MixerWidget::setTopWidget(QWidget* widget)
+{
+    if (!topArea_ || !widget) return;
+    auto* layout = qobject_cast<QVBoxLayout*>(topArea_->layout());
+    if (!layout) return;
+    while (QLayoutItem* item = layout->takeAt(0)) {
+        if (item->widget()) item->widget()->deleteLater();
+        delete item;
+    }
+    widget->setParent(topArea_);
+    layout->addWidget(widget);
 }
 
 bool MixerWidget::eventFilter(QObject* watched, QEvent* event)

@@ -17,12 +17,14 @@
 #include "../midi/MidiEngine.h"
 #include "../transitions/TransitionEngine.h"
 #include "../ui/MainWindow.h"
+#include "../ui/QtAccessibilityWorkaround.h"
 #include "../ui/Theme.h"
 #include "SelfTest.h"
 
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
+    gvt::installQtAccessibilityWorkaround();
     app.setApplicationName(QStringLiteral("Gravitino"));
     app.setOrganizationName(QStringLiteral("Gravitino"));
 

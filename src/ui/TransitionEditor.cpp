@@ -1,6 +1,7 @@
 // Full transition authoring window. The GUI edits a typed working copy and
 // auditions it through a private two-deck graph routed to the live MASTER.
 #include "TransitionEditor.h"
+#include "TransitionFieldsEditor.h"
 
 #include "Theme.h"
 #include "../audio/AudioEngine.h"
@@ -10,8 +11,15 @@
 #include "../performance/PerformancePads.h"
 #include "../transitions/PlayerMath.h"
 #include "../transitions/TransitionEngine.h"
+#include "../transitions/TransitionPlayerExt.h"
+#include "../transitions/TransitionPlayback.h"
+#include "../transitions/TransitionEventSummary.h"
+#include "../transitions/TransitionTransportTrace.h"
 
 #include <QAction>
+#include <QAbstractButton>
+#include <QAbstractItemView>
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -38,9 +46,11 @@
 #include <QLabel>
 #include <QLineF>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -48,11 +58,13 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTableWidget>
 #include <QTimer>
 #include <QToolBar>
@@ -60,6 +72,7 @@
 #include <QUndoStack>
 #include <QUuid>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <array>
@@ -108,6 +121,7 @@ bool editableTimelineControl(ControlId control)
     switch (control) {
     case ControlId::Load:
     case ControlId::Trim:
+    case ControlId::Crossfader:
     case ControlId::HeadphoneCue:
     case ControlId::MasterCue:
     case ControlId::HeadphoneMix:
@@ -204,7 +218,8 @@ double latestBeat(const GvtFile& file)
 {
     double result = 0.0;
     for (const GvtEvent& event : file.events)
-        result = std::max(result, event.beat);
+        if (transitionEventIsExecutable(event))
+            result = std::max(result, event.beat);
     for (const GvtCue& cue : file.cues)
         result = std::max(result, cue.beat);
     return result;
@@ -371,7 +386,8 @@ TransitionTimelineView::TransitionTimelineView(
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
     connect(document_, &TransitionEditorDocument::changed, this,
-            [this] { updateCanvasSize(); update(); });
+            [this] { rebuildTransportTrace(); updateCanvasSize(); update(); });
+    rebuildTransportTrace();
     updateCanvasSize();
 }
 
@@ -380,6 +396,7 @@ void TransitionTimelineView::setTracks(TrackDataPtr outgoing,
 {
     outgoing_ = std::move(outgoing);
     incoming_ = std::move(incoming);
+    rebuildTransportTrace();
     update();
 }
 
@@ -403,17 +420,31 @@ void TransitionTimelineView::setSelectedEvent(int index)
     update();
 }
 
+std::optional<TransitionTransportPosition>
+TransitionTimelineView::sourcePositionAt(Role role,
+                                         double transitionBeat) const
+{
+    if (role == Role::Mixer) return std::nullopt;
+    return transportTrace_.positionAt(role, transitionBeat);
+}
+
+void TransitionTimelineView::rebuildTransportTrace()
+{
+    transportTrace_ = buildTransitionTransportTrace(
+        document_->file(), outgoing_, incoming_, document_->effectiveEndBeat());
+}
+
 std::vector<TransitionTimelineView::Lane> TransitionTimelineView::lanes() const
 {
     std::vector<Lane> result;
     std::set<std::pair<int, int>> seen;
     for (const GvtEvent& event : document_->file().events) {
+        if (!transitionEventIsExecutable(event)) continue;
         if (controlIsTrigger(event.control)) continue;
         const auto key = std::make_pair(static_cast<int>(event.role),
                                         static_cast<int>(event.control));
         if (seen.insert(key).second) result.push_back({event.role, event.control});
     }
-    if (result.empty()) result.push_back({Role::Mixer, ControlId::Crossfader});
     std::stable_sort(result.begin(), result.end(), [](const Lane& a, const Lane& b) {
         if (a.role != b.role) return static_cast<int>(a.role) < static_cast<int>(b.role);
         return static_cast<int>(a.control) < static_cast<int>(b.control);
@@ -504,6 +535,7 @@ int TransitionTimelineView::eventAt(const QPointF& point) const
     double distance = 11.0;
     for (int i = 0; i < static_cast<int>(file.events.size()); ++i) {
         const GvtEvent& event = file.events[static_cast<std::size_t>(i)];
+        if (!transitionEventIsExecutable(event)) continue;
         QPointF position;
         if (controlIsTrigger(event.control)) {
             position = QPointF(kTimelineLeft + event.beat * pixelsPerBeat_,
@@ -541,43 +573,168 @@ void TransitionTimelineView::drawWaveform(QPainter& painter,
     }
 
     const GvtFile& file = document_->file();
-    const double anchor = role == Role::FromDeck ? file.anchorFromBeat
-                                                  : file.anchorToBeat;
-    const double launchBeat = role == Role::ToDeck ? incomingLaunchBeat() : 0.0;
+    const QRect visibleRect = rect.intersected(
+        painter.clipBoundingRect().toAlignedRect());
     const auto& peaks = track->overviewPeaks;
-    if (!peaks.empty()) {
-        painter.setPen(role == Role::FromDeck ? QColor(77, 197, 226)
-                                               : QColor(232, 93, 117));
-        const int mid = rect.center().y();
-        for (int x = rect.left(); x < rect.right(); ++x) {
-            const double transitionBeat = (x - kTimelineLeft) / pixelsPerBeat_;
-            const double trackBeat = anchor + transitionBeat - launchBeat;
-            const double sec = transitionSecAtBeat(file, *track, trackBeat);
+    const auto& low = track->overviewLow;
+    const auto& midBand = track->overviewMid;
+    const auto& high = track->overviewHigh;
+    const bool banded = !low.empty() && low.size() == midBand.size() &&
+                        low.size() == high.size();
+    const int binCount = static_cast<int>(banded ? low.size() : peaks.size());
+    const int centerY = rect.center().y();
+    const int maximumHeight = rect.height() / 2 - 6;
+
+    // Draw the same frequency-band overview used by DetailWaveformView, but
+    // source every pixel through the loop-aware transport trace.
+    if (binCount > 0) {
+        const double binsPerSecond = binCount / track->durationSec;
+        for (int x = visibleRect.left(); x <= visibleRect.right(); ++x) {
+            const double transitionBeat =
+                (x - kTimelineLeft) / pixelsPerBeat_;
+            const auto position = transportTrace_.positionAt(role,
+                                                               transitionBeat);
+            if (!position || !position->audible) continue;
+            const double sec = transitionSecAtBeat(file, *track,
+                                                    position->sourceBeat);
             if (sec < 0.0 || sec >= track->durationSec) continue;
-            const int bin = std::clamp(
-                static_cast<int>(sec / track->durationSec * peaks.size()),
-                0, static_cast<int>(peaks.size()) - 1);
-            const int height = static_cast<int>(
-                std::clamp(peaks[static_cast<std::size_t>(bin)], 0.0f, 1.0f) *
-                (rect.height() / 2 - 6));
-            painter.drawLine(x, mid - height, x, mid + height);
+            int first = std::clamp(static_cast<int>(sec * binsPerSecond),
+                                   0, binCount - 1);
+            int last = first + 1;
+            const auto next = transportTrace_.positionAt(
+                role, transitionBeat + 1.0 / pixelsPerBeat_);
+            if (next && next->audible && next->loopId == position->loopId &&
+                next->loopPass == position->loopPass) {
+                const double nextSec = transitionSecAtBeat(
+                    file, *track, next->sourceBeat);
+                last = std::clamp(
+                    static_cast<int>(std::ceil(nextSec * binsPerSecond)),
+                    first + 1, binCount);
+            }
+            if (banded) {
+                float lowPeak = 0.0f, midPeak = 0.0f, highPeak = 0.0f;
+                for (int bin = first; bin < last; ++bin) {
+                    lowPeak = std::max(lowPeak, low[static_cast<std::size_t>(bin)]);
+                    midPeak = std::max(midPeak,
+                                       midBand[static_cast<std::size_t>(bin)]);
+                    highPeak = std::max(highPeak,
+                                         high[static_cast<std::size_t>(bin)]);
+                }
+                const auto drawBand = [&](float peak, const QColor& color) {
+                    const int height = static_cast<int>(
+                        std::clamp(peak, 0.0f, 1.0f) * maximumHeight);
+                    if (height <= 0) return;
+                    painter.setPen(color);
+                    painter.drawLine(x, centerY - height, x,
+                                     centerY + height);
+                };
+                drawBand(lowPeak, waveLowColor());
+                drawBand(midPeak, waveMidColor());
+                drawBand(highPeak, waveHighColor());
+            } else {
+                float peak = 0.0f;
+                for (int bin = first; bin < last; ++bin)
+                    peak = std::max(peak, peaks[static_cast<std::size_t>(bin)]);
+                const int height = static_cast<int>(
+                    std::clamp(peak, 0.0f, 1.0f) * maximumHeight);
+                painter.setPen(QColor(138, 144, 156));
+                painter.drawLine(x, centerY - height, x, centerY + height);
+            }
         }
     }
-    if (role == Role::ToDeck && launchBeat > 0.0) {
-        const int launchX = kTimelineLeft + static_cast<int>(launchBeat * pixelsPerBeat_);
-        painter.fillRect(QRect(rect.left(), rect.top(),
-                               std::max(0, launchX - rect.left()), rect.height()),
-                         QColor(0, 0, 0, 105));
+
+    // Canonical track beats are lane-local: they repeat with the waveform at
+    // a loop wrap, while the ruler above remains monotonic transition time.
+    for (const TransitionTransportSpan& span : transportTrace_.spans(role)) {
+        if (!span.audible || !(span.sourceEndBeat > span.sourceStartBeat))
+            continue;
+        const double firstBeat = std::ceil(span.sourceStartBeat - 1.0e-7);
+        const double sourceLength = span.sourceEndBeat - span.sourceStartBeat;
+        const double transitionLength = span.transitionEndBeat -
+                                        span.transitionStartBeat;
+        const double sourcePixelsPerBeat = transitionLength > 0.0
+            ? transitionLength * pixelsPerBeat_ / sourceLength : 0.0;
+        for (double beat = firstBeat;
+             beat <= span.sourceEndBeat + 1.0e-7; beat += 1.0) {
+            const double fraction = (beat - span.sourceStartBeat) /
+                                    sourceLength;
+            const double transitionBeat = span.transitionStartBeat +
+                                          fraction * transitionLength;
+            const int x = kTimelineLeft + static_cast<int>(
+                std::lround(transitionBeat * pixelsPerBeat_));
+            if (x < rect.left() || x > rect.right()) continue;
+            const auto rounded = static_cast<long long>(std::llround(beat));
+            const bool downbeat = rounded % 4 == 0;
+            painter.setPen(QPen(QColor(255, 255, 255,
+                                       downbeat ? 180 : 78),
+                                downbeat ? 1.7 : 1.0));
+            painter.drawLine(x, rect.top(), x, rect.bottom());
+            if (downbeat && sourcePixelsPerBeat >= 13.0) {
+                painter.setFont(QFont(font().family(), 7, QFont::DemiBold));
+                painter.setPen(QColor(235, 238, 244, 205));
+                painter.drawText(QRect(x + 3, rect.bottom() - 15, 62, 13),
+                                 QString::number(rounded));
+            }
+        }
     }
 
+    // Shade every actual loop pass. The first traversal says LOOP; later
+    // traversals carry a compact cumulative pass badge.
+    QString previousLoop;
+    int previousPass = 0;
+    for (const TransitionTransportSpan& span : transportTrace_.spans(role)) {
+        if (!span.audible || span.loopId.isEmpty()) {
+            previousLoop.clear();
+            previousPass = 0;
+            continue;
+        }
+        const int x0 = kTimelineLeft + static_cast<int>(
+            std::lround(span.transitionStartBeat * pixelsPerBeat_));
+        const int x1 = kTimelineLeft + static_cast<int>(
+            std::lround(span.transitionEndBeat * pixelsPerBeat_));
+        const QRect region(x0, rect.top(), std::max(1, x1 - x0),
+                           rect.height());
+        painter.fillRect(region.intersected(rect), QColor(232, 161, 58, 38));
+        if (span.loopId != previousLoop || span.loopPass != previousPass) {
+            painter.setPen(QPen(QColor(244, 179, 77), 1.5,
+                                Qt::DashLine));
+            painter.drawLine(x0, rect.top(), x0, rect.bottom());
+            const QString badge = span.loopPass <= 1
+                ? tr("LOOP") : QStringLiteral("×%1").arg(span.loopPass);
+            const QRect tag(x0 + 3, rect.top() + 3,
+                            std::max(28, 8 + painter.fontMetrics()
+                                                  .horizontalAdvance(badge)),
+                            15);
+            painter.fillRect(tag.intersected(rect), QColor(232, 161, 58, 220));
+            painter.setPen(Qt::black);
+            painter.drawText(tag, Qt::AlignCenter, badge);
+        }
+        previousLoop = span.loopId;
+        previousPass = span.loopPass;
+    }
+
+    const double fallbackAnchor = role == Role::FromDeck
+                                      ? file.anchorFromBeat : file.anchorToBeat;
+    const double fallbackLaunch = role == Role::ToDeck
+                                      ? incomingLaunchBeat() : 0.0;
+    const auto transitionPositions = [&](double sourceBeat) {
+        std::vector<double> positions =
+            transportTrace_.transitionBeatsForSource(role, sourceBeat);
+        if (positions.empty())
+            positions.push_back(sourceBeat - fallbackAnchor + fallbackLaunch);
+        return positions;
+    };
     const auto drawCue = [&](double trackBeat, const QString& label,
                              const QColor& color) {
-        const double transitionBeat = trackBeat - anchor + launchBeat;
-        const int x = kTimelineLeft + static_cast<int>(transitionBeat * pixelsPerBeat_);
-        if (!rect.contains(x, rect.center().y())) return;
-        painter.setPen(QPen(color, 2));
-        painter.drawLine(x, rect.top(), x, rect.bottom());
-        painter.drawText(QRect(x + 3, rect.top() + 3, 90, 18), label);
+        const std::vector<double> positions = transitionPositions(trackBeat);
+        for (double transitionBeat : positions) {
+            const int x = kTimelineLeft + static_cast<int>(
+                std::lround(transitionBeat * pixelsPerBeat_));
+            if (!rect.contains(x, rect.center().y())) continue;
+            painter.setPen(QPen(color, 2));
+            painter.drawLine(x, rect.top(), x, rect.bottom());
+            painter.drawText(QRect(x + 3, rect.top() + 20, 110, 18), label);
+        }
     };
     for (int index = 0; index < static_cast<int>(file.transitionCues.size()); ++index) {
         const TransitionHotCue& cue =
@@ -601,11 +758,20 @@ void TransitionTimelineView::drawWaveform(QPainter& painter,
             dragDefinition_ == DragDefinition::LoopEnd &&
                     dragDefinitionIndex_ == index
                 ? dragDefinitionPreviewBeat_ : loop.endTrackBeat;
-        const double startBeat = startTrackBeat - anchor + launchBeat;
-        const double endBeat = endTrackBeat - anchor + launchBeat;
-        QRectF region(kTimelineLeft + startBeat * pixelsPerBeat_, rect.top(),
-                      (endBeat - startBeat) * pixelsPerBeat_, rect.height());
-        painter.fillRect(region.intersected(rect), QColor(232, 161, 58, 45));
+        if (!transportTrace_.usesLoop(role, loop.id)) {
+            const auto starts = transitionPositions(startTrackBeat);
+            const auto ends = transitionPositions(endTrackBeat);
+            if (!starts.empty() && !ends.empty()) {
+                const double startBeat = starts.front();
+                const double endBeat = ends.front();
+                QRectF region(kTimelineLeft + startBeat * pixelsPerBeat_,
+                              rect.top(),
+                              (endBeat - startBeat) * pixelsPerBeat_,
+                              rect.height());
+                painter.fillRect(region.intersected(rect),
+                                 QColor(232, 161, 58, 28));
+            }
+        }
         drawCue(startTrackBeat,
                 loop.label.isEmpty() ? loop.id : loop.label,
                 QColor(232, 161, 58));
@@ -621,28 +787,30 @@ void TransitionTimelineView::paintEvent(QPaintEvent*)
     const auto laneList = lanes();
 
     painter.fillRect(QRect(0, 0, width(), kRulerHeight), QColor(31, 35, 42));
+    painter.setPen(QColor(194, 199, 210));
+    painter.drawText(QRect(6, 3, kTimelineLeft - 10, 20), tr("WHEN (+beats)"));
     const double maximumBeat = (width() - kTimelineLeft) / pixelsPerBeat_;
+    const int labelEvery = pixelsPerBeat_ >= 20.0 ? 4 : pixelsPerBeat_ >= 10.0 ? 8 : 16;
     for (double beat = 0.0; beat <= maximumBeat; beat += 1.0) {
         const int x = kTimelineLeft + static_cast<int>(beat * pixelsPerBeat_);
         const bool bar = static_cast<int>(std::llround(beat)) % 4 == 0;
         painter.setPen(QPen(bar ? QColor(105, 112, 126) : QColor(57, 62, 74),
                             bar ? 1.5 : 1.0));
         painter.drawLine(x, kRulerHeight, x, height());
-        if (bar) {
+        if (static_cast<int>(std::llround(beat)) % labelEvery == 0) {
             painter.setPen(QColor(194, 199, 210));
             painter.drawText(QRect(x + 4, 3, 80, 20),
-                             tr("%1 | %2").arg(static_cast<int>(beat / 4) + 1)
-                                             .arg(static_cast<int>(beat) + 1));
+                             tr("+%1").arg(static_cast<int>(beat)));
         }
     }
 
     painter.setPen(QColor(85, 185, 223));
     painter.drawText(QRect(6, kRulerHeight, kTimelineLeft - 10, kWaveformHeight),
-                     Qt::AlignVCenter, tr("OUTGOING"));
+                     Qt::AlignVCenter, tr("OUTGOING\nsong beats"));
     painter.setPen(QColor(232, 93, 117));
     painter.drawText(QRect(6, kRulerHeight + kWaveformHeight,
                            kTimelineLeft - 10, kWaveformHeight),
-                     Qt::AlignVCenter, tr("INCOMING"));
+                     Qt::AlignVCenter, tr("INCOMING\nsong beats"));
     drawWaveform(painter, waveformRect(0), outgoing_, Role::FromDeck);
     drawWaveform(painter, waveformRect(1), incoming_, Role::ToDeck);
 
@@ -652,9 +820,11 @@ void TransitionTimelineView::paintEvent(QPaintEvent*)
                            actionRect().height()), Qt::AlignVCenter,
                      tr("ACTIONS"));
     for (int i = 0; i < static_cast<int>(file.events.size()); ++i) {
-        const GvtEvent& event = file.events[static_cast<std::size_t>(i)];
+        const GvtEvent& event = i == dragEvent_ ? dragPreview_
+            : file.events[static_cast<std::size_t>(i)];
+        if (!transitionEventIsExecutable(event)) continue;
         if (!controlIsTrigger(event.control)) continue;
-        const int x = kTimelineLeft + static_cast<int>(event.beat * pixelsPerBeat_);
+        const int x = kTimelineLeft + static_cast<int>(std::lround(event.beat * pixelsPerBeat_));
         QRect card(x - 5, actionRect().top() + 8, 11, actionRect().height() - 16);
         const QColor color = event.role == Role::FromDeck ? QColor(85, 185, 223)
                              : event.role == Role::ToDeck ? QColor(232, 93, 117)
@@ -735,11 +905,89 @@ void TransitionTimelineView::paintEvent(QPaintEvent*)
     const int playheadX = kTimelineLeft + static_cast<int>(playheadBeat_ * pixelsPerBeat_);
     painter.setPen(QPen(Qt::white, 2));
     painter.drawLine(playheadX, 0, playheadX, height());
+    drawDragGuide(painter);
+}
+
+double TransitionTimelineView::sourceMarkerTransitionBeat(
+    Role role, double sourceBeat, double nearTransitionBeat) const
+{
+    const auto positions = transportTrace_.transitionBeatsForSource(role, sourceBeat);
+    if (!positions.empty()) {
+        // Keep the guide on the repetition being dragged, not the first
+        // occurrence of that source beat in an unrolled loop.
+        return *std::min_element(positions.begin(), positions.end(),
+            [nearTransitionBeat](double a, double b) {
+                return std::fabs(a - nearTransitionBeat) < std::fabs(b - nearTransitionBeat);
+            });
+    }
+    const double anchor = role == Role::FromDeck
+        ? document_->file().anchorFromBeat : document_->file().anchorToBeat;
+    return sourceBeat - anchor + (role == Role::ToDeck ? incomingLaunchBeat() : 0.0);
+}
+
+void TransitionTimelineView::drawDragGuide(QPainter& painter)
+{
+    double beat;
+    QString label;
+    if (dragDefinition_ != DragDefinition::None) {
+        beat = dragDefinitionTransitionBeat_;
+        if (dragDefinition_ == DragDefinition::Label) {
+            label = tr("Label • transition +%1").arg(beat, 0, 'f', 3);
+        } else {
+            const QString kind = dragDefinition_ == DragDefinition::Cue ? tr("Cue")
+                : dragDefinition_ == DragDefinition::LoopStart ? tr("Loop IN") : tr("Loop OUT");
+            label = tr("%1 • song beat %2 • transition +%3")
+                .arg(kind).arg(dragDefinitionPreviewBeat_, 0, 'f', 3).arg(beat, 0, 'f', 3);
+        }
+    } else if (dragEvent_ >= 0) {
+        beat = dragPreview_.beat;
+        label = tr("Action • transition +%1").arg(beat, 0, 'f', 3);
+    } else if (dragEnd_) {
+        beat = dragPreviewEnd_;
+        label = tr("End • transition +%1").arg(beat, 0, 'f', 3);
+    } else {
+        return;
+    }
+
+    painter.save();
+    const QColor color(98, 224, 244);
+    const int x = kTimelineLeft + static_cast<int>(std::lround(beat * pixelsPerBeat_));
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.setPen(QPen(QColor(10, 17, 22, 180), 5));
+    painter.drawLine(x, 0, x, height());
+    painter.setPen(QPen(color, 1));
+    painter.drawLine(x, 0, x, height());
+
+    // Keep the readout inside the visible scroll viewport, even when the
+    // timeline is wider than the window. The guide stays at the marker center.
+    const QRect visible = visibleRegion().boundingRect();
+    if (!visible.isEmpty()) {
+        painter.setFont(QFont(font().family(), 9, QFont::DemiBold));
+        const int available = std::max(1, visible.width() - 12);
+        const QString text = painter.fontMetrics().elidedText(label, Qt::ElideRight,
+                                                               std::max(1, available - 14));
+        const int w = std::min(available, painter.fontMetrics().horizontalAdvance(text) + 14);
+        const int left = std::clamp(x + 10, visible.left() + 6,
+                                   std::max(visible.left() + 6, visible.right() - w - 5));
+        const QRect readout(left, visible.top() + kRulerHeight + 5, w, 24);
+        painter.fillRect(readout, QColor(16, 31, 38, 245));
+        painter.setPen(QPen(color, 1));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(readout);
+        painter.drawText(readout.adjusted(7, 0, -7, 0), Qt::AlignVCenter, text);
+        painter.setBrush(color);
+        painter.setPen(Qt::NoPen);
+        const int top = visible.top();
+        painter.drawPolygon(QPolygonF {QPointF(x - 5, top + 2),
+            QPointF(x + 5, top + 2), QPointF(x, top + 9)});
+    }
+    painter.restore();
 }
 
 void TransitionTimelineView::mousePressEvent(QMouseEvent* event)
 {
     if (event->button() != Qt::LeftButton) return QWidget::mousePressEvent(event);
+    setFocus(Qt::MouseFocusReason);
     const double endX = kTimelineLeft + document_->effectiveEndBeat() * pixelsPerBeat_;
     if (std::fabs(event->position().x() - endX) < 8.0) {
         dragEnd_ = true;
@@ -747,6 +995,7 @@ void TransitionTimelineView::mousePressEvent(QMouseEvent* event)
         dragOriginalEnd_ = document_->effectiveEndBeat();
         dragPreviewEnd_ = dragOriginalEnd_;
         setCursor(Qt::SizeHorCursor);
+        update();
         event->accept();
         return;
     }
@@ -762,7 +1011,9 @@ void TransitionTimelineView::mousePressEvent(QMouseEvent* event)
             dragDefinitionOriginalBeat_ =
                 document_->file().cues[static_cast<std::size_t>(index)].beat;
             dragDefinitionPreviewBeat_ = dragDefinitionOriginalBeat_;
+            dragDefinitionTransitionBeat_ = dragDefinitionOriginalBeat_;
             setCursor(Qt::SizeHorCursor);
+            update();
             event->accept();
             return;
         }
@@ -770,27 +1021,39 @@ void TransitionTimelineView::mousePressEvent(QMouseEvent* event)
     for (int roleIndex = 0; roleIndex < 2; ++roleIndex) {
         if (!waveformRect(roleIndex).contains(event->position().toPoint())) continue;
         const Role role = roleIndex == 0 ? Role::FromDeck : Role::ToDeck;
-        const double anchor = role == Role::FromDeck
-                                  ? document_->file().anchorFromBeat
-                                  : document_->file().anchorToBeat;
-        const double launch = role == Role::ToDeck ? incomingLaunchBeat() : 0.0;
-        const auto markerX = [&](double trackBeat) {
-            return kTimelineLeft + (trackBeat - anchor + launch) * pixelsPerBeat_;
+        const auto markerNear = [&](double trackBeat) {
+            std::vector<double> positions =
+                transportTrace_.transitionBeatsForSource(role, trackBeat);
+            if (positions.empty()) {
+                const double anchor = role == Role::FromDeck
+                    ? document_->file().anchorFromBeat
+                    : document_->file().anchorToBeat;
+                const double launch = role == Role::ToDeck
+                    ? incomingLaunchBeat() : 0.0;
+                positions.push_back(trackBeat - anchor + launch);
+            }
+            return std::any_of(positions.begin(), positions.end(),
+                               [&](double transitionBeat) {
+                const double x = kTimelineLeft + transitionBeat * pixelsPerBeat_;
+                return std::fabs(event->position().x() - x) < 8.0;
+            });
         };
         for (int index = 0;
              index < static_cast<int>(document_->file().transitionCues.size());
              ++index) {
             const TransitionHotCue& cue = document_->file().transitionCues[
                 static_cast<std::size_t>(index)];
-            if (cue.role != role ||
-                std::fabs(event->position().x() - markerX(cue.trackBeat)) >= 8.0)
+            if (cue.role != role || !markerNear(cue.trackBeat))
                 continue;
             dragDefinition_ = DragDefinition::Cue;
             dragDefinitionIndex_ = index;
             dragDefinitionRole_ = role;
             dragDefinitionOriginalBeat_ = cue.trackBeat;
             dragDefinitionPreviewBeat_ = cue.trackBeat;
+            dragDefinitionTransitionBeat_ = sourceMarkerTransitionBeat(role, cue.trackBeat,
+                (event->position().x() - kTimelineLeft) / pixelsPerBeat_);
             setCursor(Qt::SizeHorCursor);
+            update();
             event->accept();
             return;
         }
@@ -800,10 +1063,8 @@ void TransitionTimelineView::mousePressEvent(QMouseEvent* event)
             const TransitionSavedLoop& loop = document_->file().transitionLoops[
                 static_cast<std::size_t>(index)];
             if (loop.role != role) continue;
-            const bool atStart = std::fabs(
-                event->position().x() - markerX(loop.startTrackBeat)) < 8.0;
-            const bool atEnd = std::fabs(
-                event->position().x() - markerX(loop.endTrackBeat)) < 8.0;
+            const bool atStart = markerNear(loop.startTrackBeat);
+            const bool atEnd = markerNear(loop.endTrackBeat);
             if (!atStart && !atEnd) continue;
             dragDefinition_ = atStart ? DragDefinition::LoopStart
                                       : DragDefinition::LoopEnd;
@@ -812,7 +1073,10 @@ void TransitionTimelineView::mousePressEvent(QMouseEvent* event)
             dragDefinitionOriginalBeat_ = atStart ? loop.startTrackBeat
                                                   : loop.endTrackBeat;
             dragDefinitionPreviewBeat_ = dragDefinitionOriginalBeat_;
+            dragDefinitionTransitionBeat_ = sourceMarkerTransitionBeat(role, dragDefinitionOriginalBeat_,
+                (event->position().x() - kTimelineLeft) / pixelsPerBeat_);
             setCursor(Qt::SizeHorCursor);
+            update();
             event->accept();
             return;
         }
@@ -844,13 +1108,20 @@ void TransitionTimelineView::mouseMoveEvent(QMouseEvent* event)
                                               event->modifiers());
         if (dragDefinition_ == DragDefinition::Label) {
             dragDefinitionPreviewBeat_ = transitionBeat;
+            dragDefinitionTransitionBeat_ = transitionBeat;
         } else {
-            const double anchor = dragDefinitionRole_ == Role::FromDeck
-                                      ? document_->file().anchorFromBeat
-                                      : document_->file().anchorToBeat;
-            const double launch = dragDefinitionRole_ == Role::ToDeck
-                                      ? incomingLaunchBeat() : 0.0;
-            dragDefinitionPreviewBeat_ = anchor + transitionBeat - launch;
+            const auto source = transportTrace_.positionAt(
+                dragDefinitionRole_, transitionBeat);
+            if (source) {
+                dragDefinitionPreviewBeat_ = source->sourceBeat;
+            } else {
+                const double anchor = dragDefinitionRole_ == Role::FromDeck
+                                          ? document_->file().anchorFromBeat
+                                          : document_->file().anchorToBeat;
+                const double launch = dragDefinitionRole_ == Role::ToDeck
+                                          ? incomingLaunchBeat() : 0.0;
+                dragDefinitionPreviewBeat_ = anchor + transitionBeat - launch;
+            }
             if (dragDefinitionIndex_ >= 0 &&
                 dragDefinitionIndex_ < static_cast<int>(
                     document_->file().transitionLoops.size())) {
@@ -867,6 +1138,8 @@ void TransitionTimelineView::mouseMoveEvent(QMouseEvent* event)
                     dragDefinitionPreviewBeat_ = std::max(
                         dragDefinitionPreviewBeat_, loop.startTrackBeat + minimumGap);
             }
+            dragDefinitionTransitionBeat_ = sourceMarkerTransitionBeat(
+                dragDefinitionRole_, dragDefinitionPreviewBeat_, transitionBeat);
         }
         update();
         event->accept();
@@ -945,22 +1218,26 @@ void TransitionTimelineView::mouseReleaseEvent(QMouseEvent* event)
     } else if (dragEvent_ >= 0) {
         const int index = dragEvent_;
         const GvtEvent changed = dragPreview_;
-        document_->mutate(tr("Move timeline point"), [index, changed](GvtFile& file) {
+        int movedIndex = -1;
+        document_->mutate(tr("Move timeline point"),
+                          [index, changed, &movedIndex](GvtFile& file) {
             if (index < 0 || index >= static_cast<int>(file.events.size())) return;
-            file.events[static_cast<std::size_t>(index)] = changed;
-            std::stable_sort(file.events.begin(), file.events.end(),
-                             [](const GvtEvent& a, const GvtEvent& b) {
-                                 return a.beat < b.beat;
-                             });
+            file.events.erase(file.events.begin() + index);
+            const auto destination = std::upper_bound(
+                file.events.begin(), file.events.end(), changed.beat,
+                [](double beat, const GvtEvent& candidate) {
+                    return beat < candidate.beat;
+                });
+            movedIndex = static_cast<int>(
+                std::distance(file.events.begin(), destination));
+            file.events.insert(destination, changed);
         });
         dragEvent_ = -1;
-        // Sorting can move the edited point to a different vector index.
-        // Clear selection rather than leaving the inspector attached to a
-        // different event that happened to inherit the old index.
-        selectedEvent_ = -1;
-        emit eventSelected(-1);
+        selectedEvent_ = movedIndex;
+        emit eventSelected(movedIndex);
     }
     setCursor(Qt::ArrowCursor);
+    update();
     event->accept();
 }
 
@@ -990,50 +1267,26 @@ void TransitionTimelineView::mouseDoubleClickEvent(QMouseEvent* event)
 struct TransitionEditorWindow::Preview final : AudioPreviewSource {
     ControlBus bus;
     AudioEngine engine {&bus};
+    TransitionPlayer player {&bus, &engine};
     GvtFile file;
     TrackDataPtr outgoing;
     TrackDataPtr incoming;
-    std::vector<ScheduledEvent> schedule;
-    std::vector<bool> fired;
     std::array<float, kPreviewRingFrames * 2U> ring {};
+    std::array<double, kPreviewRingFrames> ringBeats {};
+    std::atomic<double> audibleBeat {0.0};
     std::atomic<std::uint64_t> writeFrame {0};
     std::atomic<std::uint64_t> readFrame {0};
     double beat = 0.0;
     double endBeat = 0.0;
     bool active = false;
     bool leased = false;
-    ControlId incomingPreviewControl = ControlId::Count;
 
-    static double engineValue(AudioEngine& engine, Role role, ControlId control)
-    {
-        if (role == Role::Mixer)
-            return control == ControlId::Crossfader ? engine.crossfader.load() : 0.0;
-        const Deck& deck = engine.deck(role == Role::FromDeck ? 0 : 1);
-        switch (control) {
-        case ControlId::Tempo: return deck.tempoRatio.load();
-        case ControlId::Fader: return deck.fader.load();
-        case ControlId::EqLow: return deck.eqLow.load();
-        case ControlId::EqMid: return deck.eqMid.load();
-        case ControlId::EqHigh: return deck.eqHigh.load();
-        case ControlId::Filter: return deck.filter.load();
-        case ControlId::FxWet: return deck.fxWet.load();
-        case ControlId::FxBeats: return deck.fxBeats.load();
-        case ControlId::FxType: return deck.fxType.load();
-        case ControlId::FxOn: return deck.fxOn.load() ? 1.0 : 0.0;
-        case ControlId::Quantize:
-            return deck.quantizeHotCues.load() ? 1.0 : 0.0;
-        case ControlId::StemVocals: return deck.stemVocals.load();
-        case ControlId::StemMelody: return deck.stemMelody.load();
-        case ControlId::StemBass: return deck.stemBass.load();
-        case ControlId::StemDrums: return deck.stemDrums.load();
-        default: return 0.0;
-        }
-    }
 
     void clearRing()
     {
         readFrame.store(0, std::memory_order_relaxed);
         writeFrame.store(0, std::memory_order_relaxed);
+        audibleBeat.store(beat, std::memory_order_relaxed);
     }
 
     void read(float* output, int frames) noexcept override
@@ -1050,66 +1303,20 @@ struct TransitionEditorWindow::Preview final : AudioPreviewSource {
         }
         std::fill(output + static_cast<std::size_t>(available) * 2U,
                   output + static_cast<std::size_t>(frames) * 2U, 0.0f);
+        if (available > 0)
+            audibleBeat.store(ringBeats[static_cast<std::size_t>(
+                (read + static_cast<std::uint64_t>(available) - 1) % kPreviewRingFrames)],
+                std::memory_order_release);
         readFrame.store(read + static_cast<std::uint64_t>(available),
                         std::memory_order_release);
     }
 
-    void applyInitial(const GvtInitialState& state, int deckIndex)
+    bool reset(const GvtFile& source, TrackDataPtr out, TrackDataPtr in,
+               StemSetPtr outStems, StemSetPtr inStems,
+               AudioEngine& live, int liveOutgoing, QString* error)
     {
-        Deck& deck = engine.deck(deckIndex);
-        deck.tempoRatio.store(state.tempoRatio);
-        deck.fader.store(state.fader);
-        deck.eqLow.store(state.eqLow);
-        deck.eqMid.store(state.eqMid);
-        deck.eqHigh.store(state.eqHigh);
-        deck.filter.store(state.filter);
-        deck.quantizeHotCues.store(state.quantize);
-        deck.fxType.store(state.fxType);
-        deck.fxOn.store(state.fxOn);
-        deck.fxWet.store(state.fxWet);
-        deck.fxBeats.store(state.fxBeats);
-        deck.stemVocals.store(state.stemVocals);
-        deck.stemMelody.store(state.stemMelody);
-        deck.stemBass.store(state.stemBass);
-        deck.stemDrums.store(state.stemDrums);
-        const TrackDataPtr track = deck.track();
-        if (track) {
-            deck.seekSec(transitionSecAtBeat(file, *track, state.positionBeat));
-            deck.cuePointSec.store(transitionSecAtBeat(file, *track, state.cueBeat));
-            deck.loopStartSec.store(transitionSecAtBeat(file, *track,
-                                                        state.loopStartBeat));
-            deck.loopEndSec.store(transitionSecAtBeat(file, *track,
-                                                      state.loopEndBeat));
-            deck.loopActive.store(state.loopActive &&
-                                  state.loopEndBeat > state.loopStartBeat);
-        }
-        if (state.playing) deck.play(); else deck.stop();
-    }
-
-    void prepareSlots(Role role, int deckIndex)
-    {
-        std::array<double, 8> starts {-1,-1,-1,-1,-1,-1,-1,-1};
-        std::array<double, 8> ends {-1,-1,-1,-1,-1,-1,-1,-1};
-        const TrackDataPtr track = engine.deck(deckIndex).track();
-        const auto performanceSlots = transitionPerformanceSlots(file, role);
-        for (int index = 0; index < 8 && track; ++index) {
-            const auto& slot = performanceSlots[static_cast<std::size_t>(index)];
-            if (slot.cue)
-                starts[static_cast<std::size_t>(index)] = transitionSecAtBeat(
-                    file, *track, slot.cue->trackBeat);
-            else if (slot.loop) {
-                starts[static_cast<std::size_t>(index)] = transitionSecAtBeat(
-                    file, *track, slot.loop->startTrackBeat);
-                ends[static_cast<std::size_t>(index)] = transitionSecAtBeat(
-                    file, *track, slot.loop->endTrackBeat);
-            }
-        }
-        engine.deck(deckIndex).setTransitionPerformanceSlots(starts, ends);
-    }
-
-    void reset(const GvtFile& source, TrackDataPtr out, TrackDataPtr in,
-               StemSetPtr outStems, StemSetPtr inStems)
-    {
+        player.abort();
+        transitionPlayerUseExternalClock(&player, true);
         file = source;
         outgoing = std::move(out);
         incoming = std::move(in);
@@ -1117,132 +1324,61 @@ struct TransitionEditorWindow::Preview final : AudioPreviewSource {
         engine.deck(1).loadTrack(incoming);
         if (outStems) engine.deck(0).attachStems(std::move(outStems));
         if (inStems) engine.deck(1).attachStems(std::move(inStems));
-        prepareSlots(Role::FromDeck, 0);
-        prepareSlots(Role::ToDeck, 1);
-        engine.crossfader.store(file.initialMixerCaptured
-                                   ? static_cast<float>(file.initialCrossfader)
-                                   : 0.0f);
-        if (file.initialComplete) {
-            GvtInitialState fromState = file.initialFrom;
-            GvtInitialState toState = file.initialTo;
-            fromState.tempoRatio = transitionReplayTempoRatio(
-                fromState, file.from, outgoing, file.masterBpm);
-            toState.tempoRatio = transitionReplayTempoRatio(
-                toState, file.to, incoming);
-            applyInitial(fromState, 0);
-            applyInitial(toState, 1);
-        } else {
-            engine.deck(0).seekSec(transitionSecAtBeat(file, *outgoing,
-                                                       file.anchorFromBeat));
-            engine.deck(1).seekSec(transitionSecAtBeat(file, *incoming,
-                                                       file.anchorToBeat));
-            if (file.initialFrom.captured) {
-                Deck& deck = engine.deck(0);
-                deck.tempoRatio.store(transitionReplayTempoRatio(
-                    file.initialFrom, file.from, outgoing, file.masterBpm));
-                deck.fader.store(file.initialFrom.fader);
-                deck.eqLow.store(file.initialFrom.eqLow);
-                deck.eqMid.store(file.initialFrom.eqMid);
-                deck.eqHigh.store(file.initialFrom.eqHigh);
-                deck.filter.store(file.initialFrom.filter);
-            }
-            engine.deck(0).play();
-            engine.deck(1).stop();
-        }
-
-        std::vector<GvtEvent> events = file.events;
-        for (GvtEvent& event : events) {
-            if (event.control == ControlId::Tempo) {
-                event.value = event.role == Role::FromDeck
-                    ? transitionReplayTempoEvent(event.value, file.from,
-                                                 outgoing)
-                    : transitionReplayTempoEvent(event.value, file.to,
-                                                 incoming);
-            }
-            if (event.role == Role::Mixer ||
-                (event.cueId.isEmpty() && event.loopId.isEmpty())) continue;
-            const auto performanceSlots = transitionPerformanceSlots(file, event.role);
-            for (int index = 0; index < 8; ++index) {
-                const auto& slot = performanceSlots[static_cast<std::size_t>(index)];
-                if ((!event.cueId.isEmpty() && slot.cue &&
-                     slot.cue->id == event.cueId) ||
-                    (!event.loopId.isEmpty() && slot.loop &&
-                     slot.loop->id == event.loopId)) {
-                    event.control = static_cast<ControlId>(
-                        static_cast<int>(ControlId::TransitionCue1) + index);
-                    break;
-                }
-            }
-        }
-        schedule = buildSchedule(events, [this](Role role, ControlId control) {
-            return engineValue(engine, role, control);
-        });
-        fired.assign(schedule.size(), false);
+        copyTransitionPlaybackContext(live, liveOutgoing, bus, engine);
+        prepareTransitionSetup(bus, engine, file, 0);
+        positionTransitionPerform(engine, file, 0);
+        // Arm before PLAY, exactly as the main Perform button does. Initial
+        // incoming transport and every event now run through TransitionPlayer.
+        if (!player.arm(file, 0, true, error)) return false;
+        bus.dispatch({0, ControlId::Play, 1.0}, Origin::Replay);
         beat = 0.0;
         endBeat = file.endBeat.value_or(latestBeat(file) + 1.0);
-        incomingPreviewControl = ControlId::Count;
         clearRing();
+        transitionPlayerAdvanceToBeat(&player, beat);
+        return true;
     }
 
     void dispatch(Role role, ControlId control, double value)
     {
-        const int deck = role == Role::FromDeck ? 0
-                       : role == Role::ToDeck ? 1 : kNoDeck;
-        if (role == Role::ToDeck && control == ControlId::Play && value >= 0.5) {
-            Deck& incomingDeck = engine.deck(1);
-            if (incomingPreviewControl == ControlId::Count ||
-                !incomingDeck.previewActive())
-                incomingDeck.seekSec(transitionSecAtBeat(
-                    file, *incoming, file.anchorToBeat));
-        }
-        bus.dispatch({deck, control, value}, Origin::Replay);
-        const bool previewControl = control == ControlId::Cue ||
-            (control >= ControlId::TransitionCue1 &&
-             control <= ControlId::TransitionCue8) ||
-            (control >= ControlId::SavedLoop1 && control <= ControlId::SavedLoop8);
-        if (role == Role::ToDeck && previewControl) {
-            if (value >= 0.5 && engine.deck(1).previewActive())
-                incomingPreviewControl = control;
-            else if (value < 0.5 && incomingPreviewControl == control)
-                incomingPreviewControl = ControlId::Count;
-        }
+        if (control == ControlId::Crossfader) return;
+        bus.dispatch({role == Role::FromDeck ? 0 : 1, control, value}, Origin::Ui);
     }
 
-    void renderBlock(float* output, bool enqueue)
+    void renderBlock(float* output, bool enqueue, int frames = kPreviewFrames)
     {
-        for (std::size_t index = 0; index < schedule.size(); ++index) {
-            ScheduledEvent& scheduled = schedule[index];
-            if (!fired[index] && beat >= scheduled.e.beat) {
-                dispatch(scheduled.e.role, scheduled.e.control,
-                         scheduled.e.value);
-                fired[index] = true;
-            } else if (!fired[index] && scheduledIsGlide(scheduled) &&
-                       beat > scheduled.startBeat) {
-                dispatch(scheduled.e.role, scheduled.e.control,
-                         glideValueAt(scheduled, beat));
-            }
-        }
-        engine.renderOffline(output, kPreviewFrames);
+        transitionPlayerAdvanceToBeat(&player, beat);
+        const double startBeat = beat;
+        engine.renderOffline(output, frames);
         const double bpm = engine.deck(0).effectiveBpm() > 0.0
                                ? engine.deck(0).effectiveBpm() : file.masterBpm;
-        beat += static_cast<double>(kPreviewFrames) /
+        beat += static_cast<double>(frames) /
                 static_cast<double>(kSampleRate) * bpm / 60.0;
         if (!enqueue) return;
         const std::uint64_t write = writeFrame.load(std::memory_order_relaxed);
-        for (int frame = 0; frame < kPreviewFrames; ++frame) {
+        for (int frame = 0; frame < frames; ++frame) {
             const std::size_t ringFrame = static_cast<std::size_t>(
                 (write + static_cast<std::uint64_t>(frame)) % kPreviewRingFrames);
             ring[ringFrame * 2U] = output[static_cast<std::size_t>(frame) * 2U];
             ring[ringFrame * 2U + 1U] = output[static_cast<std::size_t>(frame) * 2U + 1U];
+            ringBeats[ringFrame] = startBeat + (beat - startBeat) *
+                static_cast<double>(frame + 1) / frames;
         }
-        writeFrame.store(write + kPreviewFrames, std::memory_order_release);
+        writeFrame.store(write + static_cast<std::uint64_t>(frames), std::memory_order_release);
     }
 
     void primeTo(double wantedBeat)
     {
         std::array<float, static_cast<std::size_t>(kPreviewFrames) * 2U> scratch {};
-        while (beat + 1e-9 < wantedBeat && beat < endBeat)
-            renderBlock(scratch.data(), false);
+        wantedBeat = std::clamp(wantedBeat, 0.0, endBeat);
+        while (beat + 1e-9 < wantedBeat) {
+            transitionPlayerAdvanceToBeat(&player, beat);
+            const double bpm = engine.deck(0).effectiveBpm() > 0.0
+                ? engine.deck(0).effectiveBpm() : file.masterBpm;
+            const int frames = std::clamp(static_cast<int>(std::ceil(
+                (wantedBeat - beat) * 60.0 / bpm * kSampleRate - 1e-8)),
+                1, kPreviewFrames);
+            renderBlock(scratch.data(), false, frames);
+        }
         clearRing();
     }
 
@@ -1282,9 +1418,26 @@ TransitionEditorWindow::TransitionEditorWindow(
         QStringLiteral("transitionEditor/geometry")).toByteArray();
     if (!geometry.isEmpty()) restoreGeometry(geometry);
     buildUi();
+    if (qApp) qApp->installEventFilter(this);
 
-    connect(document_, &TransitionEditorDocument::changed, this, [this] {
+    connect(document_, &TransitionEditorDocument::changed, this,
+            [this, previousFrom = GvtTrackRef{}, previousTo = GvtTrackRef{},
+             previousId = QString{}]() mutable {
         if (preview_ && preview_->active) stopPreview();
+        const auto& file = document_->file();
+        // Undo/redo of endpoint fields must resolve audio just like applying
+        // them; never preview the assets belonging to the previous document.
+        if (previousId != file.id || !sameEndpointProfile(previousFrom, file.from) ||
+            !sameEndpointProfile(previousTo, file.to)) {
+            outgoing_ = resolveTrack(file, true);
+            incoming_ = resolveTrack(file, false);
+            outgoingStems_.reset();
+            incomingStems_.reset();
+            timeline_->setTracks(outgoing_, incoming_);
+            previousFrom = file.from;
+            previousTo = file.to;
+            previousId = file.id;
+        }
         scheduleDraftSave();
         refreshUi();
     });
@@ -1335,6 +1488,7 @@ TransitionEditorWindow::TransitionEditorWindow(
 
 TransitionEditorWindow::~TransitionEditorWindow()
 {
+    if (qApp) qApp->removeEventFilter(this);
     stopPreview();
 }
 
@@ -1360,12 +1514,14 @@ void TransitionEditorWindow::buildUi()
 
     snapCombo_ = new QComboBox(toolbar);
     snapCombo_->setObjectName(QStringLiteral("transitionEditorSnap"));
+    snapCombo_->setToolTip(tr("Only mouse dragging snaps. For precise launches choose Off, "
+        "hold Option while dragging, or type an exact transition beat."));
     const std::array<std::pair<const char*, double>, 7> snaps {{
         {"1 Bar", 4.0}, {"1 Beat", 1.0}, {"1/2", 0.5},
         {"1/4", 0.25}, {"1/8", 0.125}, {"1/16", 0.0625}, {"Off", 0.0}}};
     for (const auto& [name, value] : snaps)
         snapCombo_->addItem(tr(name), value);
-    snapCombo_->setCurrentIndex(3);
+    snapCombo_->setCurrentIndex(6);
     toolbar->addWidget(new QLabel(tr(" Snap "), toolbar));
     toolbar->addWidget(snapCombo_);
     connect(snapCombo_, &QComboBox::currentIndexChanged, this, [this] {
@@ -1411,23 +1567,54 @@ void TransitionEditorWindow::buildUi()
     timelineScroll_->setWidget(timeline_);
     timelineScroll_->setWidgetResizable(false);
     timelineScroll_->setFrameShape(QFrame::NoFrame);
+    timeline_->installEventFilter(this);
+    timelineScroll_->viewport()->installEventFilter(this);
     mainSplit->addWidget(timelineScroll_);
 
-    inspectorTabs_ = new QTabWidget(mainSplit);
+    auto* inspectorHost = new QWidget(mainSplit);
+    inspectorHost->setMinimumWidth(400);
+    auto* inspectorLayout = new QVBoxLayout(inspectorHost);
+    inspectorLayout->setContentsMargins(0, 0, 0, 0);
+    auto* sectionRow = new QHBoxLayout;
+    sectionRow->addWidget(new QLabel(tr("EDIT SECTION"), inspectorHost));
+    sectionCombo_ = new QComboBox(inspectorHost);
+    sectionCombo_->setObjectName(QStringLiteral("transitionEditorSection"));
+    sectionCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    sectionCombo_->setMinimumContentsLength(12);
+    sectionCombo_->setToolTip(tr("Every editor section is available here, even in a narrow window."));
+    sectionRow->addWidget(sectionCombo_, 1);
+    inspectorLayout->addLayout(sectionRow);
+    auto* shortcuts = new QHBoxLayout;
+    auto* tempoShortcut = new QPushButton(tr("Tempo / Setup"), inspectorHost);
+    tempoShortcut->setObjectName(QStringLiteral("transitionEditorTempoShortcut"));
+    auto* loopShortcut = new QPushButton(tr("Cues / Loops"), inspectorHost);
+    loopShortcut->setObjectName(QStringLiteral("transitionEditorLoopsShortcut"));
+    auto* fieldsShortcut = new QPushButton(tr("All fields"), inspectorHost);
+    fieldsShortcut->setObjectName(QStringLiteral("transitionEditorFieldsShortcut"));
+    shortcuts->addWidget(tempoShortcut);
+    shortcuts->addWidget(loopShortcut);
+    shortcuts->addWidget(fieldsShortcut);
+    inspectorLayout->addLayout(shortcuts);
+    inspectorTabs_ = new QTabWidget(inspectorHost);
     inspectorTabs_->setObjectName(QStringLiteral("transitionEditorInspector"));
-    inspectorTabs_->setMinimumWidth(360);
-    inspectorTabs_->setMaximumWidth(520);
-    mainSplit->addWidget(inspectorTabs_);
-    mainSplit->setStretchFactor(0, 4);
-    mainSplit->setStretchFactor(1, 1);
+    inspectorTabs_->tabBar()->hide(); // The persistent selector never overflows.
+    inspectorLayout->addWidget(inspectorTabs_, 1);
+    mainSplit->addWidget(inspectorHost);
+    mainSplit->setChildrenCollapsible(false);
+    mainSplit->setStretchFactor(0, 3);
+    mainSplit->setStretchFactor(1, 2);
+    mainSplit->setSizes({820, 560});
     root->addWidget(mainSplit, 1);
 
     connect(timeline_, &TransitionTimelineView::eventSelected, this,
             &TransitionEditorWindow::selectEvent);
     connect(timeline_, &TransitionTimelineView::playheadChanged, this,
             [this](double beat) {
-                if (preview_ && preview_->active) stopPreview();
-                playheadLabel_->setText(tr("Beat %1").arg(beat, 0, 'f', 3));
+                if (preview_ && (preview_->active || preview_->leased ||
+                                 previewPaused_))
+                    endPreview(false);
+                playheadLabel_->setText(tr("Transition +%1 beats").arg(beat, 0, 'f', 3));
+                followEventSequence(beat);
                 if (selectedEvent_ < 0) eventBeatSpin_->setValue(beat);
             });
 
@@ -1443,23 +1630,42 @@ void TransitionEditorWindow::buildUi()
     masterBpmSpin_ = new QDoubleSpinBox(details);
     masterBpmSpin_->setRange(20.0, 400.0);
     masterBpmSpin_->setDecimals(6);
+    masterBpmSpin_->setToolTip(tr("performance.master_bpm: outgoing playback BPM. "
+        "Incoming tempo is separate; this does not automatically beat-match it."));
     endBeatSpin_ = new QDoubleSpinBox(details);
     endBeatSpin_->setRange(0.0, 1000000.0);
     endBeatSpin_->setDecimals(6);
+    endBeatSpin_->setToolTip(tr("performance.end_beat: elapsed transition beats, not a song position."));
     outgoingAnchorSpin_ = new QDoubleSpinBox(details);
     incomingAnchorSpin_ = new QDoubleSpinBox(details);
+    outgoingAnchorSpin_->setObjectName(QStringLiteral("transitionEditorOutgoingEntry"));
+    incomingAnchorSpin_->setObjectName(QStringLiteral("transitionEditorIncomingPlaySource"));
+    outgoingAnchorSpin_->setToolTip(tr("performance.anchors.outgoing.track_beat: "
+        "the song position defining transition beat zero, in both Preview and Perform. "
+        "PRIME waits for the outgoing song to reach this position."));
+    incomingAnchorSpin_->setToolTip(tr("performance.anchors.incoming.track_beat: "
+        "source position for a standalone incoming PLAY. A hot-cue launch instead "
+        "uses its cue position in Cues / Loops; PLAY while held only latches it."));
     for (QDoubleSpinBox* spin : {outgoingAnchorSpin_, incomingAnchorSpin_}) {
         spin->setRange(-1000000.0, 1000000.0);
         spin->setDecimals(6);
+        spin->setSingleStep(0.01);
     }
     form->addRow(tr("Name"), nameEdit_);
     form->addRow(tr("Author"), authorEdit_);
     form->addRow(tr("Description"), descriptionEdit_);
-    form->addRow(tr("Master BPM"), masterBpmSpin_);
-    form->addRow(tr("End beat"), endBeatSpin_);
-    form->addRow(tr("Outgoing anchor"), outgoingAnchorSpin_);
-    form->addRow(tr("Incoming anchor"), incomingAnchorSpin_);
+    form->addRow(tr("Outgoing playback BPM"), masterBpmSpin_);
+    form->addRow(tr("Duration (transition beats)"), endBeatSpin_);
+    form->addRow(tr("Outgoing entry (song beat)"), outgoingAnchorSpin_);
+    form->addRow(tr("Incoming PLAY source beat"), incomingAnchorSpin_);
     detailsLayout->addLayout(form);
+    timingSummaryLabel_ = new QLabel(details);
+    timingSummaryLabel_->setObjectName(QStringLiteral("transitionEditorTimingSummary"));
+    timingSummaryLabel_->setWordWrap(true);
+    timingSummaryLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    timingSummaryLabel_->setStyleSheet("padding:4px;");
+    timingSummaryLabel_->setTextFormat(Qt::PlainText);
+    detailsLayout->addWidget(timingSummaryLabel_);
 
     auto* outgoingBox = new QGroupBox(tr("Outgoing endpoint"), details);
     auto* outgoingLayout = new QHBoxLayout(outgoingBox);
@@ -1477,11 +1683,16 @@ void TransitionEditorWindow::buildUi()
     incomingLayout->addWidget(incomingTrackLabel_, 1);
     incomingLayout->addWidget(changeIncoming);
     detailsLayout->addWidget(incomingBox);
-    auto* applyDetails = new QPushButton(tr("Apply transition details"), details);
+    auto* applyDetails = new QPushButton(tr("Apply details to preview"), details);
+    applyDetails->setToolTip(tr("Updates the working copy and preview. Save writes the file; Undo reverses this edit."));
     applyDetails->setObjectName(QStringLiteral("transitionEditorApplyDetails"));
     detailsLayout->addWidget(applyDetails);
     detailsLayout->addStretch();
-    inspectorTabs_->addTab(details, tr("Transition"));
+    auto* detailsScroll = new QScrollArea(inspectorTabs_);
+    detailsScroll->setWidgetResizable(true);
+    detailsScroll->setFrameShape(QFrame::NoFrame);
+    detailsScroll->setWidget(details);
+    inspectorTabs_->addTab(detailsScroll, tr("Transition"));
 
     connect(changeOutgoing, &QPushButton::clicked, this,
             [this] { setEndpoint(true); });
@@ -1516,7 +1727,7 @@ void TransitionEditorWindow::buildUi()
     eventTable_->setObjectName(QStringLiteral("transitionEditorEvents"));
     eventTable_->setColumnCount(4);
     eventTable_->setHorizontalHeaderLabels(
-        {tr("Beat"), tr("Target"), tr("Control"), tr("Value")});
+        {tr("When (+beats)"), tr("Song"), tr("Action"), tr("Value")});
     eventTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     eventTable_->horizontalHeader()->setStretchLastSection(true);
     eventTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -1529,7 +1740,6 @@ void TransitionEditorWindow::buildUi()
     roleCombo_ = new QComboBox(eventsPage);
     roleCombo_->addItem(tr("Outgoing"), static_cast<int>(Role::FromDeck));
     roleCombo_->addItem(tr("Incoming"), static_cast<int>(Role::ToDeck));
-    roleCombo_->addItem(tr("Mixer"), static_cast<int>(Role::Mixer));
     controlCombo_ = new QComboBox(eventsPage);
     for (int value = 0; value < static_cast<int>(ControlId::Count); ++value) {
         const ControlId control = static_cast<ControlId>(value);
@@ -1537,15 +1747,26 @@ void TransitionEditorWindow::buildUi()
             controlCombo_->addItem(controlText(control), value);
     }
     eventBeatSpin_ = new QDoubleSpinBox(eventsPage);
+    eventBeatSpin_->setObjectName(QStringLiteral("transitionEditorEventBeat"));
     eventBeatSpin_->setRange(-1000000.0, 1000000.0);
     eventBeatSpin_->setDecimals(6);
+    eventBeatSpin_->setSingleStep(0.01);
+    eventBeatSpin_->setToolTip(tr("timeline.at_beat: WHEN this action happens after transition start. "
+        "This does not change its cue's source position. Decimal beats are allowed."));
     eventValueSpin_ = new QDoubleSpinBox(eventsPage);
     eventValueSpin_->setRange(-1024.0, 1024.0);
     eventValueSpin_->setDecimals(6);
+    eventValueSpin_->setObjectName(QStringLiteral("transitionEditorEventValue"));
+    eventSourceBeatLabel_ = new QLabel(QStringLiteral("—"), eventsPage);
+    eventSourceBeatLabel_->setObjectName(
+        QStringLiteral("transitionEditorEventSourceBeat"));
+    eventSourceBeatLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     curveCombo_ = new QComboBox(eventsPage);
-    curveCombo_->addItem(tr("Step"), static_cast<int>(Curve::Step));
-    curveCombo_->addItem(tr("Linear"), static_cast<int>(Curve::Linear));
-    curveCombo_->addItem(tr("S-Curve"), static_cast<int>(Curve::SCurve));
+    curveCombo_->addItem(tr("Instant change (step)"), static_cast<int>(Curve::Step));
+    curveCombo_->addItem(tr("Ramp ends here (linear)"), static_cast<int>(Curve::Linear));
+    curveCombo_->addItem(tr("Eased ramp ends here (S-curve)"), static_cast<int>(Curve::SCurve));
+    curveCombo_->setToolTip(tr("A ramp ends at this event. It begins at the previous "
+        "point for this song and control, or the initial value at beat zero."));
     gestureControlCombo_ = new QComboBox(eventsPage);
     gestureControlCombo_->addItem(tr("None"), static_cast<int>(ControlId::Count));
     for (int value = 0; value < static_cast<int>(ControlId::Count); ++value) {
@@ -1564,25 +1785,65 @@ void TransitionEditorWindow::buildUi()
     eventReferenceEdit_->setPlaceholderText(tr("Optional semantic cue/loop ID"));
     eventForm->addRow(tr("Target"), roleCombo_);
     eventForm->addRow(tr("Control"), controlCombo_);
-    eventForm->addRow(tr("Beat"), eventBeatSpin_);
+    eventForm->addRow(tr("When: transition beat"), eventBeatSpin_);
+    eventForm->addRow(tr("Song position (derived)"), eventSourceBeatLabel_);
     eventForm->addRow(tr("Value"), eventValueSpin_);
     eventForm->addRow(tr("Curve"), curveCombo_);
     eventForm->addRow(tr("Cue/loop ID"), eventReferenceEdit_);
-    eventForm->addRow(tr("Input gesture"), gestureControlCombo_);
-    eventForm->addRow(tr("Pad mode"), gesturePadModeCombo_);
     eventsLayout->addLayout(eventForm);
+    auto* hintsToggle = new QPushButton(tr("Controller hints (optional) ▸"), eventsPage);
+    hintsToggle->setCheckable(true);
+    hintsToggle->setToolTip(tr("Teaching hints only: which button/pad to suggest. "
+        "They do not change the audio action or require a controller."));
+    auto* hints = new QWidget(eventsPage);
+    auto* hintsForm = new QFormLayout(hints);
+    hintsForm->setContentsMargins(0, 0, 0, 0);
+    hintsForm->addRow(tr("Suggested gesture"), gestureControlCombo_);
+    hintsForm->addRow(tr("Suggested pad mode"), gesturePadModeCombo_);
+    hints->hide();
+    eventsLayout->addWidget(hintsToggle);
+    eventsLayout->addWidget(hints);
+    connect(hintsToggle, &QPushButton::toggled, hints, &QWidget::setVisible);
+    valueMeaningLabel_ = new QLabel(eventsPage);
+    valueMeaningLabel_->setObjectName(QStringLiteral("transitionEditorValueMeaning"));
+    valueMeaningLabel_->setWordWrap(true);
+    valueMeaningLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    eventsLayout->addWidget(valueMeaningLabel_);
+    eventMeaningLabel_ = new QLabel(eventsPage);
+    eventMeaningLabel_->setObjectName(QStringLiteral("transitionEditorEventMeaning"));
+    eventMeaningLabel_->setWordWrap(true);
+    eventMeaningLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    eventMeaningLabel_->setTextFormat(Qt::PlainText);
+    eventsLayout->addWidget(eventMeaningLabel_);
+    moveLaunchTogetherCheck_ = new QCheckBox(tr("Move cue press + PLAY + release together"), eventsPage);
+    moveLaunchTogetherCheck_->setObjectName(QStringLiteral("transitionEditorMoveLaunchTogether"));
+    moveLaunchTogetherCheck_->setChecked(true);
+    moveLaunchTogetherCheck_->setToolTip(tr("When you change WHEN and click Apply, shift all three "
+        "launch events by the same amount. Source cue position is unchanged. Uncheck for raw event editing."));
+    eventsLayout->addWidget(moveLaunchTogetherCheck_);
+    editSourceButton_ = new QPushButton(tr("Where: edit source cue / loop…"), eventsPage);
+    editSourceButton_->setObjectName(QStringLiteral("transitionEditorEditSource"));
+    eventsLayout->addWidget(editSourceButton_);
+    connect(editSourceButton_, &QPushButton::clicked, this,
+            &TransitionEditorWindow::editReferencedPosition);
     auto* eventButtons = new QHBoxLayout;
     auto* add = new QPushButton(tr("Add"), eventsPage);
     auto* duplicate = new QPushButton(tr("Duplicate"), eventsPage);
     deleteEventButton_ = new QPushButton(tr("Delete"), eventsPage);
+    deleteEventButton_->setObjectName(
+        QStringLiteral("transitionEditorDeleteEvent"));
+    deleteEventButton_->setToolTip(
+        tr("Delete this event (Delete). Automation points select the next point on the same deck/control, or the previous one if there is no next point."));
     applyEventButton_ = new QPushButton(tr("Apply"), eventsPage);
+    applyEventButton_->setObjectName(
+        QStringLiteral("transitionEditorApplyEvent"));
     eventButtons->addWidget(add);
     eventButtons->addWidget(duplicate);
     eventButtons->addWidget(deleteEventButton_);
     eventButtons->addStretch();
     eventButtons->addWidget(applyEventButton_);
     eventsLayout->addLayout(eventButtons);
-    inspectorTabs_->addTab(eventsPage, tr("Events"));
+    eventsTabIndex_ = inspectorTabs_->addTab(eventsPage, tr("Events"));
     connect(add, &QPushButton::clicked, this, &TransitionEditorWindow::addEvent);
     connect(duplicate, &QPushButton::clicked, this,
             &TransitionEditorWindow::duplicateSelectedEvent);
@@ -1591,39 +1852,72 @@ void TransitionEditorWindow::buildUi()
     connect(applyEventButton_, &QPushButton::clicked, this,
             &TransitionEditorWindow::applyEventInspector);
     connect(controlCombo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (refreshing_ || selectedEvent_ >= 0) return;
+        if (refreshing_) return;
         const ControlId control = static_cast<ControlId>(
             controlCombo_->currentData().toInt());
         const auto [minimum, maximum] = controlEditRange(control);
         eventValueSpin_->setRange(minimum, maximum);
-        eventValueSpin_->setValue(defaultControlValue(control));
+        if (selectedEvent_ < 0)
+            eventValueSpin_->setValue(defaultControlValue(control));
         curveCombo_->setCurrentIndex(
             curveCombo_->findData(static_cast<int>(Curve::Step)));
         curveCombo_->setEnabled(!controlIsTrigger(control));
+        updateEditingHelp();
     });
-    connect(roleCombo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (refreshing_ || selectedEvent_ >= 0) return;
-        const Role role = static_cast<Role>(roleCombo_->currentData().toInt());
-        const ControlId control = static_cast<ControlId>(
-            controlCombo_->currentData().toInt());
-        if (role == Role::Mixer && control != ControlId::Crossfader)
-            controlCombo_->setCurrentIndex(
-                controlCombo_->findData(static_cast<int>(ControlId::Crossfader)));
-    });
+    connect(eventValueSpin_, &QDoubleSpinBox::valueChanged, this,
+            [this] { if (!refreshing_) updateEditingHelp(); });
 
     // Semantic cues, loops and timeline labels.
     auto* performancePage = new QWidget(inspectorTabs_);
     auto* performanceLayout = new QVBoxLayout(performancePage);
+    auto* definitionHelp = new QLabel(tr("Cues and loops: WHERE in a song (canonical track beats). "
+        "Events: WHEN to use them. Labels alone use transition beats and do not play audio. "
+        "These definitions never overwrite permanent song cues."), performancePage);
+    definitionHelp->setWordWrap(true);
+    definitionHelp->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    performanceLayout->addWidget(definitionHelp);
     performanceTable_ = new QTableWidget(performancePage);
     performanceTable_->setObjectName(QStringLiteral("transitionEditorPerformanceDefinitions"));
     performanceTable_->setColumnCount(11);
     performanceTable_->setHorizontalHeaderLabels(
-        {tr("Kind"), tr("Endpoint"), tr("ID"), tr("Start"), tr("End"),
+        {tr("Kind"), tr("Endpoint"), tr("ID"), tr("Source beat / label time"), tr("Loop end beat"),
          tr("Label"), tr("Purpose"), tr("Color"), tr("Pairing"),
          tr("Pad"), tr("Key")});
     performanceTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     performanceTable_->horizontalHeader()->setStretchLastSection(true);
     performanceLayout->addWidget(performanceTable_, 1);
+    auto* positionForm = new QFormLayout;
+    definitionStart_ = new QLineEdit(performancePage);
+    definitionStart_->setObjectName(QStringLiteral("transitionEditorDefinitionStart"));
+    definitionEnd_ = new QLineEdit(performancePage);
+    definitionEnd_->setObjectName(QStringLiteral("transitionEditorDefinitionEnd"));
+    definitionLength_ = new QLabel(performancePage);
+    definitionLength_->setObjectName(QStringLiteral("transitionEditorLoopLength"));
+    definitionLength_->setWordWrap(true);
+    positionForm->addRow(tr("Selected start / cue beat"), definitionStart_);
+    positionForm->addRow(tr("Selected loop end beat"), definitionEnd_);
+    positionForm->addRow(tr("Loop length"), definitionLength_);
+    performanceLayout->addLayout(positionForm);
+    auto* applyPosition = new QPushButton(tr("Apply selected position"), performancePage);
+    applyPosition->setObjectName(QStringLiteral("transitionEditorApplyDefinitionPosition"));
+    performanceLayout->addWidget(applyPosition);
+    connect(performanceTable_, &QTableWidget::currentCellChanged, this,
+            [this] { refreshDefinitionPosition(); });
+    const auto showLength = [this] {
+        if (!definitionEnd_->isEnabled()) return;
+        bool startOk = false, endOk = false;
+        const double start = definitionStart_->text().toDouble(&startOk);
+        const double end = definitionEnd_->text().toDouble(&endOk);
+        definitionLength_->setText(startOk && endOk && std::isfinite(end - start)
+            ? tr("%1 beats%2").arg(end - start, 0, 'g', 12)
+                .arg(std::fabs(end - start - std::round(end - start)) > 1e-6
+                    ? tr(" — fractional length; will shift phase against whole-beat phrases") : QString())
+            : tr("Enter finite start and end beats"));
+    };
+    connect(definitionStart_, &QLineEdit::textChanged, this, showLength);
+    connect(definitionEnd_, &QLineEdit::textChanged, this, showLength);
+    connect(applyPosition, &QPushButton::clicked, this,
+            &TransitionEditorWindow::applyDefinitionPosition);
     auto* definitionButtons = new QHBoxLayout;
     auto* addCueButton = new QPushButton(tr("+ Cue"), performancePage);
     auto* addLoopButton = new QPushButton(tr("+ Loop"), performancePage);
@@ -1637,7 +1931,10 @@ void TransitionEditorWindow::buildUi()
     definitionButtons->addStretch();
     definitionButtons->addWidget(applyDefinitions);
     performanceLayout->addLayout(definitionButtons);
-    inspectorTabs_->addTab(performancePage, tr("Cues / Loops"));
+    const int performanceTab = inspectorTabs_->addTab(performancePage, tr("Cues / Loops"));
+    connect(loopShortcut, &QPushButton::clicked, this, [this, performanceTab] {
+        inspectorTabs_->setCurrentIndex(performanceTab);
+    });
     connect(addCueButton, &QPushButton::clicked, this,
             &TransitionEditorWindow::addCue);
     connect(addLoopButton, &QPushButton::clicked, this,
@@ -1663,10 +1960,60 @@ void TransitionEditorWindow::buildUi()
     auto* initialPage = new QWidget(inspectorTabs_);
     auto* initialLayout = new QVBoxLayout(initialPage);
     auto* initialHelp = new QLabel(
-        tr("Double-click values to edit the state restored at transition beat zero."),
+        tr("Starting setup, before timeline actions. CUE return is not a named hot cue. "
+           "Outgoing position, playback and tempo are derived from Transition details "
+           "and read-only here. Other values: double-click to edit; Undo is available."),
         initialPage);
     initialHelp->setWordWrap(true);
+    initialHelp->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     initialLayout->addWidget(initialHelp);
+    auto* tempoForm = new QFormLayout;
+    incomingBpmEdit_ = new QLineEdit(initialPage);
+    incomingBpmEdit_->setObjectName(QStringLiteral("transitionEditorIncomingBpm"));
+    incomingTempoEdit_ = new QLineEdit(initialPage);
+    incomingTempoEdit_->setObjectName(QStringLiteral("transitionEditorIncomingTempoRatio"));
+    incomingTempoEdit_->setToolTip(tr("performance.initial_state.incoming.tempo_ratio — multiply by the incoming endpoint's native BPM."));
+    tempoForm->addRow(tr("Incoming playback BPM"), incomingBpmEdit_);
+    tempoForm->addRow(tr("Incoming tempo ratio"), incomingTempoEdit_);
+    initialLayout->addLayout(tempoForm);
+    auto* tempoActions = new QHBoxLayout;
+    auto* matchBpm = new QPushButton(tr("Match outgoing BPM"), initialPage);
+    matchBpm->setObjectName(QStringLiteral("transitionEditorMatchIncomingBpm"));
+    auto* applyTempo = new QPushButton(tr("Apply tempo"), initialPage);
+    applyTempo->setObjectName(QStringLiteral("transitionEditorApplyIncomingTempo"));
+    tempoActions->addWidget(matchBpm);
+    tempoActions->addWidget(applyTempo);
+    initialLayout->addLayout(tempoActions);
+    const auto ratioFromBpm = [this](const QString& text) {
+        bool ok = false;
+        const double bpm = text.toDouble(&ok);
+        const double native = document_->file().to.bpm;
+        if (ok && std::isfinite(bpm) && native > 0)
+            incomingTempoEdit_->setText(QString::number(bpm / native, 'g', QLocale::FloatingPointShortest));
+    };
+    connect(incomingBpmEdit_, &QLineEdit::textEdited, this, ratioFromBpm);
+    connect(incomingTempoEdit_, &QLineEdit::textEdited, this, [this](const QString& text) {
+        bool ok = false;
+        const double ratio = text.toDouble(&ok);
+        if (ok && std::isfinite(ratio)) incomingBpmEdit_->setText(
+            QString::number(ratio * document_->file().to.bpm, 'g', QLocale::FloatingPointShortest));
+    });
+    connect(matchBpm, &QPushButton::clicked, this, [this, ratioFromBpm] {
+        incomingBpmEdit_->setText(QString::number(document_->file().masterBpm, 'g', QLocale::FloatingPointShortest));
+        ratioFromBpm(incomingBpmEdit_->text());
+    });
+    connect(applyTempo, &QPushButton::clicked, this, [this] {
+        bool ok = false;
+        const double ratio = incomingTempoEdit_->text().toDouble(&ok);
+        if (!ok || !std::isfinite(ratio) || ratio < 0.01 || ratio > 4.0) {
+            statusBar()->showMessage(tr("Enter a tempo ratio from 0.01 to 4.0."), 6000);
+            return;
+        }
+        document_->mutate(tr("Edit incoming playback tempo"), [ratio](GvtFile& file) {
+            file.initialComplete = file.initialTo.captured = true;
+            file.initialTo.tempoRatio = ratio;
+        });
+    });
     initialTable_ = new QTableWidget(initialPage);
     initialTable_->setObjectName(QStringLiteral("transitionEditorInitialState"));
     initialTable_->setColumnCount(3);
@@ -1674,9 +2021,27 @@ void TransitionEditorWindow::buildUi()
         {tr("Control"), tr("Outgoing"), tr("Incoming")});
     initialTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     initialLayout->addWidget(initialTable_, 1);
-    inspectorTabs_->addTab(initialPage, tr("Initial State"));
+    const int initialTab = inspectorTabs_->addTab(initialPage, tr("Initial State"));
+    connect(tempoShortcut, &QPushButton::clicked, this, [this, initialTab] {
+        inspectorTabs_->setCurrentIndex(initialTab);
+    });
     connect(initialTable_, &QTableWidget::cellChanged, this,
             &TransitionEditorWindow::applyInitialCell);
+
+    auto* fieldsScroll = new QScrollArea(inspectorTabs_);
+    fieldsScroll->setWidgetResizable(true);
+    fieldsScroll->setFrameShape(QFrame::NoFrame);
+    fieldsEditor_ = new TransitionFieldsEditor(fieldsScroll);
+    fieldsScroll->setWidget(fieldsEditor_);
+    const int fieldsTab = inspectorTabs_->addTab(fieldsScroll, tr("All fields"));
+    connect(fieldsShortcut, &QPushButton::clicked, this, [this, fieldsTab] {
+        inspectorTabs_->setCurrentIndex(fieldsTab);
+    });
+    connect(fieldsEditor_, &TransitionFieldsEditor::applied, this,
+            [this](const GvtFile& file) { acceptStructuredEdit(file, tr("Edit document fields")); });
+    connect(fieldsEditor_, &TransitionFieldsEditor::pendingChanged, this, [this] {
+        saveAction_->setEnabled(isNew_ || document_->isDirty() || fieldsEditor_->hasPendingChanges());
+    });
 
     // Raw source remains available as an explicit advanced operation.
     auto* yamlPage = new QWidget(inspectorTabs_);
@@ -1696,7 +2061,13 @@ void TransitionEditorWindow::buildUi()
     connect(applyYamlButton, &QPushButton::clicked, this,
             &TransitionEditorWindow::applyYaml);
     inspectorTabs_->addTab(yamlPage, tr("YAML"));
+    for (int i = 0; i < inspectorTabs_->count(); ++i)
+        sectionCombo_->addItem(inspectorTabs_->tabText(i));
+    connect(sectionCombo_, &QComboBox::currentIndexChanged,
+            inspectorTabs_, &QTabWidget::setCurrentIndex);
     connect(inspectorTabs_, &QTabWidget::currentChanged, this, [this](int index) {
+        const QSignalBlocker blocker(sectionCombo_);
+        sectionCombo_->setCurrentIndex(index);
         if (inspectorTabs_->widget(index) == yamlEdit_->parentWidget())
             updateYamlFromModel();
     });
@@ -1709,11 +2080,15 @@ void TransitionEditorWindow::buildUi()
     auto* transportLayout = new QVBoxLayout(transport);
     transportLayout->setContentsMargins(6, 4, 6, 4);
     auto* transportTop = new QHBoxLayout;
-    playButton_ = new QPushButton(tr("▶ PREVIEW FROM CURSOR"), transport);
+    playButton_ = new QPushButton(tr("▶ PLAY FROM CURSOR (C)"), transport);
     playButton_->setObjectName(QStringLiteral("transitionEditorPlay"));
     stopButton_ = new QPushButton(tr("■ STOP"), transport);
+    stopButton_->setObjectName(QStringLiteral("transitionEditorStop"));
+    playButton_->setToolTip(
+        tr("Click or press Space to play. Hold C for momentary cue playback."));
+    stopButton_->setToolTip(tr("Stop and return to the audition cue"));
     writeAutomationCheck_ = new QCheckBox(tr("WRITE AUTOMATION"), transport);
-    playheadLabel_ = new QLabel(tr("Beat 0.000"), transport);
+    playheadLabel_ = new QLabel(tr("Transition +0.000 beats"), transport);
     transportTop->addWidget(playButton_);
     transportTop->addWidget(stopButton_);
     transportTop->addWidget(writeAutomationCheck_);
@@ -1775,7 +2150,6 @@ void TransitionEditorWindow::buildUi()
     addControlSlider(tr("OUT FADER"), Role::FromDeck, ControlId::Fader);
     addControlSlider(tr("OUT LOW"), Role::FromDeck, ControlId::EqLow);
     addControlSlider(tr("OUT FILTER"), Role::FromDeck, ControlId::Filter);
-    addControlSlider(tr("CROSSFADER"), Role::Mixer, ControlId::Crossfader);
     addControlSlider(tr("IN FILTER"), Role::ToDeck, ControlId::Filter);
     addControlSlider(tr("IN LOW"), Role::ToDeck, ControlId::EqLow);
     addControlSlider(tr("IN FADER"), Role::ToDeck, ControlId::Fader);
@@ -1869,23 +2243,32 @@ GvtTrackRef TransitionEditorWindow::trackReference(const TrackData& track) const
 TrackDataPtr TransitionEditorWindow::resolveTrack(const GvtFile& file,
                                                   bool outgoing) const
 {
-    if (!library_) return {};
     TrackDataPtr best;
     int bestQuality = static_cast<int>(MatchQuality::None);
-    for (int row = 0; row < library_->trackCount(); ++row) {
-        const TrackDataPtr track = library_->trackAt(row);
-        if (!track) continue;
+    const auto consider = [&](const TrackDataPtr& track) {
+        if (!track) return;
         const bool matches = store_
             ? store_->matchesEndpoint(file, outgoing, *track)
             : isReliableTrackMatch(matchTrack(outgoing ? file.from : file.to,
                                               *track));
-        if (!matches) continue;
+        if (!matches) return;
         const int quality = static_cast<int>(
             matchTrack(outgoing ? file.from : file.to, *track));
         if (!best || quality > bestQuality) {
             best = track;
             bestQuality = quality;
         }
+    };
+    if (library_) {
+        for (int row = 0; row < library_->trackCount(); ++row)
+            consider(library_->trackAt(row));
+    }
+    // A transition opened for the pair already loaded on the decks should be
+    // immediately auditionable even while the library scan is still catching
+    // up (and makes this fallback independent of a particular asset path).
+    if (liveEngine_) {
+        for (int deck = 0; deck < kNumDecks; ++deck)
+            consider(liveEngine_->deck(deck).track());
     }
     return best;
 }
@@ -1968,7 +2351,7 @@ bool TransitionEditorWindow::chooseEndpoints(TrackDataPtr& outgoing,
 
 bool TransitionEditorWindow::createTransition()
 {
-    if (isVisible() && (document_->isDirty() || isNew_) &&
+    if (isVisible() && (document_->isDirty() || isNew_ || fieldsEditor_->hasPendingChanges()) &&
         !ensureCanDiscard())
         return false;
     if (maybeRecoverUnsavedDraft()) return true;
@@ -1992,27 +2375,31 @@ bool TransitionEditorWindow::createTransition()
     file.anchorToBeat = 0.0;
     file.endBeat = 32.0;
     file.initialComplete = true;
-    file.initialMixerCaptured = true;
+    file.initialMixerCaptured = false;
     file.initialCrossfader = 0.0;
     file.initialFrom = defaultInitial(true, 1.0);
     const double incomingRatio = incoming->bpm > 0.0
         ? file.masterBpm / incoming->bpm : 1.0;
     file.initialTo = defaultInitial(false, incomingRatio);
 
-    // A basic crossfade template is useful but remains opt-in so a blank
+    // A basic channel-fader blend remains opt-in so a blank
     // document never silently claims an artistic decision.
     if (QMessageBox::question(
             this, tr("Start with a basic blend?"),
-            tr("Add IN PLAY at beat 0 and a 32-beat S-curve crossfade?\n\n"
+            tr("Add IN PLAY at beat 0 and a 32-beat S-curve channel blend?\n\n"
                "Choose No for a completely blank timeline."),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No) == QMessageBox::Yes) {
         file.events.push_back(
             {0.0, Role::ToDeck, ControlId::Play, 1.0, Curve::Step});
         file.events.push_back(
-            {0.0, Role::Mixer, ControlId::Crossfader, 0.0, Curve::Step});
+            {0.0, Role::FromDeck, ControlId::Fader, 1.0, Curve::Step});
         file.events.push_back(
-            {32.0, Role::Mixer, ControlId::Crossfader, 1.0, Curve::SCurve});
+            {0.0, Role::ToDeck, ControlId::Fader, 0.0, Curve::Step});
+        file.events.push_back(
+            {32.0, Role::FromDeck, ControlId::Fader, 0.0, Curve::SCurve});
+        file.events.push_back(
+            {32.0, Role::ToDeck, ControlId::Fader, 1.0, Curve::SCurve});
     }
     outgoing_ = outgoing;
     incoming_ = incoming;
@@ -2024,7 +2411,7 @@ bool TransitionEditorWindow::createTransition()
 
 void TransitionEditorWindow::openTransition(const GvtFile& original)
 {
-    if (isVisible() && (document_->isDirty() || isNew_) &&
+    if (isVisible() && (document_->isDirty() || isNew_ || fieldsEditor_->hasPendingChanges()) &&
         !ensureCanDiscard())
         return;
     GvtFile file = original;
@@ -2062,10 +2449,12 @@ void TransitionEditorWindow::setWorkingFile(const GvtFile& file, bool isNew)
     }
     selectedEvent_ = -1;
     originalName_ = file.name;
+    fieldsEditor_->setDocument(file, true);
     document_->reset(file);
     timeline_->setTracks(outgoing_, incoming_);
     timeline_->setPlayheadBeat(0.0);
     refreshUi();
+    followEventSequence(0.0);
     show();
     raise();
     activateWindow();
@@ -2097,15 +2486,30 @@ void TransitionEditorWindow::refreshUi()
     };
     outgoingTrackLabel_->setText(endpointText(file.from, outgoing_));
     incomingTrackLabel_->setText(endpointText(file.to, incoming_));
+    const double incomingBpm = file.to.bpm * file.initialTo.tempoRatio;
+    incomingBpmEdit_->setText(QString::number(incomingBpm, 'g', QLocale::FloatingPointShortest));
+    incomingTempoEdit_->setText(QString::number(file.initialTo.tempoRatio, 'g', QLocale::FloatingPointShortest));
+    timingSummaryLabel_->setText(tr(
+        "Two rulers: transition +0 is outgoing song beat %1. Events edit WHEN; "
+        "cue/loop definitions edit WHERE.\n"
+        "Incoming setup: %2. Preview uses Perform setup; PRIME retains live outgoing tempo.\n"
+        "Apply → audition → Save. Applying does not overwrite the saved file.")
+        .arg(file.anchorFromBeat, 0, 'f', 3)
+        .arg(file.initialComplete && file.initialTo.captured && incomingBpm > 0.0
+            ? tr("%1 BPM%2").arg(incomingBpm, 0, 'f', 3)
+                .arg(std::fabs(incomingBpm - file.masterBpm) > 0.01
+                    ? tr(" — differs from outgoing BPM; may drift") : QString())
+            : tr("legacy/live controls, not a complete saved snapshot")));
     rebuildEventTable();
     rebuildPerformanceDefinitions();
     rebuildInitialStateTable();
+    fieldsEditor_->setDocument(file);
     updateEventInspector();
     updateValidation();
     timeline_->setSelectedEvent(selectedEvent_);
     if (inspectorTabs_->currentWidget() == yamlEdit_->parentWidget())
         updateYamlFromModel();
-    saveAction_->setEnabled(isNew_ || document_->isDirty());
+    saveAction_->setEnabled(isNew_ || document_->isDirty() || fieldsEditor_->hasPendingChanges());
     setWindowTitle(tr("%1%2 — Transition Editor")
                        .arg(document_->isDirty() || isNew_ ? QStringLiteral("● ")
                                                            : QString(),
@@ -2188,9 +2592,12 @@ void TransitionEditorWindow::prepareRequiredStems()
 
 void TransitionEditorWindow::rebuildEventTable()
 {
+    const QSignalBlocker blocker(eventTable_);
     eventTable_->setRowCount(static_cast<int>(document_->file().events.size()));
     for (int row = 0; row < eventTable_->rowCount(); ++row) {
         const GvtEvent& event = document_->file().events[static_cast<std::size_t>(row)];
+        eventTable_->setRowHidden(row, !transitionEventIsExecutable(event));
+        if (!transitionEventIsExecutable(event)) continue;
         const QString reference = !event.cueId.isEmpty() ? event.cueId : event.loopId;
         const QString control = controlText(event.control) +
             (reference.isEmpty() ? QString() : QStringLiteral(" • ") + reference);
@@ -2212,9 +2619,75 @@ void TransitionEditorWindow::selectEvent(int index)
         index = -1;
     selectedEvent_ = index;
     timeline_->setSelectedEvent(index);
-    if (index >= 0 && eventTable_->currentRow() != index)
-        eventTable_->selectRow(index);
+    if (index >= 0) {
+        if (eventsTabIndex_ >= 0)
+            inspectorTabs_->setCurrentIndex(eventsTabIndex_);
+        if (eventTable_->currentRow() != index)
+            eventTable_->selectRow(index);
+        if (QTableWidgetItem* item = eventTable_->item(index, 0))
+            eventTable_->scrollToItem(item,
+                                      QAbstractItemView::PositionAtCenter);
+    } else {
+        // Qt may retain the row that shifted into the deleted point's place.
+        // An empty lane must not leave another control apparently selected.
+        const QSignalBlocker blocker(eventTable_);
+        eventTable_->clearSelection();
+        eventTable_->setCurrentCell(-1, -1);
+    }
     updateEventInspector();
+}
+
+int TransitionEditorWindow::nextExecutableEventAtOrAfter(double beat) const
+{
+    int lastExecutable = -1;
+    const auto& events = document_->file().events;
+    for (int index = 0; index < static_cast<int>(events.size()); ++index) {
+        const GvtEvent& event = events[static_cast<std::size_t>(index)];
+        if (!transitionEventIsExecutable(event)) continue;
+        lastExecutable = index;
+        if (event.beat + 1e-6 >= beat) return index;
+    }
+    // Once the cursor passes the last action, retain the final row instead of
+    // making the event sequence disappear at the end of an audition.
+    return lastExecutable;
+}
+
+int TransitionEditorWindow::nextExecutableEventFromIndex(
+    int index, const GvtEvent& deleted) const
+{
+    const auto& events = document_->file().events;
+    if (events.empty()) return -1;
+    const auto eligible = [&deleted](const GvtEvent& candidate) {
+        // Automation lanes are independent (deck/role, control) streams.
+        // Keep discrete action-card deletion's existing chronological behavior.
+        return transitionEventIsExecutable(candidate) &&
+            (controlIsTrigger(deleted.control) ||
+             (candidate.role == deleted.role && candidate.control == deleted.control));
+    };
+    for (int candidate = std::max(0, index);
+         candidate < static_cast<int>(events.size()); ++candidate) {
+        if (eligible(events[static_cast<std::size_t>(candidate)]))
+            return candidate;
+    }
+    for (int candidate = std::min(index - 1,
+                                  static_cast<int>(events.size()) - 1);
+         candidate >= 0; --candidate) {
+        if (eligible(events[static_cast<std::size_t>(candidate)]))
+            return candidate;
+    }
+    return -1;
+}
+
+void TransitionEditorWindow::followEventSequence(double beat)
+{
+    const int next = nextExecutableEventAtOrAfter(beat);
+    if (next != selectedEvent_) {
+        selectEvent(next);
+        return;
+    }
+    if (next >= 0 && eventsTabIndex_ >= 0 &&
+        inspectorTabs_->currentIndex() != eventsTabIndex_)
+        inspectorTabs_->setCurrentIndex(eventsTabIndex_);
 }
 
 void TransitionEditorWindow::updateEventInspector()
@@ -2231,6 +2704,8 @@ void TransitionEditorWindow::updateEventInspector()
     applyEventButton_->setEnabled(selected);
     deleteEventButton_->setEnabled(selected);
     if (!selected) {
+        eventSourceBeatLabel_->setText(QStringLiteral("—"));
+        eventSourceBeatLabel_->setToolTip({});
         eventBeatSpin_->setValue(timeline_->playheadBeat());
         const ControlId control = static_cast<ControlId>(
             controlCombo_->currentData().toInt());
@@ -2243,10 +2718,25 @@ void TransitionEditorWindow::updateEventInspector()
         eventReferenceEdit_->clear();
         gestureControlCombo_->setCurrentIndex(0);
         gesturePadModeCombo_->setCurrentIndex(0);
+        updateEditingHelp();
         return;
     }
     const GvtEvent& event =
         document_->file().events[static_cast<std::size_t>(selectedEvent_)];
+    const auto sourcePosition = timeline_->sourcePositionAt(event.role,
+                                                             event.beat);
+    if (sourcePosition) {
+        eventSourceBeatLabel_->setText(
+            QString::number(sourcePosition->sourceBeat, 'f', 6));
+        eventSourceBeatLabel_->setToolTip(
+            sourcePosition->audible
+                ? tr("Canonical beat playing at this transition event")
+                : tr("Canonical deck position while transport is stopped"));
+    } else {
+        eventSourceBeatLabel_->setText(QStringLiteral("—"));
+        eventSourceBeatLabel_->setToolTip(
+            tr("Mixer/global events do not have a track beat"));
+    }
     roleCombo_->setCurrentIndex(roleCombo_->findData(static_cast<int>(event.role)));
     controlCombo_->setCurrentIndex(
         controlCombo_->findData(static_cast<int>(event.control)));
@@ -2262,6 +2752,100 @@ void TransitionEditorWindow::updateEventInspector()
     gesturePadModeCombo_->setCurrentIndex(gesturePadModeCombo_->findData(
         event.gesturePadMode));
     curveCombo_->setEnabled(!controlIsTrigger(event.control));
+    updateEditingHelp();
+}
+
+void TransitionEditorWindow::updateEditingHelp()
+{
+    if (!valueMeaningLabel_ || !editSourceButton_) return;
+    const ControlId control = static_cast<ControlId>(controlCombo_->currentData().toInt());
+    QString units;
+    if (control == ControlId::Tempo)
+        units = tr("Ratio: 1 = the recorded native BPM; 1.1 = 10% faster. Local grid corrections are compensated.");
+    else if (control == ControlId::FxType)
+        units = tr("FX type: 0 = Echo, 1 = Reverb, 2 = Flanger.");
+    else if (control == ControlId::LoopAuto || control == ControlId::BeatJump ||
+             control == ControlId::FxBeats)
+        units = tr("Value is a beat count, not a percentage. Negative beat jumps move backward.");
+    else if (controlIsTrigger(control) || control == ControlId::FxOn ||
+             control == ControlId::Quantize)
+        units = tr("1 = press / on; 0 = release / off. Button actions are instantaneous.");
+    else if (control == ControlId::EqLow || control == ControlId::EqMid ||
+             control == ControlId::EqHigh || control == ControlId::Filter)
+        units = tr("Normalized knob: 0…1; 0.5 is the neutral center.");
+    else
+        units = tr("Normalized level: 0 = 0%, 0.5 = 50%, 1 = 100%.");
+    valueMeaningLabel_->setText(units);
+    eventValueSpin_->setToolTip(units);
+    editSourceButton_->setEnabled(false);
+    moveLaunchTogetherCheck_->setVisible(false);
+    const auto& file = document_->file();
+    if (selectedEvent_ < 0 || selectedEvent_ >= static_cast<int>(file.events.size())) {
+        eventMeaningLabel_->setText(tr("Choose an action. WHEN is measured from transition start; "
+            "the song position is derived and cannot be edited here."));
+        return;
+    }
+    const auto& event = file.events[static_cast<std::size_t>(selectedEvent_)];
+    editSourceButton_->setEnabled(!event.cueId.isEmpty() || !event.loopId.isEmpty());
+    for (const auto& action : humanTransitionActions(file)) {
+        if (action.kind == HumanActionKind::HotCueStart &&
+            std::find(action.eventIndices.begin(), action.eventIndices.end(),
+                      selectedEvent_) != action.eventIndices.end()) {
+            moveLaunchTogetherCheck_->setVisible(true);
+            const auto& launch = file.events[static_cast<std::size_t>(action.eventIndices.front())];
+            editSourceButton_->setEnabled(!launch.cueId.isEmpty());
+            eventMeaningLabel_->setText(tr("Hot-cue launch: the cue press at +%1 starts/jumps the song; "
+                "PLAY only latches it. Keep the checkbox on to shift the whole launch with Apply. "
+                "To choose different audio, edit the source cue below.")
+                .arg(action.startBeat, 0, 'f', 6));
+            return;
+        }
+    }
+    if (!event.cueId.isEmpty())
+        eventMeaningLabel_->setText(tr("This action uses transition-owned cue “%1”. "
+            "WHEN moves this press/release in time; edit its source cue to choose WHERE in the song.")
+            .arg(event.cueId));
+    else if (!event.loopId.isEmpty())
+        eventMeaningLabel_->setText(tr("This action uses saved loop “%1”. WHEN schedules the gesture; "
+            "the loop's source IN/OUT beats determine which audio repeats.").arg(event.loopId));
+    else if (event.control == ControlId::Play && event.role == Role::ToDeck)
+        eventMeaningLabel_->setText(tr("Incoming PLAY launches from song beat %1, unless a held cue "
+            "is already playing (then PLAY latches it). Edit that source in Transition details.")
+            .arg(file.anchorToBeat, 0, 'f', 6));
+    else if (!controlIsTrigger(event.control) && event.curve != Curve::Step)
+        eventMeaningLabel_->setText(tr("Ramp destination: reaches this value at +%1. It starts at "
+            "the previous point for this song/control, or the initial value at +0; other controls do not split it.")
+            .arg(event.beat, 0, 'f', 6));
+    else
+        eventMeaningLabel_->setText(tr("This action happens at transition +%1. The displayed song "
+            "position accounts for playback, cues and loops; it is not an independent event time.")
+            .arg(event.beat, 0, 'f', 6));
+}
+
+void TransitionEditorWindow::editReferencedPosition()
+{
+    const auto& file = document_->file();
+    if (selectedEvent_ < 0 || selectedEvent_ >= static_cast<int>(file.events.size())) return;
+    const auto& event = file.events[static_cast<std::size_t>(selectedEvent_)];
+    QString id = event.cueId.isEmpty() ? event.loopId : event.cueId;
+    if (id.isEmpty()) {
+        for (const auto& action : humanTransitionActions(file)) {
+            if (action.kind == HumanActionKind::HotCueStart &&
+                std::find(action.eventIndices.begin(), action.eventIndices.end(),
+                          selectedEvent_) != action.eventIndices.end())
+                id = file.events[static_cast<std::size_t>(action.eventIndices.front())].cueId;
+        }
+    }
+    if (id.isEmpty()) return;
+    inspectorTabs_->setCurrentWidget(performanceTable_->parentWidget());
+    for (int row = 0; row < performanceTable_->rowCount(); ++row) {
+        if (performanceTable_->item(row, 2) && performanceTable_->item(row, 2)->text() == id) {
+            performanceTable_->setCurrentCell(row, 3);
+            performanceTable_->scrollToItem(performanceTable_->item(row, 3));
+            performanceTable_->setFocus();
+            return;
+        }
+    }
 }
 
 void TransitionEditorWindow::addEvent()
@@ -2269,10 +2853,10 @@ void TransitionEditorWindow::addEvent()
     GvtEvent event;
     event.role = static_cast<Role>(roleCombo_->currentData().toInt());
     event.control = static_cast<ControlId>(controlCombo_->currentData().toInt());
-    if ((event.role == Role::Mixer) !=
-        (event.control == ControlId::Crossfader)) {
+    if (event.role == Role::Mixer ||
+        !transitionEventIsExecutable(event)) {
         QMessageBox::warning(this, tr("Invalid target"),
-            tr("Mixer actions can only control the crossfader; deck actions need an endpoint."));
+            tr("Crossfader and mixer actions are compatibility-only and cannot be authored."));
         return;
     }
     event.beat = eventBeatSpin_->value();
@@ -2334,12 +2918,13 @@ void TransitionEditorWindow::addEvent()
 void TransitionEditorWindow::deleteSelectedEvent()
 {
     const int index = selectedEvent_;
-    if (index < 0) return;
+    if (index < 0 || index >= static_cast<int>(document_->file().events.size())) return;
+    const GvtEvent deleted = document_->file().events[static_cast<std::size_t>(index)];
     document_->mutate(tr("Delete timeline event"), [index](GvtFile& file) {
         if (index >= 0 && index < static_cast<int>(file.events.size()))
             file.events.erase(file.events.begin() + index);
     });
-    selectEvent(-1);
+    selectEvent(nextExecutableEventFromIndex(index, deleted));
 }
 
 void TransitionEditorWindow::duplicateSelectedEvent()
@@ -2364,10 +2949,10 @@ void TransitionEditorWindow::applyEventInspector()
     GvtEvent event = document_->file().events[static_cast<std::size_t>(index)];
     event.role = static_cast<Role>(roleCombo_->currentData().toInt());
     event.control = static_cast<ControlId>(controlCombo_->currentData().toInt());
-    if ((event.role == Role::Mixer) !=
-        (event.control == ControlId::Crossfader)) {
+    if (event.role == Role::Mixer ||
+        !transitionEventIsExecutable(event)) {
         QMessageBox::warning(this, tr("Invalid target"),
-            tr("Mixer events can only edit the crossfader; deck controls need an endpoint."));
+            tr("Crossfader and mixer actions are compatibility-only and cannot be edited."));
         return;
     }
     event.beat = eventBeatSpin_->value();
@@ -2420,19 +3005,44 @@ void TransitionEditorWindow::applyEventInspector()
             tr("This action must reference a transition-owned cue or loop ID."));
         return;
     }
-    document_->mutate(tr("Edit timeline event"), [index, event](GvtFile& file) {
+    std::vector<int> launchGroup;
+    const auto& original = document_->file().events[static_cast<std::size_t>(index)];
+    if (moveLaunchTogetherCheck_->isChecked() && event.role == original.role &&
+        event.control == original.control && event.cueId == original.cueId &&
+        event.loopId == original.loopId) {
+        for (const auto& action : humanTransitionActions(document_->file()))
+            if (action.kind == HumanActionKind::HotCueStart &&
+                std::find(action.eventIndices.begin(), action.eventIndices.end(), index)
+                    != action.eventIndices.end()) launchGroup = action.eventIndices;
+    }
+    int movedIndex = -1;
+    document_->mutate(launchGroup.empty() ? tr("Edit timeline event") : tr("Edit launch gesture"),
+                      [index, event, launchGroup, &movedIndex](GvtFile& file) {
         if (index < 0 || index >= static_cast<int>(file.events.size())) return;
+        const double delta = event.beat - file.events[static_cast<std::size_t>(index)].beat;
+        for (int member : launchGroup)
+            if (member != index) file.events[static_cast<std::size_t>(member)].beat += delta;
         file.events[static_cast<std::size_t>(index)] = event;
-        std::stable_sort(file.events.begin(), file.events.end(),
-                         [](const GvtEvent& a, const GvtEvent& b) {
-                             return a.beat < b.beat;
-                         });
+        // Sort tagged copies so equal-beat order and exact selected identity
+        // survive moving a gesture across unrelated/interleaved controls.
+        std::vector<std::pair<int, GvtEvent>> tagged;
+        for (int i = 0; i < static_cast<int>(file.events.size()); ++i)
+            tagged.emplace_back(i, file.events[static_cast<std::size_t>(i)]);
+        std::stable_sort(tagged.begin(), tagged.end(), [](const auto& a, const auto& b) {
+            return a.second.beat < b.second.beat;
+        });
+        for (int i = 0; i < static_cast<int>(tagged.size()); ++i) {
+            if (tagged[static_cast<std::size_t>(i)].first == index) movedIndex = i;
+            file.events[static_cast<std::size_t>(i)] = std::move(tagged[static_cast<std::size_t>(i)].second);
+        }
     });
-    selectEvent(-1);
+    selectEvent(movedIndex);
 }
 
 void TransitionEditorWindow::rebuildPerformanceDefinitions()
 {
+    const QSignalBlocker blocker(performanceTable_);
+    const int selectedRow = performanceTable_->currentRow();
     performanceTable_->setRowCount(0);
     const auto addRow = [this](const QStringList& values,
                                const QString& kind, int index) {
@@ -2455,7 +3065,7 @@ void TransitionEditorWindow::rebuildPerformanceDefinitions()
     for (int index = 0; index < static_cast<int>(file.transitionCues.size()); ++index) {
         const TransitionHotCue& cue = file.transitionCues[static_cast<std::size_t>(index)];
         addRow({tr("Cue"), roleText(cue.role), cue.id,
-                QString::number(cue.trackBeat, 'f', 6), QString(), cue.label,
+                QString::number(cue.trackBeat, 'g', QLocale::FloatingPointShortest), QString(), cue.label,
                 cue.purpose, cue.color, cue.pairingGroup,
                 cue.preferredPad >= 0 ? QString::number(cue.preferredPad + 1)
                                       : QString(),
@@ -2466,8 +3076,8 @@ void TransitionEditorWindow::rebuildPerformanceDefinitions()
         const TransitionSavedLoop& loop =
             file.transitionLoops[static_cast<std::size_t>(index)];
         addRow({tr("Loop"), roleText(loop.role), loop.id,
-                QString::number(loop.startTrackBeat, 'f', 6),
-                QString::number(loop.endTrackBeat, 'f', 6), loop.label,
+                QString::number(loop.startTrackBeat, 'g', QLocale::FloatingPointShortest),
+                QString::number(loop.endTrackBeat, 'g', QLocale::FloatingPointShortest), loop.label,
                 loop.purpose, loop.color, loop.pairingGroup,
                 loop.preferredPad >= 0 ? QString::number(loop.preferredPad + 1)
                                        : QString(),
@@ -2477,10 +3087,50 @@ void TransitionEditorWindow::rebuildPerformanceDefinitions()
     for (int index = 0; index < static_cast<int>(file.cues.size()); ++index) {
         const GvtCue& cue = file.cues[static_cast<std::size_t>(index)];
         addRow({tr("Label"), QString(), QString(),
-                QString::number(cue.beat, 'f', 6), QString(), cue.label,
+                QString::number(cue.beat, 'g', QLocale::FloatingPointShortest), QString(), cue.label,
                 QString(), QString(), QString(), QString(), QString()},
                QStringLiteral("label"), index);
     }
+    if (performanceTable_->rowCount())
+        performanceTable_->setCurrentCell(std::clamp(selectedRow, 0, performanceTable_->rowCount() - 1), 0);
+    refreshDefinitionPosition();
+}
+
+void TransitionEditorWindow::refreshDefinitionPosition()
+{
+    const int row = performanceTable_->currentRow();
+    const auto* item = performanceTable_->item(row, 0);
+    const bool loop = item && item->data(Qt::UserRole).toString() == "loop";
+    definitionStart_->setEnabled(item);
+    definitionEnd_->setEnabled(loop);
+    definitionStart_->setText(item ? performanceTable_->item(row, 3)->text() : QString());
+    definitionEnd_->setText(loop ? performanceTable_->item(row, 4)->text() : QString());
+    if (!loop) definitionLength_->setText(tr("Select a loop to see its repeat length"));
+}
+
+void TransitionEditorWindow::applyDefinitionPosition()
+{
+    const auto* item = performanceTable_->item(performanceTable_->currentRow(), 0);
+    if (!item) return;
+    const QString kind = item->data(Qt::UserRole).toString();
+    const int index = item->data(Qt::UserRole + 1).toInt();
+    bool startOk = false, endOk = false;
+    const double start = definitionStart_->text().toDouble(&startOk);
+    const double end = definitionEnd_->text().toDouble(&endOk);
+    if (!startOk || !std::isfinite(start) ||
+        (kind == "loop" && (!endOk || !std::isfinite(end) || end <= start))) {
+        statusBar()->showMessage(tr("Enter finite beats; a loop end must be after its start."), 6000);
+        return;
+    }
+    document_->mutate(tr("Edit selected cue/loop position"), [=](GvtFile& file) {
+        if (kind == "loop" && index >= 0 && index < static_cast<int>(file.transitionLoops.size())) {
+            file.transitionLoops[index].startTrackBeat = start;
+            file.transitionLoops[index].endTrackBeat = end;
+        } else if (kind == "cue" && index >= 0 && index < static_cast<int>(file.transitionCues.size()))
+            file.transitionCues[index].trackBeat = start;
+        else if (kind == "label" && index >= 0 && index < static_cast<int>(file.cues.size()))
+            file.cues[index].beat = start;
+    });
 }
 
 void TransitionEditorWindow::addCue()
@@ -2729,8 +3379,8 @@ void TransitionEditorWindow::rebuildInitialStateTable()
 {
     struct Row { const char* key; const char* label; };
     static constexpr Row rows[] = {
-        {"playing", "Playing (0/1)"}, {"position", "Position beat"},
-        {"cue", "Cue beat"}, {"tempo", "Tempo ratio"},
+        {"playing", "Already playing (0/1)"}, {"position", "Setup song beat"},
+        {"cue", "CUE return song beat"}, {"tempo", "Tempo ratio"},
         {"fader", "Channel fader"}, {"eq_low", "EQ low"},
         {"eq_mid", "EQ mid"}, {"eq_high", "EQ high"},
         {"filter", "Filter"}, {"quantize", "Quantize (0/1)"},
@@ -2773,6 +3423,7 @@ void TransitionEditorWindow::rebuildInitialStateTable()
         label->setFlags(label->flags() & ~Qt::ItemIsEditable);
         initialTable_->setItem(row, 0, label);
         if (QString::fromLatin1(rows[row].key) == QLatin1String("crossfader")) {
+            initialTable_->setRowHidden(row, true);
             initialTable_->setItem(row, 1, new QTableWidgetItem(
                 QString::number(document_->file().initialCrossfader, 'f', 6)));
             auto* blank = new QTableWidgetItem;
@@ -2781,10 +3432,25 @@ void TransitionEditorWindow::rebuildInitialStateTable()
         } else {
             initialTable_->setItem(row, 1, new QTableWidgetItem(QString::number(
                 value(document_->file().initialFrom, QString::fromLatin1(rows[row].key)),
-                'f', 6)));
+                'g', QLocale::FloatingPointShortest)));
             initialTable_->setItem(row, 2, new QTableWidgetItem(QString::number(
                 value(document_->file().initialTo, QString::fromLatin1(rows[row].key)),
-                'f', 6)));
+                'g', QLocale::FloatingPointShortest)));
+            const QString key = QString::fromLatin1(rows[row].key);
+            if (key == QLatin1String("position") || key == QLatin1String("playing") ||
+                key == QLatin1String("tempo")) {
+                auto* item = initialTable_->item(row, 1);
+                const auto& file = document_->file();
+                const double actual = key == QLatin1String("position") ? file.anchorFromBeat
+                    : key == QLatin1String("playing") ? 1.0
+                    : file.from.bpm > 0.0 && file.masterBpm > 0.0
+                        ? file.masterBpm / file.from.bpm : file.initialFrom.tempoRatio;
+                item->setToolTip(tr("Derived for Perform and Preview. Edit Transition details instead. "
+                    "Historical snapshot value %1 is preserved in the file, not silently rewritten.")
+                    .arg(item->text()));
+                item->setText(QString::number(actual, 'f', 6));
+                item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+            }
         }
     }
 }
@@ -2805,6 +3471,7 @@ void TransitionEditorWindow::applyInitialCell(int row, int column)
         if (column != 1 || value < 0.0 || value > 1.0) { refreshUi(); return; }
         document_->mutate(tr("Edit initial crossfader"), [value](GvtFile& file) {
             file.initialMixerCaptured = true;
+            file.initialCrossfaderPresent = true;
             file.initialCrossfader = value;
         });
         return;
@@ -2855,16 +3522,18 @@ void TransitionEditorWindow::applyYaml()
             QMessageBox::Apply | QMessageBox::Cancel,
             QMessageBox::Cancel) != QMessageBox::Apply)
         return;
+    acceptStructuredEdit(parsed, tr("Apply YAML source"));
+}
+
+void TransitionEditorWindow::acceptStructuredEdit(GvtFile parsed, const QString& description)
+{
     if (parsed.id != document_->file().id ||
         !sameEndpointProfile(parsed.from, document_->file().from) ||
         !sameEndpointProfile(parsed.to, document_->file().to))
         requiresSaveAs_ = true;
     parsed.filePath = document_->file().filePath;
     parsed.sourceFormat = document_->file().sourceFormat;
-    document_->apply(parsed, tr("Apply YAML source"));
-    outgoing_ = resolveTrack(parsed, true);
-    incoming_ = resolveTrack(parsed, false);
-    timeline_->setTracks(outgoing_, incoming_);
+    document_->apply(parsed, description);
 }
 
 void TransitionEditorWindow::updateYamlFromModel()
@@ -3056,6 +3725,11 @@ bool TransitionEditorWindow::maybeRecoverUnsavedDraft()
 
 bool TransitionEditorWindow::persist(bool forceSaveAs)
 {
+    if (!fieldsEditor_->applyPending()) {
+        inspectorTabs_->setCurrentIndex(sectionCombo_->findText(tr("All fields")));
+        return false;
+    }
+    forceSaveAs = forceSaveAs || requiresSaveAs_;
     const QString previousDraftPath = draftPath();
     const QStringList errors = document_->validationErrors();
     if (!errors.isEmpty()) {
@@ -3194,6 +3868,17 @@ void TransitionEditorWindow::saveAs()
 
 bool TransitionEditorWindow::ensureCanDiscard()
 {
+    if (fieldsEditor_->hasPendingChanges()) {
+        const auto choice = QMessageBox::question(this, tr("Unapplied field changes"),
+            tr("Apply the All fields draft before leaving? Discard only drops that unapplied draft."),
+            QMessageBox::Apply | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (choice == QMessageBox::Cancel) return false;
+        if (choice == QMessageBox::Apply && !fieldsEditor_->applyPending()) {
+            inspectorTabs_->setCurrentIndex(sectionCombo_->findText(tr("All fields")));
+            return false;
+        }
+        if (choice == QMessageBox::Discard) fieldsEditor_->discardPending();
+    }
     if (!document_->isDirty() && !isNew_) return true;
     QMessageBox prompt(this);
     prompt.setIcon(QMessageBox::Warning);
@@ -3225,6 +3910,148 @@ void TransitionEditorWindow::closeEvent(QCloseEvent* event)
     event->accept();
 }
 
+bool TransitionEditorWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    QWidget* source = qobject_cast<QWidget*>(watched);
+    const bool fromEditor = source &&
+        (source == this || isAncestorOf(source));
+    if (fromEditor && event->type() == QEvent::KeyPress &&
+        handleEditorKeyPress(static_cast<QKeyEvent*>(event)))
+        return true;
+    if (fromEditor && event->type() == QEvent::KeyRelease &&
+        handleEditorKeyRelease(static_cast<QKeyEvent*>(event)))
+        return true;
+
+    if ((watched == timeline_ || watched == timelineScroll_->viewport()) &&
+        event->type() == QEvent::Wheel) {
+        auto* wheel = static_cast<QWheelEvent*>(event);
+        QScrollBar* scroll = timelineScroll_->horizontalScrollBar();
+        const bool positionIsContent = watched == timeline_;
+        const double viewportX = positionIsContent
+            ? wheel->position().x() - scroll->value()
+            : wheel->position().x();
+        const double contentX = viewportX + scroll->value();
+        const QPoint pixel = wheel->pixelDelta();
+        const QPoint angle = wheel->angleDelta();
+
+        if (wheel->modifiers() & Qt::ControlModifier) {
+            const double delta = pixel.y() != 0 ? pixel.y()
+                : pixel.x() != 0 ? pixel.x()
+                : angle.y() != 0 ? angle.y() : angle.x();
+            if (delta == 0.0) return true;
+            const double beatUnderPointer = std::max(
+                0.0, (contentX - kTimelineLeft) / timeline_->pixelsPerBeat());
+            const double factor = std::exp(delta / 600.0);
+            timeline_->setPixelsPerBeat(timeline_->pixelsPerBeat() * factor);
+            const int wantedScroll = static_cast<int>(std::lround(
+                kTimelineLeft + beatUnderPointer * timeline_->pixelsPerBeat() -
+                viewportX));
+            scroll->setValue(wantedScroll);
+            wheel->accept();
+            return true;
+        }
+
+        double delta = 0.0;
+        if (!pixel.isNull())
+            delta = std::fabs(pixel.x()) > std::fabs(pixel.y())
+                        ? pixel.x() : pixel.y();
+        else
+            delta = 0.5 * (std::fabs(angle.x()) > std::fabs(angle.y())
+                               ? angle.x() : angle.y());
+        if (delta != 0.0) scroll->setValue(scroll->value() -
+                                           static_cast<int>(std::lround(delta)));
+        wheel->accept();
+        return true;
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+bool TransitionEditorWindow::focusConsumesTransportShortcut() const
+{
+    QWidget* focused = QApplication::focusWidget();
+    while (focused && focused != this) {
+        if (qobject_cast<QLineEdit*>(focused) ||
+            qobject_cast<QPlainTextEdit*>(focused) ||
+            qobject_cast<QAbstractSpinBox*>(focused) ||
+            qobject_cast<QComboBox*>(focused) || focused == fieldsEditor_)
+            return true;
+        focused = focused->parentWidget();
+    }
+    return false;
+}
+
+bool TransitionEditorWindow::handleEditorKeyPress(QKeyEvent* event)
+{
+    const bool transportKey = event->key() == Qt::Key_C ||
+                              event->key() == Qt::Key_Space ||
+                              event->key() == Qt::Key_Delete ||
+                              event->key() == Qt::Key_Backspace;
+    if (!transportKey || event->modifiers() != Qt::NoModifier ||
+        focusConsumesTransportShortcut())
+        return false;
+    if (event->isAutoRepeat()) return true;
+
+    if (event->key() == Qt::Key_C) {
+        if (preview_->active || preview_->leased || previewPaused_) {
+            stopPreview();
+            statusBar()->showMessage(tr("Returned to preview cue"), 2000);
+        } else {
+            keyboardCueHeld_ = true;
+            keyboardCueLatched_ = false;
+            if (!beginPreviewAt(timeline_->playheadBeat()))
+                keyboardCueHeld_ = false;
+        }
+        return true;
+    }
+    if (event->key() == Qt::Key_Space) {
+        if (keyboardCueHeld_ && preview_->active) {
+            keyboardCueLatched_ = true;
+            statusBar()->showMessage(
+                tr("Preview latched — release C to keep playing"), 2500);
+        } else {
+            startOrPausePreview();
+        }
+        return true;
+    }
+    deleteSelectedEvent();
+    return true;
+}
+
+bool TransitionEditorWindow::handleEditorKeyRelease(QKeyEvent* event)
+{
+    if (event->key() == Qt::Key_C && keyboardCueHeld_) {
+        if (event->isAutoRepeat()) return true;
+        const bool shouldReturn = !keyboardCueLatched_;
+        keyboardCueHeld_ = false;
+        keyboardCueLatched_ = false;
+        if (shouldReturn) stopPreview();
+        return true;
+    }
+    if ((event->key() == Qt::Key_C || event->key() == Qt::Key_Space) &&
+        event->modifiers() == Qt::NoModifier &&
+        !focusConsumesTransportShortcut())
+        return true;
+    return false;
+}
+
+void TransitionEditorWindow::keyPressEvent(QKeyEvent* event)
+{
+    if (handleEditorKeyPress(event)) {
+        event->accept();
+        return;
+    }
+    QMainWindow::keyPressEvent(event);
+}
+
+void TransitionEditorWindow::keyReleaseEvent(QKeyEvent* event)
+{
+    if (handleEditorKeyRelease(event)) {
+        event->accept();
+        return;
+    }
+    QMainWindow::keyReleaseEvent(event);
+}
+
 void TransitionEditorWindow::startOrPausePreview()
 {
     if (preview_->active) {
@@ -3233,27 +4060,39 @@ void TransitionEditorWindow::startOrPausePreview()
             preview_->leased = false;
         }
         preview_->active = false;
+        timeline_->setPlayheadBeat(std::min(preview_->audibleBeat.load(), preview_->endBeat));
+        previewPaused_ = true;
         previewTimer_->stop();
         emit previewStateChanged(false);
-        playButton_->setText(tr("▶ RESUME FROM CURSOR"));
+        playButton_->setText(tr("▶ RESUME (SPACE)"));
         finishAutomationTake(true);
         return;
+    }
+    beginPreviewAt(timeline_->playheadBeat(), !previewPaused_);
+}
+
+bool TransitionEditorWindow::beginPreviewAt(double beat, bool establishCue)
+{
+    if (!fieldsEditor_->applyPending()) {
+        inspectorTabs_->setCurrentIndex(sectionCombo_->findText(tr("All fields")));
+        statusBar()->showMessage(tr("Resolve the All fields draft before previewing."), 5000);
+        return false;
     }
     if (!outgoing_ || !incoming_) {
         QMessageBox::information(this, tr("Preview audio unavailable"),
             tr("Choose or bind compatible local audio for both endpoints first."));
-        return;
+        return false;
     }
     if ((recorder_ && recorder_->isRecording()) ||
         (player_ && player_->isActive())) {
         QMessageBox::information(this, tr("Finish the active transition"),
             tr("Editor preview cannot take the master output during recording, Perform, Prime, or Tutorial."));
-        return;
+        return false;
     }
     if (masterRecorder_ && masterRecorder_->isRecording()) {
         QMessageBox::information(this, tr("Stop master recording"),
             tr("Editor preview is intentionally excluded from master recordings."));
-        return;
+        return false;
     }
     if (!requiredStemsReady()) {
         QMessageBox::information(
@@ -3261,43 +4100,63 @@ void TransitionEditorWindow::startOrPausePreview()
             stemSeparator_
                 ? tr("This transition automates separated stems. Click PREPARE STEMS and wait for both required endpoints before auditioning it.")
                 : tr("This transition automates separated stems, but stem separation is not available in this build."));
-        return;
+        return false;
     }
     const QStringList errors = document_->validationErrors();
     if (!errors.isEmpty()) {
         QMessageBox::warning(this, tr("Preview is blocked"),
             errors.join(QStringLiteral("\n• ")).prepend(QStringLiteral("• ")));
-        return;
+        return false;
     }
 
     statusBar()->showMessage(tr("Preparing exact state at beat %1…")
-                                 .arg(timeline_->playheadBeat(), 0, 'f', 3));
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    preview_->reset(document_->file(), outgoing_, incoming_,
-                    outgoingStems_, incomingStems_);
-    preview_->primeTo(timeline_->playheadBeat());
-    QApplication::restoreOverrideCursor();
+                                 .arg(beat, 0, 'f', 3));
     QString error;
+    int liveOutgoing = 0;
+    const auto sameAsset = [](const TrackDataPtr& a, const TrackDataPtr& b) {
+        return a && b && (a == b || (!a->filePath.isEmpty() && a->filePath == b->filePath));
+    };
+    if (sameAsset(liveEngine_->deck(1).track(), outgoing_) ||
+        sameAsset(liveEngine_->deck(0).track(), incoming_)) liveOutgoing = 1;
+    if (!preview_->reset(document_->file(), outgoing_, incoming_,
+                         outgoingStems_, incomingStems_, *liveEngine_,
+                         liveOutgoing, &error)) {
+        QMessageBox::warning(this, tr("Could not prepare preview"), error);
+        return false;
+    }
+    preview_->primeTo(beat);
     if (!liveEngine_->acquireExclusivePreview(preview_.get(), &error)) {
         QMessageBox::warning(this, tr("Could not start preview"), error);
-        return;
+        return false;
     }
     preview_->leased = true;
     preview_->active = true;
+    previewPaused_ = false;
+    if (establishCue || !previewCueValid_) {
+        previewCueBeat_ = beat;
+        previewCueValid_ = true;
+    }
     emit previewStateChanged(true);
     preview_->produce();
     previewTimer_->start();
-    playButton_->setText(tr("❚❚ PAUSE PREVIEW"));
+    playButton_->setText(tr("❚❚ PAUSE (SPACE)"));
     stopButton_->setEnabled(true);
     if (writeAutomationCheck_->isChecked()) beginAutomationTake();
     statusBar()->showMessage(
         tr("Editor preview owns MASTER; the live decks are frozen and unchanged."));
+    return true;
 }
 
 void TransitionEditorWindow::stopPreview()
 {
+    endPreview(true);
+}
+
+void TransitionEditorWindow::endPreview(bool returnToCue)
+{
     if (!preview_) return;
-    const bool wasActive = preview_->active || preview_->leased;
+    const bool wasActive = preview_->active || preview_->leased ||
+                           previewPaused_;
     previewTimer_->stop();
     if (preview_->leased && liveEngine_) {
         liveEngine_->releaseExclusivePreview(preview_.get());
@@ -3305,21 +4164,41 @@ void TransitionEditorWindow::stopPreview()
     }
     const bool hadTake = !takeEvents_.empty();
     preview_->active = false;
+    previewPaused_ = false;
+    keyboardCueHeld_ = false;
+    keyboardCueLatched_ = false;
     if (hadTake) finishAutomationTake(true);
-    if (playButton_) playButton_->setText(tr("▶ PREVIEW FROM CURSOR"));
+    if (returnToCue) returnPlayheadToPreviewCue();
+    previewCueValid_ = false;
+    if (playButton_) playButton_->setText(tr("▶ PLAY FROM CURSOR (C)"));
     if (stopButton_) stopButton_->setEnabled(false);
     if (wasActive) emit previewStateChanged(false);
+}
+
+void TransitionEditorWindow::returnPlayheadToPreviewCue()
+{
+    if (!previewCueValid_ || !timeline_) return;
+    timeline_->setPlayheadBeat(previewCueBeat_);
+    playheadLabel_->setText(
+        tr("Transition +%1 beats").arg(previewCueBeat_, 0, 'f', 3));
+    const int x = kTimelineLeft + static_cast<int>(
+        previewCueBeat_ * timeline_->pixelsPerBeat());
+    timelineScroll_->horizontalScrollBar()->setValue(
+        std::max(0, x - timelineScroll_->viewport()->width() / 2));
+    followEventSequence(previewCueBeat_);
 }
 
 void TransitionEditorWindow::updatePreviewTick()
 {
     preview_->produce();
-    timeline_->setPlayheadBeat(std::min(preview_->beat, preview_->endBeat));
-    playheadLabel_->setText(tr("Beat %1").arg(preview_->beat, 0, 'f', 3));
+    const double audibleBeat = std::min(preview_->audibleBeat.load(), preview_->endBeat);
+    timeline_->setPlayheadBeat(audibleBeat);
+    playheadLabel_->setText(tr("Transition +%1 beats").arg(audibleBeat, 0, 'f', 3));
     const int x = kTimelineLeft + static_cast<int>(
         timeline_->playheadBeat() * timeline_->pixelsPerBeat());
     timelineScroll_->horizontalScrollBar()->setValue(
         std::max(0, x - timelineScroll_->viewport()->width() / 2));
+    followEventSequence(timeline_->playheadBeat());
     if (!preview_->active) stopPreview();
 }
 

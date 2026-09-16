@@ -115,6 +115,10 @@ public:
 
     // Position introspection (any thread).
     double positionSec() const;
+    // Cumulative source time wrapped by committed forward audio renders.
+    // Seeks/scratches do not advance it. Read before positionSec() to detect
+    // a loop crossing that occurred entirely between scheduler polls.
+    double loopWrappedSeconds() const;
     void   seekSec(double sec);
     double beatPosition() const;             // beats via track beatgrid; 0 if no track
     double effectiveBpm() const;             // track bpm * tempoRatio; 0 if no track

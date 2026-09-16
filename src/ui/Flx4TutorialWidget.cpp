@@ -18,6 +18,16 @@ constexpr qreal kDesignWidth = 1000.0;
 constexpr qreal kDesignHeight = 620.0;
 constexpr double kPi = 3.14159265358979323846;
 
+// Screen Y grows downward: a clockwise 270-degree DJ knob sweep runs from
+// lower-left (minimum), through 12 o'clock (midpoint), to lower-right (maximum).
+QPointF knobPoint(const QPointF& center, double radius, double value)
+{
+    const double radians = (135.0 + std::clamp(value, 0.0, 1.0) * 270.0)
+                           * kPi / 180.0;
+    return center + QPointF(std::cos(radians) * radius,
+                            std::sin(radians) * radius);
+}
+
 QRectF padRect(int deck, int pad)
 {
     const qreal startX = deck == 0 ? 158.0 : 758.0;
@@ -36,8 +46,17 @@ QRectF deckButtonRect(int deck, int slot)
     const qreal offset = deck == 0 ? 0.0 : 600.0;
     if (slot == 0)
         return QRectF(offset + 24.0, 44.0, 55.0, 27.0);
-    return QRectF(offset + (slot == 1 ? 55.0 : 107.0),
-                  470.0, 44.0, 44.0);
+    // Match the FLX4 transport stack: CUE is directly above the larger
+    // PLAY/PAUSE button, rather than beside it.
+    if (slot == 1)
+        return QRectF(offset + 102.0, 470.0, 44.0, 44.0);
+    return QRectF(offset + 97.0, 520.0, 54.0, 54.0);
+}
+
+QRectF shiftButtonRect(int deck)
+{
+    const qreal offset = deck == 0 ? 0.0 : 600.0;
+    return QRectF(offset + 110.0, 440.0, 28.0, 24.0);
 }
 
 QRectF loopButtonRect(int deck, int slot)
@@ -93,6 +112,15 @@ Flx4TutorialWidget::Flx4TutorialWidget(QWidget* parent)
     setFocusPolicy(Qt::StrongFocus);
     setCursor(Qt::PointingHandCursor);
     setAttribute(Qt::WA_OpaquePaintEvent);
+    // Geometry properties keep the painted, non-child surface testable at
+    // compact sizes without exposing paint helpers as public API.
+    setProperty("deck0ShiftRect", shiftButtonRect(0));
+    setProperty("deck0CueRect", deckButtonRect(0, 1));
+    setProperty("deck0PlayRect", deckButtonRect(0, 2));
+    setProperty("deck1ShiftRect", shiftButtonRect(1));
+    setProperty("deck1CueRect", deckButtonRect(1, 1));
+    setProperty("deck1PlayRect", deckButtonRect(1, 2));
+    setProperty("vinylModeDrawn", false);
     auto* pulseTimer = new QTimer(this);
     pulseTimer->setInterval(360);
     connect(pulseTimer, &QTimer::timeout, this, [this] {
@@ -292,15 +320,11 @@ void Flx4TutorialWidget::paintEvent(QPaintEvent*)
 
     auto drawKnob = [&p](qreal x, qreal y, const QString& label,
                          double value) {
-        value = std::clamp(value, 0.0, 1.0);
         p.setPen(QPen(QColor(94, 101, 115), 2));
         p.setBrush(QColor(39, 43, 51));
         p.drawEllipse(QPointF(x, y), 13, 13);
-        const double radians = (225.0 + value * 270.0) * kPi / 180.0;
         p.setPen(QPen(QColor(232, 236, 241), 2));
-        p.drawLine(QPointF(x, y),
-                   QPointF(x + std::cos(radians) * 9.0,
-                           y + std::sin(radians) * 9.0));
+        p.drawLine(QPointF(x, y), knobPoint(QPointF(x, y), 9.0, value));
         QFont f = p.font(); f.setPixelSize(7); p.setFont(f);
         p.setPen(themeDimText());
         p.drawText(QRectF(x - 33, y + 14, 66, 12), Qt::AlignCenter, label);
@@ -388,12 +412,10 @@ void Flx4TutorialWidget::paintEvent(QPaintEvent*)
 
         drawButton(deckButtonRect(deck, 1), tr("CUE"), QColor(240, 240, 240),
                    live_.cueSet[deck], true);
-        drawButton(deckButtonRect(deck, 2), tr("PLAY / PAUSE"), accent,
+        drawButton(deckButtonRect(deck, 2), tr("PLAY /\nPAUSE"), accent,
                    live_.playing[deck], true);
-        drawButton(QRectF(offset + 55.0, 525.0, 96.0, 24.0), tr("SHIFT"),
+        drawButton(shiftButtonRect(deck), tr("SHIFT"),
                    themeDimText(), shifted);
-        drawButton(QRectF(offset + 55.0, 556.0, 96.0, 22.0),
-                   tr("VINYL MODE"), themeDimText());
     }
 
     drawButton(QRectF(378, 31, 54, 24), tr("LOAD A"), deckAccent(0));
@@ -510,15 +532,9 @@ void Flx4TutorialWidget::paintEvent(QPaintEvent*)
             to = QPointF(target.center().x(),
                          target.top() + wanted * target.height());
         } else {
-            const auto dialPoint = [&target](double value) {
-                const double radians = (225.0 + value * 270.0) * kPi / 180.0;
-                const double radius = std::min(target.width(), target.height()) *
-                                      0.42;
-                return target.center() + QPointF(std::cos(radians) * radius,
-                                                  std::sin(radians) * radius);
-            };
-            from = dialPoint(current);
-            to = dialPoint(wanted);
+            const double radius = std::min(target.width(), target.height()) * 0.42;
+            from = knobPoint(target.center(), radius, current);
+            to = knobPoint(target.center(), radius, wanted);
         }
         p.setPen(QPen(QColor(255, 255, 255, 190), 2, Qt::DashLine));
         p.drawLine(from, to);

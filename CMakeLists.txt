@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(gravitino VERSION 0.1.0 LANGUAGES C CXX)
+enable_language(OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +9,10 @@ set(CMAKE_AUTOMOC ON)
 
 list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/qt /opt/homebrew)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
+
+add_library(gvtqtcompat STATIC src/ui/QtAccessibilityWorkaround.mm)
+target_include_directories(gvtqtcompat PUBLIC src)
+target_link_libraries(gvtqtcompat PUBLIC Qt6::Gui "-framework Foundation")
 
 find_library(RTMIDI_LIB rtmidi PATHS /opt/homebrew/opt/rtmidi/lib REQUIRED)
 find_path(RTMIDI_INCLUDE rtmidi/RtMidi.h PATHS /opt/homebrew/opt/rtmidi/include REQUIRED)
@@ -33,14 +38,18 @@ add_library(gvtcore STATIC
     src/analysis/BeatGridEditor.cpp
     src/analysis/KeyAnalyzer.cpp
     src/library/TrackLibrary.cpp
+    src/library/TrackRecommendation.cpp
     src/library/SongCatalog.cpp
     src/library/History.cpp
     src/library/TransitionStore.cpp
     src/performance/PerformancePads.cpp
     src/transitions/GvtFormat.cpp
     src/transitions/TransitionFormat.cpp
+    src/transitions/TransitionGraph.cpp
+    src/transitions/TransitionTransportTrace.cpp
     src/transitions/TransitionRecorder.cpp
     src/transitions/TransitionPlayer.cpp
+    src/transitions/TransitionPlayback.cpp
     src/midi/MidiEngine.cpp
     src/midi/Flx4Mapping.cpp
     src/midi/Flx4TutorialMap.cpp
@@ -64,10 +73,12 @@ add_executable(gravitino MACOSX_BUNDLE
     src/ui/LibraryWidget.cpp
     src/ui/TransitionPanel.cpp
     src/ui/TransitionEditor.cpp
+    src/ui/TransitionFieldsEditor.cpp
+    src/ui/TransitionGraphWindow.cpp
     src/ui/Flx4TutorialWidget.cpp
 )
 set_target_properties(gravitino PROPERTIES MACOSX_BUNDLE FALSE) # plain binary for dev
-target_link_libraries(gravitino PRIVATE gvtcore Qt6::Widgets)
+target_link_libraries(gravitino PRIVATE gvtcore gvtqtcompat Qt6::Widgets)
 
 enable_testing()
 add_subdirectory(tests)

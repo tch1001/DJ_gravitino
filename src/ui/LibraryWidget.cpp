@@ -1,6 +1,8 @@
 #include "LibraryWidget.h"
 #include "FitButton.h"
 #include "Theme.h"
+#include "TransitionGraphWindow.h"
+#include "../library/TrackRecommendation.h"
 
 #include <QAbstractTableModel>
 #include <QCheckBox>
@@ -13,9 +15,11 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMenu>
+#include <QPainter>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStyledItemDelegate>
 #include <QTableView>
 #include <QTimer>
 #include <QTreeWidget>
@@ -26,6 +30,8 @@
 
 namespace gvt {
 
+constexpr int kRecommendationTierRole = Qt::UserRole + 40;
+
 // --------------------------------------------------------- CrateFilterProxy
 
 // Composes two filters over the TrackLibrary model:
@@ -34,18 +40,77 @@ namespace gvt {
 //  - the search box regexp over Title (col 0) and Artist (col 1).
 class CrateFilterProxy : public QSortFilterProxyModel {
 public:
-    CrateFilterProxy(TrackLibrary* lib, QObject* parent)
-        : QSortFilterProxyModel(parent), lib_(lib)
+    CrateFilterProxy(TrackLibrary* lib, AudioEngine* engine, QObject* parent)
+        : QSortFilterProxyModel(parent), lib_(lib), engine_(engine)
     {
+        setProperty("recommendationsEnabled", true);
+        setProperty("recommendationsActive", false);
     }
 
     // dir = crate directory (no trailing slash); empty = no path filter.
     void setCratePath(const QString& dir)
     {
         beginFilterChange();
+        undoneOnly_ = false;
         cratePrefix_ = dir.isEmpty() ? QString()
                                      : dir + QStringLiteral("/");
         endFilterChange(QSortFilterProxyModel::Direction::Rows);
+    }
+
+    void setUndoneOnly(bool enabled)
+    {
+        beginFilterChange();
+        undoneOnly_ = enabled;
+        if (enabled) cratePrefix_.clear();
+        endFilterChange(QSortFilterProxyModel::Direction::Rows);
+    }
+
+    bool undoneOnly() const noexcept { return undoneOnly_; }
+
+    void refreshTransitionCoverage()
+    {
+        beginFilterChange();
+        endFilterChange(QSortFilterProxyModel::Direction::Rows);
+    }
+
+    void setRecommendationsEnabled(bool enabled)
+    {
+        if (recommendationsEnabled_ == enabled) return;
+        recommendationsEnabled_ = enabled;
+        setProperty("recommendationsEnabled", enabled);
+        setProperty("recommendationsActive", recommendationsActive());
+        invalidate();
+        sort(sortColumn(), sortOrder());
+    }
+
+    void refreshRecommendationPriority()
+    {
+        std::array<TrackDataPtr, kNumDecks> next;
+        QStringList signature;
+        if (engine_) {
+            for (int deck = 0; deck < kNumDecks; ++deck) {
+                if (!engine_->deck(deck).playing.load()) continue;
+                next[static_cast<std::size_t>(deck)] =
+                    engine_->deck(deck).track();
+                const TrackDataPtr& track =
+                    next[static_cast<std::size_t>(deck)];
+                if (!track) continue;
+                signature.append(
+                    QStringLiteral("%1|%2|%3|%4")
+                        .arg(deck)
+                        .arg(track->songId.isEmpty() ? track->filePath
+                                                     : track->songId)
+                        .arg(track->bpm, 0, 'g', 14)
+                        .arg(track->camelotKey.toCaseFolded()));
+            }
+        }
+        const QString joined = signature.join(QLatin1Char(';'));
+        if (joined == recommendationSignature_) return;
+        recommendationSignature_ = joined;
+        recommendationTracks_ = std::move(next);
+        setProperty("recommendationsActive", recommendationsActive());
+        invalidate();
+        sort(sortColumn(), sortOrder());
     }
     QString cratePath() const
     {
@@ -54,8 +119,24 @@ public:
     }
 
 protected:
+    QVariant data(const QModelIndex& index, int role) const override
+    {
+        if (role == kRecommendationTierRole) {
+            if (!recommendationsActive()) return -1;
+            return recommendationTierForRow(mapToSource(index).row());
+        }
+        return QSortFilterProxyModel::data(index, role);
+    }
+
     bool filterAcceptsRow(int row, const QModelIndex& parent) const override
     {
+        if (undoneOnly_) {
+            // Wait until analysis has produced a canonical song identity;
+            // otherwise every in-flight row would briefly look unfinished.
+            if (!lib_->trackAt(row) ||
+                !lib_->transitionsForTrack(row).empty())
+                return false;
+        }
         if (!cratePrefix_.isEmpty() &&
             !lib_->pathAt(row).startsWith(cratePrefix_))
             return false;
@@ -69,9 +150,83 @@ protected:
         return false;
     }
 
+    bool lessThan(const QModelIndex& left,
+                  const QModelIndex& right) const override
+    {
+        if (recommendationsActive()) {
+            const int leftTier = recommendationTierForRow(left.row());
+            const int rightTier = recommendationTierForRow(right.row());
+            if (leftTier != rightTier) {
+                // Preserve best-first tier order even when the user's
+                // secondary column is sorted descending.
+                return sortOrder() == Qt::AscendingOrder
+                           ? leftTier < rightTier : leftTier > rightTier;
+            }
+        }
+        return QSortFilterProxyModel::lessThan(left, right);
+    }
+
 private:
+    bool recommendationsActive() const
+    {
+        return recommendationsEnabled_ &&
+               std::any_of(recommendationTracks_.begin(),
+                           recommendationTracks_.end(),
+                           [](const TrackDataPtr& track) {
+                               return static_cast<bool>(track);
+                           });
+    }
+
+    int recommendationTierForRow(int sourceRow) const
+    {
+        const TrackDataPtr candidate = lib_->trackAt(sourceRow);
+        if (!candidate)
+            return static_cast<int>(TrackRecommendationTier::Normal);
+        std::vector<const TrackData*> references;
+        for (const TrackDataPtr& track : recommendationTracks_)
+            if (track) references.push_back(track.get());
+        return static_cast<int>(
+            trackRecommendationTier(*candidate, references));
+    }
+
     TrackLibrary* lib_;
+    AudioEngine* engine_;
     QString cratePrefix_; // with trailing '/', or empty
+    bool undoneOnly_ = false;
+    bool recommendationsEnabled_ = true;
+    std::array<TrackDataPtr, kNumDecks> recommendationTracks_ {};
+    QString recommendationSignature_;
+};
+
+// Draws a quiet boundary between adjacent priority groups while leaving row
+// content and selection painting to the normal application delegate.
+class TierSeparatorDelegate final : public QStyledItemDelegate {
+public:
+    TierSeparatorDelegate(int tierRole, QObject* parent)
+        : QStyledItemDelegate(parent), tierRole_(tierRole)
+    {
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        QStyledItemDelegate::paint(painter, option, index);
+        if (index.row() <= 0) return;
+        const QVariant current = index.data(tierRole_);
+        const QVariant previous = index.sibling(index.row() - 1,
+                                                index.column()).data(tierRole_);
+        if (!current.isValid() || !previous.isValid() ||
+            current.toInt() < 0 || previous.toInt() < 0 ||
+            current.toInt() == previous.toInt())
+            return;
+        painter->save();
+        painter->setPen(QPen(QColor(83, 92, 108), 1.0));
+        painter->drawLine(option.rect.topLeft(), option.rect.topRight());
+        painter->restore();
+    }
+
+private:
+    int tierRole_;
 };
 
 // ------------------------------------------------------------- HistoryModel
@@ -209,7 +364,8 @@ public:
         double endBeat = file.endBeat.value_or(0.0);
         if (!file.endBeat.has_value())
             for (const GvtEvent& event : file.events)
-                endBeat = std::max(endBeat, event.beat);
+                if (transitionEventIsExecutable(event))
+                    endBeat = std::max(endBeat, event.beat);
         if (role == Qt::TextAlignmentRole) {
             if (idx.column() == ColArrow || idx.column() == ColBpm ||
                 idx.column() == ColLength || idx.column() == ColCues)
@@ -417,16 +573,22 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     topRow->addWidget(header);
 
     search_ = new QLineEdit;
+    search_->setObjectName(QStringLiteral("librarySearchField"));
     search_->setPlaceholderText(tr("Search title / artist…"));
     search_->setClearButtonEnabled(true);
     topRow->addWidget(search_, 1);
 
+    transitionGraphBtn_ = new FitPushButton(tr("Graph…"));
+    transitionGraphBtn_->setObjectName(
+        QStringLiteral("transitionGraphButton"));
+    transitionGraphBtn_->setToolTip(
+        tr("Open a song-and-transition graph for planning a full set"));
     newTransitionBtn_ = new FitPushButton(tr("New…"));
     newTransitionBtn_->setObjectName(QStringLiteral("newTransitionButton"));
     renameTransitionBtn_ = new FitPushButton(tr("Rename…"));
     deleteTransitionBtn_ = new FitPushButton(tr("Delete…"));
-    for (QPushButton* button : {newTransitionBtn_, renameTransitionBtn_,
-                                deleteTransitionBtn_}) {
+    for (QPushButton* button : {transitionGraphBtn_, newTransitionBtn_,
+                                renameTransitionBtn_, deleteTransitionBtn_}) {
         button->setFixedHeight(20);
         button->hide();
         topRow->addWidget(button);
@@ -466,13 +628,15 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     topRow->addWidget(loadBBtn_);
     root->addLayout(topRow);
 
-    proxy_ = new CrateFilterProxy(library_, this);
+    proxy_ = new CrateFilterProxy(library_, engine_, this);
     proxy_->setSourceModel(library_);
     proxy_->setSortCaseSensitivity(Qt::CaseInsensitive);
+    proxy_->setSortRole(Qt::UserRole);
     proxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
     // Left crate sidebar (collapsible via the splitter handle).
     crateTree_ = new QTreeWidget;
+    crateTree_->setObjectName(QStringLiteral("libraryCrateTree"));
     crateTree_->setHeaderHidden(true);
     crateTree_->setRootIsDecorated(false);
     crateTree_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -483,6 +647,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
 
     // Library table.
     table_ = new QTableView;
+    table_->setObjectName(QStringLiteral("trackLibraryTable"));
     table_->setModel(proxy_);
     table_->setSortingEnabled(true);
     table_->sortByColumn(0, Qt::AscendingOrder);
@@ -493,9 +658,27 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table_->setAlternatingRowColors(true);
+    table_->setItemDelegate(
+        new TierSeparatorDelegate(kRecommendationTierRole, table_));
 
     stack_ = new QStackedWidget;
-    stack_->addWidget(table_);
+    auto* libraryPage = new QWidget;
+    auto* libraryPageLayout = new QVBoxLayout(libraryPage);
+    libraryPageLayout->setContentsMargins(0, 0, 0, 0);
+    libraryPageLayout->setSpacing(2);
+    libraryPageLayout->addWidget(table_, 1);
+    auto* recommendationRow = new QHBoxLayout;
+    recommendationRow->setContentsMargins(2, 0, 2, 0);
+    recommendedFilter_ = new QCheckBox(tr("Recommended"));
+    recommendedFilter_->setObjectName(
+        QStringLiteral("recommendedLibraryFilter"));
+    recommendedFilter_->setToolTip(
+        tr("Group songs by BPM and Camelot-key similarity to playing decks"));
+    recommendedFilter_->setChecked(true);
+    recommendationRow->addWidget(recommendedFilter_);
+    recommendationRow->addStretch(1);
+    libraryPageLayout->addLayout(recommendationRow);
+    stack_->addWidget(libraryPage);
 
     // History table (only when a History store was provided).
     if (history_) {
@@ -538,7 +721,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
         QStringLiteral("legacyTransitionFilter"));
     legacyTransitionFilter_->setToolTip(
         tr("Show legacy .gvt transition files"));
-    legacyTransitionFilter_->setChecked(true);
+    legacyTransitionFilter_->setChecked(false);
     portableTransitionFilter_ = new QCheckBox(tr(".transition"));
     portableTransitionFilter_->setObjectName(
         QStringLiteral("portableTransitionFilter"));
@@ -574,6 +757,9 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
         transitionTable_->horizontalHeader()->setSectionResizeMode(
             col, QHeaderView::ResizeToContents);
     transitionTable_->setAlternatingRowColors(true);
+    transitionTable_->setItemDelegate(
+        new TierSeparatorDelegate(kTransitionFromPlayingRole,
+                                  transitionTable_));
     transitionPageLayout->addWidget(transitionTable_, 1);
     transitionPageLayout->addLayout(formatRow);
     transitionPageIndex_ = stack_->addWidget(transitionPage);
@@ -595,6 +781,10 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
         proxy_->setFilterFixedString(t);
         transitionProxy_->setFilterFixedString(t);
     });
+    connect(recommendedFilter_, &QCheckBox::toggled, this,
+            [this](bool checked) {
+                proxy_->setRecommendationsEnabled(checked);
+            });
     const auto updateTransitionFormatFilter = [this] {
         transitionProxy_->setFormatVisibility(
             legacyTransitionFilter_->isChecked(),
@@ -605,6 +795,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             updateTransitionFormatFilter);
     connect(portableTransitionFilter_, &QCheckBox::toggled, this,
             updateTransitionFormatFilter);
+    updateTransitionFormatFilter();
     connect(loadABtn_, &QPushButton::clicked, this,
             [this] { loadSelectedTo(0); });
     connect(loadBBtn_, &QPushButton::clicked, this,
@@ -622,6 +813,8 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             &LibraryWidget::renameSelectedTransition);
     connect(newTransitionBtn_, &QPushButton::clicked, this,
             &LibraryWidget::newTransitionRequested);
+    connect(transitionGraphBtn_, &QPushButton::clicked, this,
+            &LibraryWidget::showTransitionGraph);
     connect(deleteTransitionBtn_, &QPushButton::clicked, this,
             &LibraryWidget::deleteSelectedTransition);
     connect(libraryTabBtn_, &QPushButton::toggled, this,
@@ -642,6 +835,10 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             &LibraryWidget::rebuildCrates);
     connect(library_, &QAbstractItemModel::rowsRemoved, this,
             &LibraryWidget::rebuildCrates);
+    connect(library_, &TrackLibrary::transitionGraphChanged, this, [this] {
+        proxy_->refreshTransitionCoverage();
+        rebuildCrates();
+    });
     connect(library_, &TrackLibrary::scanProgress, this,
             [this](int analyzed, int total) {
                 emit statusMessage(
@@ -653,10 +850,12 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     loadStateTimer_->setInterval(100);
     connect(loadStateTimer_, &QTimer::timeout, this, [this] {
         updateLoadButtons();
+        proxy_->refreshRecommendationPriority();
         transitionProxy_->refreshPlayingPriority();
     });
     loadStateTimer_->start();
     updateLoadButtons();
+    proxy_->refreshRecommendationPriority();
     transitionProxy_->refreshPlayingPriority();
 }
 
@@ -690,6 +889,7 @@ void LibraryWidget::showTab(int index)
     renameTransitionBtn_->setVisible(transitions);
     deleteTransitionBtn_->setVisible(transitions);
     newTransitionBtn_->setVisible(transitions);
+    transitionGraphBtn_->setVisible(transitions);
     updateTransitionButtons();
 }
 
@@ -697,6 +897,7 @@ void LibraryWidget::rebuildCrates()
 {
     const QString selected =
         proxy_ ? proxy_->cratePath() : QString();
+    const bool selectedUndone = proxy_ && proxy_->undoneOnly();
 
     // root = deepest common directory of all track paths; crates = its
     // immediate subdirectories, tracks counted recursively.
@@ -728,6 +929,19 @@ void LibraryWidget::rebuildCrates()
         {tr("All Tracks  (%1)").arg(rows)});
     allTracksItem_->setData(0, Qt::UserRole, QString());
     QTreeWidgetItem* toSelect = allTracksItem_;
+    int undoneCount = 0;
+    for (int i = 0; i < rows; ++i)
+        if (library_->trackAt(i) &&
+            library_->transitionsForTrack(i).empty())
+            ++undoneCount;
+    auto* undoneItem = new QTreeWidgetItem(
+        crateTree_, {tr("Undone  (%1)").arg(undoneCount)});
+    undoneItem->setData(0, Qt::UserRole, QString());
+    undoneItem->setData(0, Qt::UserRole + 1, true);
+    undoneItem->setToolTip(
+        0, tr("Songs with neither an incoming nor outgoing transition"));
+    crateTree_->setProperty("undoneCount", undoneCount);
+    if (selectedUndone) toSelect = undoneItem;
     for (const auto& [name, count] : crateCounts) {
         auto* item = new QTreeWidgetItem(
             crateTree_,
@@ -735,21 +949,29 @@ void LibraryWidget::rebuildCrates()
         const QString dir = rootDir + QLatin1Char('/') + name;
         item->setData(0, Qt::UserRole, dir);
         item->setToolTip(0, dir);
-        if (dir == selected) toSelect = item;
+        if (!selectedUndone && dir == selected) toSelect = item;
     }
     crateTree_->setCurrentItem(toSelect);
-    const QString newPath =
-        toSelect->data(0, Qt::UserRole).toString();
-    if (newPath != selected)
-        proxy_->setCratePath(newPath); // previous crate disappeared
+    const bool newUndone =
+        toSelect->data(0, Qt::UserRole + 1).toBool();
+    const QString newPath = toSelect->data(0, Qt::UserRole).toString();
+    if (newUndone)
+        proxy_->setUndoneOnly(true);
+    else if (selectedUndone || newPath != selected)
+        proxy_->setCratePath(newPath); // previous smart/path crate disappeared
 }
 
 void LibraryWidget::onCrateSelected()
 {
     const auto items = crateTree_->selectedItems();
-    proxy_->setCratePath(
-        items.isEmpty() ? QString()
-                        : items.first()->data(0, Qt::UserRole).toString());
+    if (!items.isEmpty() &&
+        items.first()->data(0, Qt::UserRole + 1).toBool()) {
+        proxy_->setUndoneOnly(true);
+    } else {
+        proxy_->setCratePath(
+            items.isEmpty() ? QString()
+                            : items.first()->data(0, Qt::UserRole).toString());
+    }
 }
 
 int LibraryWidget::sourceRowFor(const QModelIndex& proxyIndex) const
@@ -1085,12 +1307,24 @@ void LibraryWidget::updateTransitionButtons()
     renameTransitionBtn_->setEnabled(enabled);
     deleteTransitionBtn_->setEnabled(enabled);
     newTransitionBtn_->setEnabled(transitionsPage && transitionEditingEnabled_);
+    transitionGraphBtn_->setEnabled(transitionsPage);
     const QString tip = !transitionEditingEnabled_
                             ? tr("Finish or abort the active transition first")
                         : !selected ? tr("Select a transition edge first")
                                     : QString();
     renameTransitionBtn_->setToolTip(tip);
     deleteTransitionBtn_->setToolTip(tip);
+}
+
+void LibraryWidget::showTransitionGraph()
+{
+    if (!transitionGraphWindow_)
+        transitionGraphWindow_ = new TransitionGraphWindow(
+            transitions_, engine_, this);
+    transitionGraphWindow_->show();
+    transitionGraphWindow_->refreshGraph();
+    transitionGraphWindow_->raise();
+    transitionGraphWindow_->activateWindow();
 }
 
 void LibraryWidget::renameSelectedTransition()

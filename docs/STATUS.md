@@ -6,6 +6,296 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-16 (codex): **Lane-local automation deletion.** Deleting a knob/fader
+  point selects the next point on the same deck/control, falling back to the
+  previous point in that lane. An empty lane clears table/timeline selection
+  and disables Delete; repeated keystrokes cannot spill into another control.
+  Discrete action-card deletion and cursor/preview following are unchanged.
+  Regression tests cover interleaved decks/knobs, equal beats, different curves,
+  Delete/Backspace/buttons, empty lanes, backward fallback and Undo. Full build,
+  all 36 ctests, audio selftest and diff checks pass. QA artifacts are in
+  `/tmp/gravitino-lane-delete-qa.AaZi3r`. No user transition files or song cues
+  edited; the existing app session was left running (restart to use the fix).
+
+- 2026-09-16 (codex): **Reachable transition fields and precise loop/tempo editing.**
+  Replaced the editor's clipped tab strip with a persistent section selector and
+  Tempo / Setup, Cues / Loops and All fields shortcuts. Added incoming BPM/ratio
+  inputs and a selected cue/loop start/end form with calculated loop length.
+  Editable tables and YAML retain full double precision with shortest
+  round-trippable decimal formatting. The searchable typed field tree
+  shares the serializer's structured root, exposing all saved fields including
+  unknown extensions and inert crossfader compatibility data. Edits validate
+  through the existing parser, apply as one Undo step, refuse stale drafts,
+  and remain in the working copy until Save; endpoint/identity Save As guards
+  remain. Undo/Redo of endpoint changes also re-resolves preview audio. Added
+  field/precision/validation/conflict regressions and compact editor GUI checks.
+  Full build, all 36 ctests (including native accessibility), audio selftest,
+  compact-window rendered inspection and diff checks pass. QA artifacts are in
+  `/tmp/gravitino-fields-qa.X2JyLQ`. App gracefully restarted with the new build.
+  No saved user transitions or permanent song cues edited by this patch.
+
+- 2026-09-07 (codex): **Native table-refresh crash repaired.** Reproduced the
+  crash with synthetic QTableView/proxy data, independently of music or the
+  editor. Qt 6.11.0/1's Cocoa synthesized elements borrow a table accessibility
+  ID but delete it during cleanup, recursively invalidating table/cell objects.
+  Added a version/layout-checked, process-local native compatibility repair in
+  `QtAccessibilityWorkaround.mm`, installed before widgets at app startup.
+  Keeps accessibility, sorting, notifications and selection working; installed
+  Qt binaries and all user transition/cue data remain untouched. Added
+  offscreen and native regression tests covering cached/native cells,
+  sort/filter/insert/remove/reset, window destruction, 100 actual library
+  playback switches, format toggles/reloads and unchanged fixture hashes.
+  The native `--unpatched` diagnostic still reproduces the old crash.
+  Full build, all 35 ctests and audio selftest pass; selftest output is in
+  `/tmp/gravitino-crash-qa.AgxSgH`, not the repository. GUI not reopened.
+
+- 2026-09-07 (codex): **Editor drag alignment guides.** Cue/loop markers,
+  labels, action cards and automation points now show a cyan center line
+  through both waveforms during a drag, with a visible-viewport beat readout.
+  Guides follow the actual snapped/clamped position and the chosen unrolled
+  loop pass. Discrete action cards also preview their movement before release.
+  Added rendered-pixel drag tests for offset grabs, snapping, Option bypass,
+  loop clamping/repeated cues, action movement, release cleanup and undo.
+  Full build, all 33 ctests, rendered visual inspection and diff checks pass.
+  No user transition files or song cues edited; GUI not restarted.
+
+- 2026-09-07 (codex): **Editor clarity and shared playback.** Removed the
+  editor's duplicate event scheduler and dispatch; its private engine now uses
+  TransitionPlayer with an external render clock. Extracted shared live/Tutor/
+  preview setup and Perform entry positioning. Preview and transport trace use
+  the outgoing anchor/rolling transport rather than historical snapshot
+  position/playing, without rewriting those fields. Preview copies role-mapped
+  live key lock, trim and crossfader; player ramp starting-value lookup now
+  includes FX/stems. The preview cursor follows consumed ring timestamps, not
+  buffered-ahead rendering; cursor preparation ends within one sample.
+  GUI separates WHEN/WHERE, explains launch/ramp/value semantics, links to
+  source definitions, derives non-authoritative outgoing snapshot cells, and
+  defaults drag snapping off. Inspector timing edits can shift an entire cue
+  launch gesture in one undo step, with a raw-event opt-out. Controller hints
+  collapse. Synthetic audio/role-order and real editor MASTER-ring parity
+  regressions added. Live GUI-timer jitter, PRIME's deliberately retained
+  tempo, and pre-existing DSP history remain outside sample-exact parity;
+  audio-clock scheduling is still needed for that stronger guarantee.
+  No user transition files, permanent cues, or existing tmp/ work modified;
+  GUI has not been restarted. Full build, all 33 ctests, offline selftest,
+  compact offscreen editor inspection, and git diff checks pass. Real editor
+  ring audio matches reference Perform rendering within 1e-6 at identical
+  clock steps; the separate four-case core test covers key lock and deck order.
+
+- 2026-09-07 (codex): **Virtual FLX4 knob orientation.** Corrected the shared
+  clockwise knob sweep so 50% points to 12 o'clock, with minimum lower-left
+  and maximum lower-right. Live pointers, Tutorial targets, and pickup markers
+  now share the same geometry; audio/control values are unchanged. The app
+  build and offscreen rendered-pixel regressions pass for both decks, FX wet,
+  headphone mix, and guidance markers. GUI not restarted.
+
+- 2026-09-07 (codex): **PRIME missed-entry loop race.** Reproduced a player
+  staying armed with the incoming deck stopped after two failed BPM preflights
+  and a successful retry: the entry immediately before LOOP OUT was crossed
+  and wrapped entirely between scheduler polls. Deck now publishes cumulative
+  source seconds wrapped by committed forward renders; PRIME uses that distance
+  to detect the missed crossing and preserves elapsed transition beats. Every
+  arm seeds a fresh baseline, and seeks/paused renders cannot fabricate wraps.
+  Regression checks cover both deck directions, key lock on/off, several wraps
+  between polls, re-arming, and real incoming PLAY after failed UI attempts.
+  Full build, all 32 ctests, isolated headless selftest, and diff checks pass.
+  No user transition files, song cues, or existing tmp/ work changed; GUI not
+  restarted. This is one confirmed cause of the reported intermittent symptom;
+  the user's exact run/Tutor mode has not yet been confirmed.
+
+- 2026-09-07 (codex): **Explicit CUSTOM banks and tempo-target remapping.**
+  Each deck's CUSTOM pads now have a fixed-size NORMAL / TRANSITION selector.
+  NORMAL exposes editable track loops/custom audio; TRANSITION clearly marks
+  protected temporary cues/loops. Switching updates input/LEDs, releases held
+  pads in the original bank, and leaves replay slots and permanent metadata
+  intact. Routine bank refreshes retain the user's selection. PRIME's amber
+  overlay cache now includes projected positions and refreshes immediately
+  after UI/MIDI tempo-range changes, so previously saturated targets move
+  into the wider range without changing the target ratio or playback BPM.
+  The application build, focused offscreen UI regression (both banks/decks,
+  menu access, release safety, geometry, and both tempo limits), and diff
+  checks pass. No user transition/cue files changed; app not restarted.
+
+- 2026-09-07 (codex): **WET highlight routing and quieter graph labels.**
+  Hardware pickup now uses the shared deck/mixer control lookup, fixing the
+  missing highlight on the deck WET knobs. The UI regression checks pickup
+  visibility on both decks plus PRIME target values and clearing after WET
+  matches. Graph edge labels are smaller, faint captions with no box or border.
+  The application build, focused offscreen UI regression, and diff checks pass.
+
+- 2026-09-07 (codex): **Editor event following and cue-style audition.** A
+  timeline cursor placement or moving preview now selects, centers, and opens
+  the next executable event in the Events inspector; after the last action the
+  final row remains visible. Delete-button and keyboard Delete operations move
+  directly to the next visible event (or the previous one at the end), skipping
+  inert crossfader compatibility rows. Preview now keeps a stable audition cue
+  across pause/resume, and STOP, natural completion, or momentary C release
+  returns the playhead and event sequence to it. The button reads PLAY FROM
+  CURSOR (C), and C/Space/Delete work even after a button or table was clicked
+  while editable fields keep normal input. The offscreen UI regression covers
+  cursor following, repeated deletion, button-focused shortcuts, and cue
+  return.
+
+- 2026-09-07 (codex): **Named transition-graph edges.** Every directed edge
+  now carries and displays its transition name in a compact high-contrast pill.
+  Labels retain a stable on-screen size while zooming, dim and brighten with
+  longest-route highlighting, follow distinct parallel curves, and fall back
+  to “Untitled transition” when legacy metadata has no name. The graph model
+  keeps the chosen logical edge's name, including portable-over-legacy
+  deduplication. Focused graph and offscreen UI tests cover name propagation
+  and label population.
+
+- 2026-09-07 (codex): **Serialized-loop Transition Editor waveforms and
+  keyboard audition.** The editor now derives per-deck canonical transport
+  traces from initial state plus resolved timeline events, lays audible loop
+  passes out serially on the shared master-beat ruler, labels repeated passes,
+  and keeps stopped spans dark. Its stacked lanes use the same low/mid/high
+  waveform colors and strong/ordinary beat overlay as the live detail view;
+  unused saved loops remain definition overlays and no new data is serialized.
+  Plain wheel input pans horizontally and Command-wheel performs cursor-
+  anchored zoom. Timeline event clicks now open and scroll the Events
+  inspector, show the corresponding canonical track beat, and retain the same
+  event after beat edits re-sort the list. Held C auditions the whole mix from
+  the cursor, release returns, Space latches CUE+PLAY, and ordinary Space
+  toggles preview without stealing keystrokes from editor fields. Pure trace
+  tests cover loop passes/resizing/exit, semantic cue launch, and corrected
+  asset BPM; the offscreen UI regression covers event selection, navigation,
+  and keyboard preview. Verified with a full build, all 32 CTest targets, the
+  offline audio/replay/loop/stem self-test, and `git diff --check`. The rebuilt
+  app is running; as with the preceding Qt check, the macOS accessibility
+  bridge timed out before it could expose the raw non-bundled window tree.
+
+- 2026-09-07 (codex): **Crossfader-safe transitions, guided PRIME, and hardware
+  ghost state.** Crossfader setup and events remain parseable and round-trip
+  unchanged in legacy files but are now inert across recording, replay,
+  Tutorial, summaries, waveform cues, the editor, and previews; new transitions
+  omit them and editor templates blend with channel faders. PRIME guidance now
+  carries exact amber slider/dial targets, persists across failed preflights,
+  and clears resolved controls individually. Tutor setup preserves all
+  hardware-facing musical controls, while live green targets show the authored
+  step/linear/S-curve state without changing audio. The mixer status strip now
+  reports hardware/software sync, exposes cyan hardware ghosts, and provides a
+  session-only FREEZE HW mode with independent soft pickup on unfreeze; Tutor
+  and manual freeze are mutually exclusive. Event Sequence countdown tracks
+  are scaled by each row's interval to the next distinct action (or authored
+  end), with zero-duration rows left unfilled. Verified with a full build, all
+  31 CTest targets, the offline `--selftest`, `git diff --check`, and the
+  1200x720 offscreen UI regression. The macOS accessibility bridge timed out
+  before returning the standalone Qt window tree, so the rebuilt app remains
+  running for the final live visual check. Follow-up correction: SHOW HW is a
+  checkbox, and a dedicated GET HW STATE button re-polls the connection and
+  reports how many input-only controller positions have actually been seen;
+  untouched controls remain honestly unknown until moved once. All three
+  hardware-state controls are disabled without a connected controller. The
+  Tutor surface now mirrors the FLX4 transport stack (small SHIFT above CUE
+  above the larger PLAY/PAUSE) on both decks and removes the invented VINYL
+  MODE button. PRIME loop failures now give an exact physical instruction
+  instead of `B loop on/off`; Tutor preparation preserves an active loop and
+  its bounds so it cannot silently clear the mismatch before validation.
+
+- 2026-09-06 (codex): **Playing-track library recommendations.** A default-on
+  Recommended checkbox now groups Library rows around either playing deck:
+  exact Camelot key plus inclusive +/-10 native BPM first, BPM-only second,
+  and all remaining tracks last. Playing songs do not recommend themselves;
+  with two active decks, each candidate uses its best match. The selected
+  column/direction remains the within-tier order, and subtle separators appear
+  only between populated tiers. The Transitions table also separates its
+  pinned playing-FROM group from other edges. Matching rules live in a pure
+  model with boundary, missing-key, self-match, and two-deck regression tests;
+  the compact UI test covers the default checkbox. Verified with a full build,
+  all 31 CTest targets, the offline `--selftest`, and `git diff --check`.
+
+- 2026-09-05 (codex): **Portable-first transitions, Undone smart folder, and
+  natural library sorting.** The Transitions tab now starts with `.transition`
+  enabled and legacy `.gvt` disabled. The Library crate sidebar has an
+  automatically refreshed Undone folder containing analyzed canonical songs
+  with neither incoming nor outgoing transition links; it reads the full
+  transition store regardless of the table's format checkboxes. BPM and
+  duration now sort as numbers, and Camelot keys sort by numeric wheel position
+  plus A/B rather than lexicographically. Focused regressions cover the default
+  filter, smart-folder presence/reverse-graph classification, and `2 / 10 /
+  100`, `1A / 2A / 10A`, and duration ordering.
+  Verified with a full build, all 30 CTest targets, the offline `--selftest`,
+  and `git diff --check`.
+
+- 2026-09-04 (codex): **Live deck songs in transition graph.** The graph now
+  identity-matches the tracks loaded on Deck A and Deck B against transition
+  endpoints and keeps them marked with the standard cyan/magenta deck colors,
+  outer rings, and A/B badges. Polling runs only while the separate graph
+  window is visible, covering library, controller, replay, and direct loads;
+  route-hover styling remains independently visible. Verified with a full
+  build, all 29 CTest targets, the offline `--selftest`, and `git diff --check`.
+
+- 2026-09-04 (codex): **Graph drag crash fix.** A live macOS crash report
+  identified Qt's Cocoa cursor-image conversion in the graph's mouse-down
+  cursor swap, not the force layout or route model, as the fault. Runtime
+  cursor changes were removed from both node dragging and empty-canvas
+  panning. The UI regression now performs full press/move/release gestures for
+  both paths and verifies that the node and viewport actually move. Verified
+  with a full build, all 29 CTest targets, the offline `--selftest`, and
+  `git diff --check`.
+
+- 2026-09-04 (codex): **Force-directed transition set planner.** Library >
+  Transitions now places Graph immediately left of New, consuming only search
+  field stretch space, and opens a separate resizable window. Song arrangements
+  are title-labeled nodes; transitions are curved directed edges with duplicate
+  legacy/converted counterparts collapsed but genuinely distinct parallel
+  transitions retained. A gentle repulsion/spring simulation plus dragging,
+  panning, and zooming makes the layout self-organizing. Hover highlights the
+  longest-duration feasible non-repeating route and shows its titles and time
+  to the end. The estimate carries saved incoming/outgoing beats between edges,
+  excludes transition points already passed on arrival, accounts for authored
+  transition length/master BPM, and includes the terminal track tail. Pure
+  timing/cycle/identity tests and an offscreen test cover button placement,
+  separate-window creation, graph population, and hover routing. Verified with
+  a full build, all 29 CTest targets, the offline `--selftest`, and
+  `git diff --check`.
+
+- 2026-09-04 (codex): **Graph zoom refinements.** The transition planner now
+  has a 35–250% zoom slider across its top, synchronized with cursor-anchored
+  wheel zoom. A wheel notch changes scale by only 4% for gentler navigation.
+  Hover continues to highlight the complete route in the graph, while its
+  text readout has been reduced to the route status and estimated time to end
+  rather than repeating every song title. Verified with a full build, all 29
+  CTest targets, the offline `--selftest`, and `git diff --check`.
+
+- 2026-09-04 (codex): **Transition cue guidance and playback safeguards.**
+  Human mode now defaults to a SHOW CUES checkbox that places every condensed
+  action start on the relevant deck's overview and zoomed waveforms; explicit
+  teaching labels stay visible on both. Portable semantic cue-ID sequences are
+  now folded as HOT CUE → PLAY → release even with unrelated mixer/other-deck
+  events interleaved, and the displayed pad follows temporary CUSTOM-bank
+  allocation. Stem-dependent transitions warn in the main setup row, expose a
+  PREPARE STEMS action for each affected physical deck, and gate Perform/Prime
+  until the required stems are attached. The editor's Preview crash was traced
+  to Qt's macOS application-wide override-cursor creation and fixed by removing
+  that unrelated cursor mutation; a regression now clicks Preview, confirms
+  the exclusive MASTER lease, and stops it. Editor endpoint resolution also
+  accepts compatible tracks already loaded on the decks while the library scan
+  catches up. Verified with a clean build, all 28 CTest targets, the full
+  offline `--selftest`, `git diff --check`, and the running rebuilt app. The
+  macOS accessibility bridge timed out before returning its live widget tree;
+  the offscreen regression therefore remains the geometry-level check.
+
+- 2026-09-04 (codex): **Canonical beat counters and linear mouse jog.** Each
+  72 px platter now has a centered two-decimal canonical track-beat counter,
+  including fractional/negative beats and local catalog offsets, with a dash
+  for unloaded or invalid grids. Mouse jogging is an incremental projection:
+  bottom-left advances, top-right rewinds, perpendicular movement is ignored,
+  and sensitivity is exactly 0.2 ms per projected pixel. The disc still rotates
+  from actual playback position and the mouse path emits `PlatterScratch`
+  without `PlatterTouch`, so playing decks keep playing and paused decks stay
+  paused. During a drag it shows a subtle diagonal guide and direction marks.
+  Long transient CUSTOM feedback is now fixed-height, horizontally ignored,
+  elided in place, and retained in its tooltip, preventing the former 3.5-second
+  deck-width/layout jump. The compact-window UI regression covers canonical
+  beat formatting, feedback geometry, both jog directions, reversal,
+  perpendicular motion, rotation tracking, and transport preservation.
+  Verified with a full build, all 28 CTest targets, the offline `--selftest`,
+  `git diff --check`, and a live compact-window pass showing a moving
+  fractional beat on Deck A, a negative beat on Deck B, and stable controls
+  while the CUSTOM message was visible.
+
 - 2026-09-04 (codex): **Visual transition editor and isolated auditioning.**
   New/Edit now opens one full-size typed editor with synchronized outgoing and
   incoming waveforms, master-beat ruler, discrete-action and per-control
@@ -94,11 +384,10 @@
   checks preview, latch, scratch movement, and transport restoration.
   Verified: clean build, ctest 23/23, full `--selftest`, and
   `git diff --check`.
-  Follow-up: mouse platter sensitivity is intentionally fine-only. On a
-  playing deck it now applies direct millisecond-scale phase correction without
-  pausing, including during automated transition replay. It adjusts about
-  45 ms per quarter turn / 180 ms per full turn and leaves paused decks paused.
-  FLX4 touch/scratch behavior is unchanged.
+  Follow-up: mouse platter sensitivity is intentionally fine-only. The later
+  diagonal implementation applies 0.2 ms per projected pixel directly without
+  pausing, including during automated transition replay, and leaves paused
+  decks paused. FLX4 touch/scratch behavior is unchanged.
 
 - 2026-09-03 (codex): **Permanent right-side library toggle.** The Show/Hide
   Library button now sits flush right immediately before the controller

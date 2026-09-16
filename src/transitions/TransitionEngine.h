@@ -51,6 +51,9 @@ signals:
     void tutorialPrompt(const gvt::GvtEvent& e, double beatsAhead);
     void tutorialScored(const gvt::GvtEvent& e, double beatError, double valueError);
 private:
+    friend void transitionPlayerUseExternalClock(TransitionPlayer*, bool);
+    friend void transitionPlayerAdvanceToBeat(TransitionPlayer*, double);
+    void advanceToBeat(double beat);
     struct Impl; std::unique_ptr<Impl> impl_;
 };
 

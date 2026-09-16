@@ -20,6 +20,8 @@ class QToolButton;
 
 namespace gvt {
 
+class ElidedFeedbackLabel;
+
 enum class BeatGridCommand : int {
     SetDownbeat,
     Nudge,
@@ -52,8 +54,8 @@ private:
 };
 
 // Mouse-operable platter. Its marker follows the track position at a vinyl
-// 33⅓ RPM visual rate; dragging dispatches the same touch/scratch controls as
-// the hardware platter so the engine remains the single source of behavior.
+// 33⅓ RPM visual rate. Mouse dragging is a linear fine-adjust gesture while
+// hardware platter input retains its separate touch/scratch mapping.
 class JogWheelWidget : public QWidget {
 public:
     JogWheelWidget(int deckIndex, ControlBus* bus,
@@ -67,14 +69,14 @@ protected:
     void mouseReleaseEvent(QMouseEvent*) override;
 
 private:
-    double pointerAngle(const QPointF& position) const;
     void applyDrag(const QPointF& position);
     void dispatch(ControlId id, double value);
 
     int deckIndex_ = 0;
     ControlBus* bus_ = nullptr;
     double rotationDegrees_ = 0.0;
-    double lastPointerAngle_ = 0.0;
+    double lastPointerX_ = 0.0;
+    double lastPointerY_ = 0.0;
     bool trackAvailable_ = false;
     bool dragging_ = false;
 };
@@ -114,6 +116,7 @@ public:
     void beatGridChanged();
     void performanceMetadataChanged();
     QWidget* controlWidget(ControlId control) const;
+    double controlDisplayFraction(ControlId control, double value) const;
 
     // Stems row state machine (driven by MainWindow from StemSeparator
     // signals). Idle: [STEMS] request button armed, pads disabled.
@@ -149,6 +152,10 @@ private:
     void loadPerformancePadSettings();
     void savePerformancePadAssignment(PerformancePadMode mode, int pad);
     void savePerformancePadMode();
+    enum class CustomPadBank { Normal, Transition };
+    void setCustomPadBank(CustomPadBank bank);
+    bool usesTransitionCustomBank() const;
+    void releaseCustomPads();
     void syncPerformancePadUi();
     void handlePerformancePad(int pad, bool pressed);
     void dispatchPerformancePadGesture(PerformancePadMode mode, int pad);
@@ -168,6 +175,7 @@ private:
 
     WaveformView* waveform_ = nullptr;
     JogWheelWidget* jogWheel_ = nullptr;
+    QLabel* beatLabel_ = nullptr;
     QLabel* titleLabel_ = nullptr;
     QLabel* artistLabel_ = nullptr;
     QLabel* bpmLabel_ = nullptr;
@@ -192,13 +200,17 @@ private:
     PerformancePadMode padMode_ = PerformancePadMode::HotCue;
     QPushButton* normalModeBtns_[4] = {};
     QToolButton* shiftedModesBtn_ = nullptr;
-    QLabel* padStatusLabel_ = nullptr;
+    QComboBox* customBankCombo_ = nullptr;
+    CustomPadBank customPadBank_ = CustomPadBank::Normal;
+    ElidedFeedbackLabel* padStatusLabel_ = nullptr;
     std::array<std::array<PerformancePadAssignment, kPerformancePadCount>,
                kPerformanceModeCount> padAssignments_ {};
     std::array<PerformancePadMode, kPerformancePadCount> pressedPadModes_ {};
     std::array<bool, kPerformancePadCount> padIsPressed_ {};
     std::array<bool, kPerformancePadCount> padReleasePending_ {};
-    bool temporaryTransitionCuesActive_ = false;
+    // Availability is independent of the visible CUSTOM bank. Replay keeps
+    // its isolated slots even when the user views/edits normal track pads.
+    bool temporaryTransitionCuesAvailable_ = false;
     std::array<double, kPerformancePadCount> temporaryTransitionCueSecs_ {
         -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0};
     std::array<double, kPerformancePadCount> temporaryTransitionLoopEndSecs_ {

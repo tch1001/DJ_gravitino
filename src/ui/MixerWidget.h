@@ -19,6 +19,7 @@ class MixerWidget : public QWidget {
 public:
     explicit MixerWidget(ControlBus* bus, QWidget* parent = nullptr);
     QWidget* controlWidget(DeckId deck, ControlId control) const;
+    void setTopWidget(QWidget* widget);
 
 protected:
     // Double-click on a FILTER dial re-centers it to 0.5 (off).
@@ -44,6 +45,7 @@ private:
     ControlBus* bus_;
     Strip strips_[2];
     QSlider* crossfader_ = nullptr;
+    QWidget* topArea_ = nullptr;
 };
 
 } // namespace gvt
