@@ -13,6 +13,10 @@ foreach(t ${TEST_SRCS})
                 ${CMAKE_SOURCE_DIR}/src/ui/LibraryWidget.cpp
                 ${CMAKE_SOURCE_DIR}/src/ui/TransitionGraphWindow.cpp)
         endif()
+    elseif(name STREQUAL "test_crossfader_bypass")
+        target_sources(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src/ui/MixerWidget.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/Theme.cpp)
+        target_link_libraries(${name} PRIVATE Qt6::Widgets)
     elseif(name STREQUAL "test_set_render_window")
         target_sources(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src/ui/SetRenderWindow.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/Theme.cpp)

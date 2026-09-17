@@ -6,6 +6,25 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-17 (codex): **Output hot-plug recovery and default crossfader bypass.**
+  AudioEngine now owns MIDI-independent output recovery, resolving default
+  endpoint IDs and reinitializing stopped/interrupted/stalled streams on the
+  GUI thread. Explicit missing outputs wait silently for reconnect rather
+  than falling back to speakers. Deck state and preview leases survive;
+  offline engines never acquire devices. A small mixer OFF checkbox defaults
+  checked each launch; bypass retains centered equal-power gains, ignores
+  crossfader moves, and is excluded from transitions. Re-enable starts at
+  center with per-control hardware pickup; disabled crossfaders do not affect
+  hardware sync scoring. Preview inherits the runtime bypass. Null-backend
+  lifecycle regressions simulate stale-started and interruption recovery;
+  pure tests cover default/pinned routes and callback watchdogs. Crossfader
+  audio/UI/recorder/preview/pickup tests added. QA in
+  /tmp/gravitino-audio-reconnect-qa.jYg3pz. Full build, all 40 ctests, selftest,
+  compact rendered mixer inspection and diff checks pass. Recovery also
+  preserves an exclusive editor preview lease. The user's saved output is
+  External Headphones; physical unplug/replug validation remains a user check.
+  No user transition files or song cues edited. Restart requested by user.
+
 - 2026-09-17 (codex): **Full Like a G6 → Super Bass set delivered.** The
   approved queue includes both Animals tracks and the late Bad → Albatraoz
   exit: 47 songs / 46 transitions, 2:03:54.869. WAV, reusable local set queue

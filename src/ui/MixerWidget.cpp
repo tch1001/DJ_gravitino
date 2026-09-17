@@ -2,6 +2,7 @@
 #include "Theme.h"
 
 #include <QDial>
+#include <QCheckBox>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -84,6 +85,7 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
     crossfader_->setStyleSheet(
         QStringLiteral("QSlider:horizontal { min-width:76px; max-width:76px; }"));
     crossfader_->setToolTip(tr("Crossfader: A ↔ B"));
+    crossfader_->setEnabled(false);
     connect(crossfader_, &QSlider::valueChanged, this, [this](int v) {
         if (!crossfader_->signalsBlocked())
             bus_->dispatch(
@@ -102,7 +104,22 @@ MixerWidget::MixerWidget(ControlBus* bus, QWidget* parent)
     xfRow->addWidget(crossfader_);
     xfRow->addWidget(bLbl);
     xfCol->addLayout(xfRow);
-    xfCol->addWidget(caption(tr("CROSSFADER")));
+    auto* xfCaption = new QHBoxLayout;
+    xfCaption->setSpacing(3);
+    xfCaption->addWidget(caption(tr("CROSSFADER")));
+    disableCrossfader_ = new QCheckBox(tr("OFF"), this);
+    disableCrossfader_->setObjectName(QStringLiteral("disableCrossfader"));
+    disableCrossfader_->setAccessibleName(tr("Disable crossfader"));
+    disableCrossfader_->setChecked(true);
+    disableCrossfader_->setStyleSheet(QStringLiteral("QCheckBox { font-size:9px; spacing:2px; }"));
+    disableCrossfader_->setToolTip(tr("Disable crossfader (default): keep both decks at the centered mix level. "
+        "Mouse and controller crossfader moves cannot change the sound. "
+        "Uncheck to enable from center; hardware must pick up the center first."));
+    connect(disableCrossfader_, &QCheckBox::toggled, this, [this](bool disabled) {
+        bus_->dispatch({kNoDeck, ControlId::CrossfaderEnabled, disabled ? 0.0 : 1.0}, Origin::Ui);
+    });
+    xfCaption->addWidget(disableCrossfader_);
+    xfCol->addLayout(xfCaption);
     xfCol->addStretch(1);
     row->addLayout(xfCol);
 
@@ -283,7 +300,17 @@ void MixerWidget::updateFilterLabel(int deck, double value)
 void MixerWidget::onBusEvent(const ControlEvent& e, Origin origin)
 {
     Q_UNUSED(origin);
+    if (e.id == ControlId::CrossfaderEnabled && std::isfinite(e.value)) {
+        QSignalBlocker block(disableCrossfader_);
+        QSignalBlocker sliderBlock(crossfader_);
+        if (disableCrossfader_->isChecked() || e.value <= 0.5)
+            crossfader_->setValue(toSteps(0.5));
+        disableCrossfader_->setChecked(e.value <= 0.5);
+        crossfader_->setEnabled(e.value > 0.5);
+        return;
+    }
     if (e.id == ControlId::Crossfader) {
+        if (disableCrossfader_->isChecked() || !std::isfinite(e.value)) return;
         QSignalBlocker block(crossfader_);
         crossfader_->setValue(toSteps(e.value));
         return;

@@ -527,6 +527,11 @@ struct MidiEngine::Impl {
     void handleMidiEventOnGui(const ControlEvent& event)
     {
         emit owner->hardwareControlObserved(event);
+        if (event.id == ControlId::Crossfader && engine && !engine->crossfaderEnabled.load()) {
+            takeover.rememberHardware(event);
+            emit owner->hardwareStateChanged();
+            return;
+        }
         if (manualFrozen && SoftTakeover::supports(event)) {
             takeover.rememberHardware(event);
             emit owner->hardwareStateChanged();
@@ -600,6 +605,15 @@ struct MidiEngine::Impl {
 
     void observeEvent(const ControlEvent& event, Origin origin)
     {
+        if (event.id == ControlId::CrossfaderEnabled && engine) {
+            if (engine->crossfaderEnabled.load() && !manualFrozen)
+                takeover.retarget({kNoDeck, ControlId::Crossfader, engine->crossfader.load()});
+            else
+                takeover.releaseControl(kNoDeck, ControlId::Crossfader);
+            takeoverFrozen.store(takeover.active(), std::memory_order_release);
+            emit owner->softTakeoverChanged();
+            emit owner->hardwareStateChanged();
+        }
         if (takeoverTracking && origin != Origin::Midi &&
             SoftTakeover::supports(event)) {
             takeoverTouched.insert(
@@ -990,8 +1004,9 @@ struct MidiEngine::Impl {
         for (DeckId deck = 0; deck < 2; ++deck)
             for (ControlId control : deckControls)
                 result.push_back({deck, control, engineValue(deck, control)});
-        result.push_back({kNoDeck, ControlId::Crossfader,
-                          engineValue(kNoDeck, ControlId::Crossfader)});
+        if (engine && engine->crossfaderEnabled.load())
+            result.push_back({kNoDeck, ControlId::Crossfader,
+                              engineValue(kNoDeck, ControlId::Crossfader)});
         return result;
     }
 

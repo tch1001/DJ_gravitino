@@ -3013,6 +3013,7 @@ QString TransitionPanel::tutorialInstruction(
     case ControlId::PerformancePad5: case ControlId::PerformancePad6:
     case ControlId::PerformancePad7: case ControlId::PerformancePad8:
     case ControlId::TempoRange:
+    case ControlId::CrossfaderEnabled:
     case ControlId::Count:
         break;
     }

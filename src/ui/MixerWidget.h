@@ -5,6 +5,7 @@
 class QDial;
 class QLabel;
 class QSlider;
+class QCheckBox;
 
 namespace gvt {
 
@@ -45,6 +46,7 @@ private:
     ControlBus* bus_;
     Strip strips_[2];
     QSlider* crossfader_ = nullptr;
+    QCheckBox* disableCrossfader_ = nullptr;
     QWidget* topArea_ = nullptr;
 };
 

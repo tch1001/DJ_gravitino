@@ -120,15 +120,34 @@ Deck B PCM ─▶ tempo/trim/EQ/filter/FX ─┤─▶ channel fader ─┘
 - EQ: RBJ biquad low-shelf 250 Hz / peak 1 kHz / high-shelf 4 kHz, ±26 dB with
   full-kill at slider bottom.
 - Limiter: soft-clip tanh on master to avoid inter-deck clipping.
+- Crossfader: the compact mixer has an **OFF** checkbox, checked on every
+  launch. Bypass uses the existing equal-power center gains (no gain boost)
+  and ignores mouse/MIDI crossfader moves; channel faders remain authoritative.
+  `CrossfaderEnabled` is an appended, local-only ControlBus state control,
+  excluded from capture, executable events and portable timeline validation.
+  Enabling starts centered and independently arms MIDI pickup; disabling
+  releases only that pickup gate and removes crossfader from hardware sync
+  scoring. Editor preview copies this runtime context. No transition schema
+  or user recipe is rewritten.
 - Settings > Audio Output selects the persisted CoreAudio master device; the
   initial default follows macOS, so MacBook and Bluetooth speakers work.
   Selecting DDJ-FLX4 uses one four-channel stream (master 1/2, phones 3/4).
   Selecting another master device opens a second four-channel FLX4 stream and
   feeds only its phones 3/4 from a bounded lock-free cue ring. This prevents a
   second audio callback from advancing/rendering either deck again.
-  Because CoreMIDI may enumerate slightly before the USB CoreAudio endpoint,
-  the UI retries that secondary phones stream while the controller is present
-  and reopens a stopped endpoint after hot-plug. The Audio Output menu includes
+  `AudioEngine::refreshOutputDevices()` runs on a one-second GUI-thread timer
+  after realtime output is requested, independent of MIDI connection. It
+  resolves System Default to a concrete endpoint ID, follows default changes
+  (including stereo/four-channel changes), and reopens stopped/interrupted or
+  callback-stalled streams without reloading or rewinding decks. Notification
+  callbacks only set atomics; no device lifecycle work occurs on CoreAudio's
+  callback thread. A three-second heartbeat watchdog covers backends that
+  continue reporting started after callbacks stop. An explicitly selected
+  missing endpoint remains selected and silent until it returns; it does not
+  fall back to speakers, including at launch. Failed manual switches restore
+  the previous preference. Offline engines and intentional stopDevice() never
+  initiate recovery. The same timer retries the secondary FLX4 stream even if
+  CoreMIDI and CoreAudio enumerate at different times. The Audio Output menu includes
   a low-volume phones-only test tone for end-to-end channel 3/4 diagnosis.
   Channel CUE monitors the post-EQ/filter/FX, pre-fader deck signal, unaffected
   by channel faders or the crossfader. HEADPHONES MIX balances that PFL bus

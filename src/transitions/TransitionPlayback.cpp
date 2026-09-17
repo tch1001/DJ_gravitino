@@ -142,6 +142,8 @@ void copyTransitionPlaybackContext(AudioEngine& source, int sourceOutgoing,
                                    ControlBus& targetBus, AudioEngine& target)
 {
     const double xf = source.crossfader.load();
+    targetBus.dispatch({kNoDeck, ControlId::CrossfaderEnabled,
+                        source.crossfaderEnabled.load() ? 1.0 : 0.0}, Origin::System);
     targetBus.dispatch({kNoDeck, ControlId::Crossfader,
                         sourceOutgoing == 0 ? xf : 1.0 - xf}, Origin::System);
     for (Role role : {Role::FromDeck, Role::ToDeck}) {

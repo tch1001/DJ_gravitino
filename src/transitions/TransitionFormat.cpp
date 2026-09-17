@@ -416,6 +416,7 @@ bool portableTimelineControlAllowed(ControlId control)
     case ControlId::PerformancePad8:
     case ControlId::TempoRange:
     case ControlId::Trim:
+    case ControlId::CrossfaderEnabled:
     case ControlId::Count:
         return false;
     default:

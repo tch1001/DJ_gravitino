@@ -44,7 +44,8 @@ struct GvtEvent {
 // as inert. The live crossfader remains a normal manual UI/MIDI control.
 inline bool transitionEventIsExecutable(const GvtEvent& event) noexcept
 {
-    return event.control != ControlId::Crossfader;
+    return event.control != ControlId::Crossfader &&
+           event.control != ControlId::CrossfaderEnabled;
 }
 
 struct TransitionFingerprint {

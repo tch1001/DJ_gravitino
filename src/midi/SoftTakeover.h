@@ -31,6 +31,7 @@ public:
     void rememberHardware(const ControlEvent& event);
     void arm(const std::vector<ControlEvent>& targets);
     bool retarget(const ControlEvent& target);
+    void releaseControl(DeckId deck, ControlId control);
 
     // Returns true only when the event may flow to Gravitino. While a target
     // is pending, even the pickup/crossing event is consumed so the software

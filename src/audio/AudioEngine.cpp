@@ -1,10 +1,14 @@
 #include "AudioEngine.h"
 #include "TempoRange.h"
+#include "AudioOutputRecovery.h"
+#include "AudioDeviceTestAccess.h"
 
 #include "../../third_party/miniaudio.h"
 #include "../audio/MasterRecorder.h"
 
 #include <QDebug>
+#include <QElapsedTimer>
+#include <QTimer>
 
 #include <algorithm>
 #include <array>
@@ -67,10 +71,46 @@ struct AudioEngine::Impl {
     bool cueDeviceInitialized = false;
     bool cueDeviceStarted = false;
     bool fourChannelOutput = false;
+    bool outputWanted = false;
+    QTimer* recoveryTimer = nullptr;
+    QElapsedTimer recoveryClock;
+    ma_device_id activeDeviceId {};
+    std::atomic<bool> primaryInterrupted {false}, cueInterrupted {false};
+    std::atomic<std::uint64_t> primaryFrames {0}, cueFrames {0};
+    AudioCallbackWatchdog primaryWatchdog, cueWatchdog;
     QString outputName;
     QString requestedOutputName;
     std::atomic<AudioPreviewSource*> previewSource {nullptr};
     std::atomic<int> previewReaders {0};
+
+    void closeOutputs()
+    {
+        // Never called on an audio/CoreAudio notification thread. Uninit
+        // drains callbacks before resetting the shared monitor ring.
+        if (cueDeviceInitialized) ma_device_uninit(&cueDevice);
+        if (deviceInitialized) ma_device_uninit(&device);
+        cueDeviceInitialized = cueDeviceStarted = false;
+        deviceInitialized = deviceStarted = false;
+        fourChannelOutput = false;
+        outputName.clear();
+        cueReadFrame.store(0);
+        cueWriteFrame.store(0);
+        primaryInterrupted.store(false);
+        cueInterrupted.store(false);
+    }
+
+    static void notificationCallback(const ma_device_notification* notification) noexcept
+    {
+        auto* impl = static_cast<Impl*>(notification->pDevice->pUserData);
+        if (!impl) return;
+        if (notification->type == ma_device_notification_type_stopped ||
+            notification->type == ma_device_notification_type_interruption_began ||
+            notification->type == ma_device_notification_type_interruption_ended) {
+            auto& interrupted = notification->pDevice == &impl->device
+                ? impl->primaryInterrupted : impl->cueInterrupted;
+            interrupted.store(true, std::memory_order_release);
+        }
+    }
 
     bool ensureContext(QString* error)
     {
@@ -96,6 +136,7 @@ struct AudioEngine::Impl {
         if (impl == nullptr || output == nullptr)
             return;
 
+        impl->primaryFrames.fetch_add(frameCount, std::memory_order_relaxed);
         impl->renderMix(static_cast<float*>(output),
                         static_cast<int>(frameCount),
                         static_cast<int>(device->playback.channels),
@@ -110,6 +151,7 @@ struct AudioEngine::Impl {
         auto* const impl = static_cast<Impl*>(device->pUserData);
         if (impl == nullptr || output == nullptr)
             return;
+        impl->cueFrames.fetch_add(frameCount, std::memory_order_relaxed);
         impl->readCueRing(static_cast<float*>(output),
                           static_cast<int>(frameCount),
                           static_cast<int>(device->playback.channels));
@@ -243,7 +285,8 @@ struct AudioEngine::Impl {
             decks[0].render(deckA.data(), chunkFrames, cueA.data());
             decks[1].render(deckB.data(), chunkFrames, cueB.data());
 
-            float xf = owner->crossfader.load(std::memory_order_relaxed);
+            float xf = owner->crossfaderEnabled.load(std::memory_order_relaxed)
+                ? owner->crossfader.load(std::memory_order_relaxed) : 0.5f;
             if (!std::isfinite(xf))
                 xf = 0.0f;
             xf = std::clamp(xf, 0.0f, 1.0f);
@@ -348,7 +391,9 @@ struct AudioEngine::Impl {
     {
         if (fourChannelOutput || !contextInitialized)
             return fourChannelOutput;
-        if (cueOutputActive())
+        const bool interrupted = cueInterrupted.exchange(false);
+        const bool stalled = cueWatchdog.stalled(cueFrames.load(), recoveryClock.elapsed());
+        if (cueOutputActive() && !interrupted && !stalled)
             return true;
         // CoreAudio stops a device when its USB endpoint disappears. Clear
         // the stale miniaudio object so a later hot-plug retry can reopen it.
@@ -387,6 +432,7 @@ struct AudioEngine::Impl {
         config.noPreSilencedOutputBuffer = MA_TRUE;
         config.noClip = MA_TRUE;
         config.dataCallback = &Impl::cueDataCallback;
+        config.notificationCallback = &Impl::notificationCallback;
         config.pUserData = this;
         const ma_result initResult =
             ma_device_init(&context, &config, &cueDevice);
@@ -407,6 +453,8 @@ struct AudioEngine::Impl {
             return false;
         }
         cueDeviceStarted = true;
+        cueInterrupted.store(false);
+        cueWatchdog.reset(cueFrames.load(), recoveryClock.elapsed());
         char clientMap[256] {};
         char deviceMap[256] {};
         ma_channel_map_to_string(cueDevice.playback.channelMap,
@@ -427,6 +475,11 @@ struct AudioEngine::Impl {
 AudioEngine::AudioEngine(ControlBus* bus, QObject* parent)
     : QObject(parent), impl_(std::make_unique<Impl>(this))
 {
+    impl_->recoveryClock.start();
+    impl_->recoveryTimer = new QTimer(this);
+    impl_->recoveryTimer->setInterval(1000);
+    connect(impl_->recoveryTimer, &QTimer::timeout,
+            this, &AudioEngine::refreshOutputDevices);
     if (bus != nullptr) {
         QObject::connect(bus, &ControlBus::eventDispatched,
                          this, &AudioEngine::applyEvent,
@@ -460,19 +513,20 @@ bool AudioEngine::start(const QString& preferredOutputName, QString* error)
 {
     if (error != nullptr)
         error->clear();
-    if (impl_->deviceStarted) {
+    if (impl_->deviceStarted && impl_->deviceInitialized &&
+        Impl::deviceIsActive(impl_->device) && !impl_->primaryInterrupted.load()) {
         if (impl_->requestedOutputName == preferredOutputName)
             return true;
         return switchOutputDevice(preferredOutputName, error);
     }
 
+    impl_->outputWanted = true;
+    impl_->requestedOutputName = preferredOutputName;
+    impl_->recoveryTimer->start();
+    impl_->closeOutputs();
+
     if (!impl_->ensureContext(error))
         return false;
-
-    if (impl_->deviceInitialized) {
-        ma_device_uninit(&impl_->device);
-        impl_->deviceInitialized = false;
-    }
 
     ma_device_config config = ma_device_config_init(ma_device_type_playback);
     config.playback.format = ma_format_f32;
@@ -483,6 +537,7 @@ bool AudioEngine::start(const QString& preferredOutputName, QString* error)
     config.noPreSilencedOutputBuffer = MA_TRUE;
     config.noClip = MA_TRUE;
     config.dataCallback = &Impl::dataCallback;
+    config.notificationCallback = &Impl::notificationCallback;
     config.pUserData = impl_.get();
 
     ma_device_info* playback = nullptr;
@@ -513,20 +568,26 @@ bool AudioEngine::start(const QString& preferredOutputName, QString* error)
 
     if (preferredOutputName.isEmpty()) {
         for (ma_uint32 i = 0; i < playbackCount; ++i) {
-            if (playback[i].isDefault == MA_TRUE &&
-                QString::fromUtf8(playback[i].name).contains(
-                    QStringLiteral("DDJ-FLX4"), Qt::CaseInsensitive)) {
+            if (playback[i].isDefault == MA_TRUE) {
                 selected = &playback[i];
                 break;
             }
         }
     }
 
+    if (!selected) {
+        if (error) *error = QStringLiteral("No default audio output is available");
+        return false;
+    }
+
     const bool selectedFlx4 = selected != nullptr &&
         QString::fromUtf8(selected->name).contains(
             QStringLiteral("DDJ-FLX4"), Qt::CaseInsensitive);
-    if (selected != nullptr)
-        config.playback.pDeviceID = &selected->id;
+    // Pin this stream to the resolved endpoint. GUI-thread recovery follows
+    // system-default changes, including stereo <-> FLX4 channel-count changes,
+    // instead of racing miniaudio's CoreAudio default-device rerouter.
+    impl_->activeDeviceId = selected->id;
+    config.playback.pDeviceID = &impl_->activeDeviceId;
     if (selectedFlx4)
         config.playback.channels = kFlx4Channels;
 
@@ -561,6 +622,8 @@ bool AudioEngine::start(const QString& preferredOutputName, QString* error)
     }
 
     impl_->deviceStarted = true;
+    impl_->primaryInterrupted.store(false);
+    impl_->primaryWatchdog.reset(impl_->primaryFrames.load(), impl_->recoveryClock.elapsed());
     if (!impl_->fourChannelOutput)
         impl_->startFlx4CueDevice();
     emit outputDeviceChanged(
@@ -574,39 +637,25 @@ bool AudioEngine::switchOutputDevice(const QString& preferredOutputName,
 {
     if (error != nullptr)
         error->clear();
-    if (impl_->deviceStarted &&
+    if (impl_->deviceStarted && impl_->deviceInitialized &&
+        Impl::deviceIsActive(impl_->device) && !impl_->primaryInterrupted.load() &&
         impl_->requestedOutputName == preferredOutputName) {
-        const bool hadPhones = headphoneOutputAvailable();
-        if (!impl_->fourChannelOutput)
-            impl_->startFlx4CueDevice();
-        if (!hadPhones && headphoneOutputAvailable())
-            emit outputDeviceChanged(impl_->outputName, true);
-        return true;
+        refreshOutputDevices();
+        if (impl_->deviceStarted) return true;
     }
 
     const QString previousPreference = impl_->requestedOutputName;
     stopDevice();
-    if (impl_->cueDeviceInitialized) {
-        ma_device_uninit(&impl_->cueDevice);
-        impl_->cueDeviceInitialized = false;
-    }
-    if (impl_->deviceInitialized) {
-        ma_device_uninit(&impl_->device);
-        impl_->deviceInitialized = false;
-    }
-    impl_->fourChannelOutput = false;
-    impl_->outputName.clear();
+    impl_->closeOutputs();
 
     QString requestedError;
     if (start(preferredOutputName, &requestedError))
         return true;
 
-    // A failed switch should not strand a playing set without output. Restore
-    // the previous preference, then automatic output as a final fallback.
+    // Restore the previous preference after a failed explicit switch. If it
+    // too is disconnected, keep waiting rather than leaking audio to speakers.
     QString restoreError;
-    if (!start(previousPreference, &restoreError) &&
-        !previousPreference.isEmpty())
-        start(QString(), &restoreError);
+    start(previousPreference, &restoreError);
     if (error != nullptr)
         *error = requestedError;
     return false;
@@ -614,6 +663,8 @@ bool AudioEngine::switchOutputDevice(const QString& preferredOutputName,
 
 void AudioEngine::stopDevice()
 {
+    impl_->outputWanted = false;
+    impl_->recoveryTimer->stop();
     if (impl_->cueDeviceStarted) {
         ma_device_stop(&impl_->cueDevice);
         impl_->cueDeviceStarted = false;
@@ -623,6 +674,71 @@ void AudioEngine::stopDevice()
         ma_device_stop(&impl_->device);
         impl_->deviceStarted = false;
     }
+}
+
+void AudioEngine::refreshOutputDevices()
+{
+    if (!impl_->outputWanted) return; // Offline graphs must never open hardware.
+    QString error;
+    if (!impl_->ensureContext(&error)) return;
+    ma_device_info* playback = nullptr;
+    ma_uint32 count = 0;
+    if (ma_context_get_devices(&impl_->context, &playback, &count, nullptr, nullptr) != MA_SUCCESS)
+        return; // A transient enumeration error is not a disconnect.
+    QList<AudioOutputDevice> choices;
+    for (ma_uint32 i = 0; i < count; ++i)
+        choices.append({QString::fromUtf8(playback[i].name), playback[i].isDefault == MA_TRUE});
+    const int selected = audioOutputIndex(choices, impl_->requestedOutputName);
+    const bool healthy = impl_->deviceInitialized && impl_->deviceStarted &&
+        Impl::deviceIsActive(impl_->device) && !impl_->primaryInterrupted.load() &&
+        !impl_->primaryWatchdog.stalled(impl_->primaryFrames.load(), impl_->recoveryClock.elapsed());
+    const bool same = selected >= 0 &&
+        ma_device_id_equal(&playback[selected].id, &impl_->activeDeviceId);
+    const auto decision = audioOutputRecovery(true, selected >= 0,
+        impl_->deviceInitialized, healthy, same);
+    const QString oldName = impl_->outputName;
+    const bool hadPhones = headphoneOutputAvailable();
+    if (decision != AudioOutputRecovery::None) {
+        const QString preference = impl_->requestedOutputName;
+        impl_->closeOutputs();
+        if (decision == AudioOutputRecovery::Reopen && start(preference, &error))
+            return; // start() emits the updated route.
+        if (!oldName.isEmpty() || hadPhones) emit outputDeviceChanged({}, false);
+    } else if (impl_->deviceStarted && !impl_->fourChannelOutput) {
+        impl_->startFlx4CueDevice();
+        if (hadPhones != headphoneOutputAvailable())
+            emit outputDeviceChanged(impl_->outputName, headphoneOutputAvailable());
+    }
+}
+
+bool detail::AudioDeviceTestAccess::useNullBackend(AudioEngine& engine)
+{
+    auto& impl = *engine.impl_;
+    if (impl.contextInitialized || impl.outputWanted) return false;
+    const ma_backend backend = ma_backend_null;
+    impl.contextInitialized = ma_context_init(&backend, 1, nullptr, &impl.context) == MA_SUCCESS;
+    return impl.contextInitialized;
+}
+
+void detail::AudioDeviceTestAccess::stopBackend(AudioEngine& engine)
+{
+    // Intentionally leave the app's old deviceStarted flag set: this is the
+    // exact stale-state condition after a backend-side disconnect.
+    if (engine.impl_->deviceInitialized) ma_device_stop(&engine.impl_->device);
+}
+
+void detail::AudioDeviceTestAccess::notifyInterruption(AudioEngine& engine)
+{
+    if (!engine.impl_->deviceInitialized) return;
+    ma_device_notification notification{};
+    notification.pDevice = &engine.impl_->device;
+    notification.type = ma_device_notification_type_interruption_ended;
+    AudioEngine::Impl::notificationCallback(&notification);
+}
+
+bool detail::AudioDeviceTestAccess::backendActive(const AudioEngine& engine)
+{
+    return engine.impl_->deviceInitialized && AudioEngine::Impl::deviceIsActive(engine.impl_->device);
 }
 
 Deck& AudioEngine::deck(int index)
@@ -752,9 +868,18 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
     }
 
     if (event.id == ControlId::Crossfader) {
-        if (std::isfinite(event.value))
+        if (crossfaderEnabled.load() && std::isfinite(event.value))
             crossfader.store(normalizedValue(event.value),
                              std::memory_order_relaxed);
+        return;
+    }
+
+    if (event.id == ControlId::CrossfaderEnabled) {
+        if (std::isfinite(event.value)) {
+            if (!crossfaderEnabled.load() || event.value <= 0.5)
+                crossfader.store(0.5f);
+            crossfaderEnabled.store(event.value > 0.5, std::memory_order_relaxed);
+        }
         return;
     }
 
@@ -992,6 +1117,7 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
         // programmable assignments into ordinary deck ControlEvents.
         break;
     case ControlId::Crossfader:
+    case ControlId::CrossfaderEnabled:
     case ControlId::MasterCue:
     case ControlId::HeadphoneMix:
     case ControlId::BrowseSelect:

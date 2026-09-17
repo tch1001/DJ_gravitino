@@ -127,6 +127,7 @@ std::optional<Flx4TutorialMapping> flx4TutorialMapping(
     case ControlId::PerformancePad7:
     case ControlId::PerformancePad8:
     case ControlId::TempoRange:
+    case ControlId::CrossfaderEnabled:
     case ControlId::Count:
         return std::nullopt;
     }

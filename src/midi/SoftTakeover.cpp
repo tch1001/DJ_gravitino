@@ -38,6 +38,11 @@ void SoftTakeover::clear()
     targets_.clear();
 }
 
+void SoftTakeover::releaseControl(DeckId deck, ControlId control)
+{
+    targets_.erase(Key{deck, control});
+}
+
 void SoftTakeover::clearHardware()
 {
     hardware_.clear();

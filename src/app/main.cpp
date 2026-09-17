@@ -150,14 +150,6 @@ int main(int argc, char** argv)
     const QString preferredOutput =
         QSettings().value(QStringLiteral("audio/outputDevice")).toString();
     bool audioOk = engine->start(preferredOutput, &audioError);
-    QString savedOutputWarning;
-    if (!audioOk && !preferredOutput.isEmpty()) {
-        savedOutputWarning = QObject::tr(
-            "The saved audio output “%1” is unavailable:\n%2\n\n"
-            "Gravitino is using the macOS system default for this session.")
-                                 .arg(preferredOutput, audioError);
-        audioOk = engine->start(&audioError);
-    }
 
     gvt::MainWindow win(bus, engine, library, store, recorder, player, midi,
                         masterRec, stems);
@@ -170,13 +162,6 @@ int main(int argc, char** argv)
         QTimer::singleShot(2200, &win, [engine] {
             qInfo().noquote() << "FLX4 headphone diagnostic signal peak:"
                               << engine->headphoneSignalLevel();
-        });
-    }
-
-    if (!savedOutputWarning.isEmpty()) {
-        QTimer::singleShot(0, &win, [&win, savedOutputWarning] {
-            QMessageBox::warning(&win, QObject::tr("Audio output changed"),
-                                 savedOutputWarning);
         });
     }
 
@@ -211,7 +196,8 @@ int main(int argc, char** argv)
         QMessageBox::warning(
             &win, QObject::tr("Audio device unavailable"),
             QObject::tr("Couldn't start audio output:\n%1\n\n"
-                        "The UI stays usable; fix the device and restart.")
+                        "Gravitino will reconnect automatically when this output returns. "
+                        "You can also select another device in Settings > Audio Output.")
                 .arg(audioError));
     }
 

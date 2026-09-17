@@ -59,6 +59,7 @@ constexpr NameEntry kNames[] = {
     {ControlId::TransitionCue6, "transition_cue_6"},
     {ControlId::TransitionCue7, "transition_cue_7"},
     {ControlId::TransitionCue8, "transition_cue_8"},
+    {ControlId::CrossfaderEnabled, "xfader_enabled"},
 };
 } // namespace
 

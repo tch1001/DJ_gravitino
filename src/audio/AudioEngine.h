@@ -9,6 +9,7 @@
 #include "../control/ControlBus.h"
 
 namespace gvt {
+namespace detail { struct AudioDeviceTestAccess; }
 
 constexpr int kNumDecks = 2;
 
@@ -143,10 +144,14 @@ public:
     // briefly stopped and reopened. On failure the previous output is restored
     // when possible.
     bool switchOutputDevice(const QString& preferredOutputName, QString* error);
+    // GUI-thread hot-plug check; also called by an internal one-second timer.
+    // Explicit missing outputs wait for reconnection, never switch to speakers.
+    void refreshOutputDevices();
     void stopDevice();
 
     Deck& deck(int i);
     std::atomic<float> crossfader { 0.5f };  // startup center; 0 = A, 1 = B
+    std::atomic<bool> crossfaderEnabled { false }; // bypass = fixed centered gains
     std::atomic<bool> headphoneCue[kNumDecks] {}; // channel PFL selection
     std::atomic<bool> masterCue { false };        // master in headphone bus
     std::atomic<float> headphoneMix { 0.0f };     // 0 = CUE, 1 = MASTER
@@ -187,6 +192,7 @@ signals:
     void outputDeviceChanged(const QString& name, bool headphoneOutputAvailable);
 
 private:
+    friend struct detail::AudioDeviceTestAccess;
     struct Impl; std::unique_ptr<Impl> impl_;
 };
 

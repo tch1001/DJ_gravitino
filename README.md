@@ -23,7 +23,7 @@ for the Pioneer DDJ-FLX4 controller.
 - Selectable CoreAudio output for MacBook, Bluetooth, or DDJ-FLX4 speakers.
   With Mac/Bluetooth master output, a second FLX4 stream still carries
   pre-fader headphone cue; selecting FLX4 routes master 1/2 + phones 3/4
-- Mixer: channel faders, 3-band EQ, trim, crossfader
+- Mixer: channel faders, 3-band EQ, trim, optional crossfader (OFF by default)
 - Automatic BPM detection and beatgrid
 - Library browser scanning local MP3, FLAC, WAV, and AIFF files (tags via TagLib)
 - **Transition recording & replay** — the headline feature (see
@@ -72,8 +72,9 @@ cmake --build build
    ■ STOP & SAVE and name it. It lands in `~/Music/Gravitino/Transitions/` as
    a readable `.transition` YAML file you can edit in-app or share. Existing
    `.gvt` files remain readable and are never overwritten during conversion.
-   The crossfader always remains manual live-mixer state and is deliberately
-   excluded from transition recording and playback.
+   The crossfader is disabled on launch; uncheck **OFF** beside it to enable
+   manual use from center. Hardware must pick up center before taking over.
+   It is deliberately excluded from transition recording and playback.
 4. **Replay it**: next time that pair is loaded (matched by confirmed binding,
    structural fingerprint, or a checked recording ID), it appears in the Transitions list —
    ▶ PERFORM executes it beat-perfectly at whatever tempo you're running. If
@@ -133,6 +134,10 @@ transition round-trip files are removed automatically.
 
 Plug in a DDJ-FLX4 at any time — the status bar shows the connection and all
 controls + LEDs map automatically (see docs/STATUS.md for the exact mapping).
+Unplugged audio outputs reconnect automatically without resetting the decks.
+An explicitly selected headphone device stays silent while unplugged (no
+unexpected fallback to speakers); **System Default** follows macOS routing.
+
 Choose the master speakers under Settings ▸ Audio Output. The system default is
 used initially; Bluetooth works with its expected latency, while a connected
 FLX4 continues to provide the separate headphone-cue output.

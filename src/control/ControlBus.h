@@ -56,6 +56,7 @@ enum class ControlId : uint8_t {
     // read or write TrackData::hotCues.
     TransitionCue1, TransitionCue2, TransitionCue3, TransitionCue4,
     TransitionCue5, TransitionCue6, TransitionCue7, TransitionCue8,
+    CrossfaderEnabled, // local mixer preference, 0 = bypass; never serialized
     Count
 };
 

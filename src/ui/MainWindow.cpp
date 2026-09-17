@@ -376,30 +376,11 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     connect(midi_, &MidiEngine::connectionChanged, this,
             [this](bool connected, const QString&) {
                 if (!connected || engine_->headphoneOutputAvailable()) return;
-                QString error;
-                engine_->switchOutputDevice(
-                    engine_->outputDevicePreference(), &error);
+                engine_->refreshOutputDevices();
                 updateAudioOutputLabel();
             });
-    // CoreMIDI can enumerate the controller a moment before CoreAudio exposes
-    // its four-channel endpoint. Keep retrying the non-destructive secondary
-    // cue stream so MacBook/Bluetooth master output does not require an app
-    // restart merely because that startup race occurred.
-    auto* headphoneRetryTimer = new QTimer(this);
-    headphoneRetryTimer->setInterval(2000);
-    connect(headphoneRetryTimer, &QTimer::timeout, this, [this] {
-        if (!midi_->controllerConnected() ||
-            engine_->headphoneOutputAvailable())
-            return;
-        QString error;
-        engine_->switchOutputDevice(engine_->outputDevicePreference(), &error);
-        if (engine_->headphoneOutputAvailable()) {
-            updateAudioOutputLabel();
-            statusBar()->showMessage(
-                tr("FLX4 headphone cue output connected"), 4000);
-        }
-    });
-    headphoneRetryTimer->start();
+    // AudioEngine owns hot-plug recovery for every output, independent of
+    // whether a MIDI controller is connected.
     connect(engine_, &AudioEngine::outputDeviceChanged, this,
             [this](const QString&, bool) { updateAudioOutputLabel(); });
     transitionPanel_->setHardwareInputFrozen(midi_->hardwareInputFrozen());
@@ -1096,7 +1077,11 @@ void MainWindow::updateAudioOutputLabel()
                   .arg(outputName,
                        phones ? tr(" · FLX4 PHONES") : QString()));
     rateLabel_->setToolTip(
-        phones
+        outputName.isEmpty()
+            ? tr("Waiting for audio output “%1” to reconnect. Choose another output in Settings > Audio Output.")
+                  .arg(engine_->outputDevicePreference().isEmpty()
+                      ? tr("System Default") : engine_->outputDevicePreference())
+        : phones
             ? (masterOnFlx4
                    ? tr("FLX4 master and headphone outputs are active")
                    : tr("Master uses %1; headphone cue uses the FLX4")
