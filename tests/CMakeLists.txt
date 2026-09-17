@@ -13,12 +13,17 @@ foreach(t ${TEST_SRCS})
                 ${CMAKE_SOURCE_DIR}/src/ui/LibraryWidget.cpp
                 ${CMAKE_SOURCE_DIR}/src/ui/TransitionGraphWindow.cpp)
         endif()
+    elseif(name STREQUAL "test_set_render_window")
+        target_sources(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src/ui/SetRenderWindow.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/Theme.cpp)
+        target_link_libraries(${name} PRIVATE Qt6::Widgets)
     elseif(name STREQUAL "test_transition_fields_editor")
         target_sources(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src/ui/TransitionFieldsEditor.cpp)
         target_link_libraries(${name} PRIVATE Qt6::Widgets)
     elseif(name STREQUAL "test_ui_layout")
         target_sources(${name} PRIVATE
             ${CMAKE_SOURCE_DIR}/src/ui/MainWindow.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/Theme.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/DeckWidget.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/DetailWaveformView.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/MixerWidget.cpp
@@ -26,6 +31,7 @@ foreach(t ${TEST_SRCS})
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionPanel.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionEditor.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionFieldsEditor.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/SetRenderWindow.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionGraphWindow.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/Flx4TutorialWidget.cpp)
         target_link_libraries(${name} PRIVATE Qt6::Widgets)

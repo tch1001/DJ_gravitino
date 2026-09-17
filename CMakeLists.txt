@@ -32,6 +32,7 @@ add_library(gvtcore STATIC
     src/audio/Eq.cpp
     src/audio/Fx.cpp
     src/audio/MasterRecorder.cpp
+    src/audio/RecordingWav.cpp
     src/analysis/StemSeparator.cpp
     src/analysis/TrackData.cpp
     src/analysis/BeatAnalyzer.cpp
@@ -50,6 +51,7 @@ add_library(gvtcore STATIC
     src/transitions/TransitionRecorder.cpp
     src/transitions/TransitionPlayer.cpp
     src/transitions/TransitionPlayback.cpp
+    src/transitions/SetRenderer.cpp
     src/midi/MidiEngine.cpp
     src/midi/Flx4Mapping.cpp
     src/midi/Flx4TutorialMap.cpp
@@ -67,6 +69,7 @@ add_executable(gravitino MACOSX_BUNDLE
     src/app/main.cpp
     src/app/SelfTest.cpp
     src/ui/MainWindow.cpp
+    src/ui/Theme.cpp
     src/ui/DeckWidget.cpp
     src/ui/DetailWaveformView.cpp
     src/ui/MixerWidget.cpp
@@ -74,6 +77,7 @@ add_executable(gravitino MACOSX_BUNDLE
     src/ui/TransitionPanel.cpp
     src/ui/TransitionEditor.cpp
     src/ui/TransitionFieldsEditor.cpp
+    src/ui/SetRenderWindow.cpp
     src/ui/TransitionGraphWindow.cpp
     src/ui/Flx4TutorialWidget.cpp
 )

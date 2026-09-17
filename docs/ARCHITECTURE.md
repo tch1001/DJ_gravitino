@@ -41,6 +41,8 @@ third_party/      miniaudio.h (vendored)
 GUI startup takes a per-user `QLockFile` before constructing `AudioEngine`.
 Only one Gravitino GUI process may own a CoreAudio stream at a time; headless
 `--selftest` runs before that guard and remains independently runnable.
+The `--set-builder`, `--check-set` and `--render-set` utilities also run before
+the guard: none opens an audio device or takes the live editor MASTER lease.
 
 After QApplication construction, `QtAccessibilityWorkaround.mm` installs a
 process-local compatibility repair for Cocoa on Qt 6.11.0/6.11.1 only. Qt's
@@ -415,6 +417,69 @@ The virtual FLX4 mirrors live controls, pad state, LEDs, and channel meters;
 prose/countdown/reset guidance lives in the transition control panel above
 CLOSE ENOUGH. Perform gives the guided run up to eight beats of pre-anchor
 countdown; Prime arms the same guidance against the live outgoing deck.
+
+## Offline set recording
+
+`SetRenderWindow` owns an ordered, read-only snapshot of transition recipes and
+metadata-only asset profiles. Its QtConcurrent worker constructs its own
+ControlBus, AudioEngine and TransitionPlayer in the worker thread. Progress is
+queued back to the GUI; cancellation/destruction joins the worker safely.
+Only two assets and their needed stems are decoded at once. Song-catalog grids
+and identities are read, never re-analyzed or persisted. Asset SHA-256 and
+decoded fingerprints must still match; changed/deleted queued recipes require
+an explicit reopen/re-add. No source transition, permanent cue or audio tag is
+written. Explicit stem preparation uses the existing cache workflow.
+
+`SetRenderer` resolves a chain of N transitions to N+1 compatible assets. It
+rejects missing/ambiguous choices, unavailable stems, unsupported recipes,
+stopped/looping incoming handoffs and next anchors already passed. The shared
+transport trace predicts these checks. Rendering uses the same setup, Perform
+positioning, semantic cue/loop resolution and external-clock TransitionPlayer
+as editor preview, not a second control scheduler. Rendering clips blocks at
+event boundaries, scheduling discrete launches to within one sample. Existing
+live replay remains GUI-timer driven; this does not eliminate that jitter.
+
+The first song starts at file time zero at the first transition's BPM. Each
+subsequent solo section integrates a linear-in-time BPM ramp from the actual
+incoming exit tempo to the next recipe's master BPM. Its duration for B source
+beats and endpoint tempi P,Q is `120*B/(P+Q)` seconds. Automation inside a
+transition is unchanged. The same solo interval linearly interpolates the
+actual LOW/MID/HIGH knob positions to the next outgoing setup in normalized
+knob space (not linear amplitude). All three reach their exact target before
+the next setup is applied, preventing the old instantaneous EQ reset. First
+song EQ starts at the fresh deck's neutral state; the final tail retains its
+ending EQ. A missing captured target retains the live value. An audible
+handoff with no renderable solo interval and differing EQ is refused rather
+than snapped. Faders, filter, FX and stems are not part of this EQ bridge.
+The outgoing deck is retired at its authored end
+(legacy end fallback: last executable event + one beat); the incoming state
+continues until the next entry. The last song plays to file end. There is no
+invented fade, structural remapping or automatic repair of authored moves.
+Key lock is a set option (default on); trim defaults to unity and manual
+crossfader to center. Crossfader data in recipes remains inert.
+
+`RecordingWav` is a synchronous private disk sink using QSaveFile, distinct from
+the live MasterRecorder ring. It never drops ring-buffer blocks or commits a
+partial/cancelled recording, refuses an existing output, and enforces RIFF's
+4 GiB limit. PCM encoding matches REC MASTER: 48 kHz, stereo, signed 16-bit.
+The appended `gvtm` chunk contains UTF-8 JSON `gravitino.recording` version 1:
+title/date, output format and frame count, track identities/grids, every
+transition's full portable YAML and exact start/end frames, key-lock setting,
+solo tempo ramps, and handoff policy. Renderer `offline-set.v2` additionally
+records `eq_ramps` with song_index, start/end_frame, linear-time curve,
+normalized-knob domain and LOW/MID/HIGH from_values/to_values. These derived
+bridges do not alter any embedded recipe or the transition schema. INFO
+title/software/date/comment tags and
+`cue `/`LIST adtl` chapter markers are independently readable by standard WAV
+players. `readRecordingManifest` is a bounded, read-only chunk reader. Recipes
+are data, never commands. Live REC MASTER manifest capture and importing these
+embedded recipes into the transition library remain separate future work.
+
+Local `.set.json` queue files are `gravitino.set` version 1 with title, key_lock,
+ordered transition_paths and optional explicit asset_paths. They contain local
+paths and are not portable replacement transition documents. Both .gvt and
+.transition load through the format-neutral reader. Song-list autoselection
+uses portable files only, avoiding duplicate legacy migrations.
 
 ## Testing
 

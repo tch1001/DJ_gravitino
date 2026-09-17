@@ -584,10 +584,13 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     transitionGraphBtn_->setToolTip(
         tr("Open a song-and-transition graph for planning a full set"));
     newTransitionBtn_ = new FitPushButton(tr("New…"));
+    setRenderBtn_ = new FitPushButton(tr("Record set…"));
+    setRenderBtn_->setObjectName(QStringLiteral("setRenderButton"));
+    setRenderBtn_->setToolTip(tr("Choose transitions and export a full WAV offline"));
     newTransitionBtn_->setObjectName(QStringLiteral("newTransitionButton"));
     renameTransitionBtn_ = new FitPushButton(tr("Rename…"));
     deleteTransitionBtn_ = new FitPushButton(tr("Delete…"));
-    for (QPushButton* button : {transitionGraphBtn_, newTransitionBtn_,
+    for (QPushButton* button : {transitionGraphBtn_, setRenderBtn_, newTransitionBtn_,
                                 renameTransitionBtn_, deleteTransitionBtn_}) {
         button->setFixedHeight(20);
         button->hide();
@@ -813,6 +816,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             &LibraryWidget::renameSelectedTransition);
     connect(newTransitionBtn_, &QPushButton::clicked, this,
             &LibraryWidget::newTransitionRequested);
+    connect(setRenderBtn_, &QPushButton::clicked, this, &LibraryWidget::setRenderRequested);
     connect(transitionGraphBtn_, &QPushButton::clicked, this,
             &LibraryWidget::showTransitionGraph);
     connect(deleteTransitionBtn_, &QPushButton::clicked, this,
@@ -890,6 +894,7 @@ void LibraryWidget::showTab(int index)
     deleteTransitionBtn_->setVisible(transitions);
     newTransitionBtn_->setVisible(transitions);
     transitionGraphBtn_->setVisible(transitions);
+    setRenderBtn_->setVisible(transitions);
     updateTransitionButtons();
 }
 

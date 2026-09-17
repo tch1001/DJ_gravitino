@@ -7,6 +7,7 @@
 #include <QtConcurrent/QtConcurrent>
 
 #include <algorithm>
+#include <cmath>
 
 #include "../../third_party/miniaudio.h"
 
@@ -71,6 +72,16 @@ void StemSeparator::startNext()
     } else {
         runDemucs(job);
     }
+}
+
+void StemSeparator::requestStemsForProfile(const TrackData& t)
+{
+    if (t.fingerprint.isEmpty() || t.filePath.isEmpty() || !std::isfinite(t.durationSec) ||
+        t.durationSec <= 0 || t.durationSec > 86400) return;
+    const auto hex=fingerprintHex(t.fingerprint);
+    for (const auto& job:queue_) if (job.fpHex==hex) return;
+    queue_.push_back(Job{t.fingerprint,hex,t.filePath,qint64(std::llround(t.durationSec*kSampleRate))});
+    if (!busy_) startNext();
 }
 
 void StemSeparator::finishJob()

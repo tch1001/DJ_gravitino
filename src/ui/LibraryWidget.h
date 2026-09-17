@@ -41,6 +41,7 @@ signals:
     void transitionSelected(const QString& filePath);
     void transitionEditRequested(const QString& filePath);
     void newTransitionRequested();
+    void setRenderRequested();
 
 public slots:
     void browseBy(int rows);             // physical browser encoder
@@ -95,6 +96,7 @@ private:
     QPushButton* renameTransitionBtn_ = nullptr;
     QPushButton* deleteTransitionBtn_ = nullptr;
     QPushButton* transitionGraphBtn_ = nullptr;
+    QPushButton* setRenderBtn_ = nullptr;
     QPushButton* newTransitionBtn_ = nullptr;
     QPushButton* loadABtn_ = nullptr;
     QPushButton* loadBBtn_ = nullptr;

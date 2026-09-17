@@ -29,6 +29,10 @@ public:
     // that job's signals. No-op if the track has no fingerprint.
     void requestStems(TrackDataPtr t);
 
+    // Set exports need only cached metadata, not every decoded song in RAM.
+    // Uses the known asset duration for the cache decode's frame count.
+    void requestStemsForProfile(const TrackData& profile);
+
     // True if the four stem WAVs are already cached for this track
     // (decode-only path — cheap, no demucs run).
     bool hasCached(const TrackData& t) const;

@@ -40,6 +40,6 @@ inline QColor waveHighColor() { return QColor(0x5a, 0x8f, 0xe8); }
 // Transition entry marker (orange).
 inline QColor transitionEntryColor() { return QColor(0xff, 0x8c, 0x1a); }
 
-QString appStyleSheet(); // defined in MainWindow.cpp
+QString appStyleSheet();
 
 } // namespace gvt

@@ -82,6 +82,8 @@ int main(int argc, char** argv)
     const QString cacheDir = temporary.path() + QStringLiteral("/cache");
     CHECK(QDir().mkpath(musicDir));
     qputenv("GRAVITINO_CACHE_DIR", cacheDir.toUtf8());
+    // TrackLibrary also persists catalog assets independently of the cue cache.
+    qputenv("GRAVITINO_CATALOG_PATH", temporary.filePath("catalog.json").toUtf8());
     CHECK(writeWavNamedMp3(musicDir + QStringLiteral("/grid-test.mp3")));
 
     gvt::TrackLibrary library;

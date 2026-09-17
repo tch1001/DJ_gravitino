@@ -32,6 +32,9 @@ for the Pioneer DDJ-FLX4 controller.
   outgoing/incoming waveforms, drag actions and automation at fractional beats,
   manage temporary cues/loops and initial state, audition from any cursor, and
   write mouse automation without touching the live decks
+- **Offline set recording** — queue connected transitions, choose compatible
+  audio files, and export a continuous WAV faster than realtime, with embedded
+  transition recipes and chapter markers
 - Full virtual DDJ-FLX4 Tutorial overlay: highlights each recorded gesture,
   accepts clicks or physical input, checks referenced hot-cue assignments,
   and shows live green targets on the real deck/mixer controls
@@ -96,6 +99,34 @@ cmake --build build
    exact property tables, undo/redo, a private MASTER preview, stem preparation,
    automation writing, and crash-recovery drafts. Legacy or endpoint-changing
    edits are always saved as a new `.transition`.
+7. **Record a whole set**: choose **Record set…** in the transition library or
+   **Transitions ▸ Record Set to WAV…**. Check transitions and add them to the
+   ordered queue, or paste one song per line into **From song list…**. Missing
+   or ambiguous edges, incompatible audio, missing stems and already-passed
+   entry points are reported before export. Use **Audio files…** when several
+   encodes match. Save/open the queue as a local `.set.json` file.
+   BPM and LOW/MID/HIGH EQ knob positions change linearly in elapsed time over
+   each solo section to match the next transition's setup; authored transition
+   automation is retained. The first song
+   starts at its beginning and the last plays to its end. Key lock defaults on.
+   Export is isolated from live decks and writes a new 48 kHz stereo 16-bit WAV
+   with recipes, exact transition timing and BPM/EQ ramps embedded in a `gvtm`
+   JSON chunk, plus ordinary title/chapter tags. Source transitions, beatgrids
+   and permanent cues are never edited. Standard WAV's 4 GiB limit applies.
+
+The set tool also runs independently without opening an audio device:
+
+```sh
+./build/gravitino --set-builder                     # separate GUI
+./build/gravitino --set-builder my-set.set.json     # reopen a saved queue
+./build/gravitino --check-set my-set.set.json       # read-only preflight
+./build/gravitino --render-set my-set.set.json --output new-set.wav
+```
+
+The WAV plays normally in ordinary players; applications that strip unknown
+chunks can remove its embedded recipes. Automatic library import of recipes
+from a WAV is not part of this tool. The live REC MASTER path is unchanged;
+it currently writes PCM WAV without this new set manifest.
 
 `--selftest` writes `selftest_out.wav` in the working directory; its temporary
 transition round-trip files are removed automatically.

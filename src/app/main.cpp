@@ -16,7 +16,10 @@
 #include "../audio/MasterRecorder.h"
 #include "../midi/MidiEngine.h"
 #include "../transitions/TransitionEngine.h"
+#include "../transitions/SetRenderer.h"
+#include <QJsonDocument>
 #include "../ui/MainWindow.h"
+#include "../ui/SetRenderWindow.h"
 #include "../ui/QtAccessibilityWorkaround.h"
 #include "../ui/Theme.h"
 #include "SelfTest.h"
@@ -32,8 +35,43 @@ int main(int argc, char** argv)
     qRegisterMetaType<gvt::Origin>();
 
     const QStringList args = app.arguments();
+    if (args.contains("--set-builder")) {
+        // This utility owns no realtime audio device, so it may run alongside
+        // the main DJ app without violating the single MASTER-owner rule.
+        app.setStyleSheet(gvt::appStyleSheet());
+        gvt::TransitionStore store; store.reload(); gvt::StemSeparator stems;
+        gvt::SetRenderWindow window(nullptr,&store,&stems);
+        const auto path=args.value(args.indexOf("--set-builder")+1);
+        if(!path.isEmpty() && !path.startsWith("--")) window.openSet(path);
+        if(args.contains("--recording")) window.showRecording(args.value(args.indexOf("--recording")+1));
+        window.show(); return app.exec();
+    }
     if (args.contains(QStringLiteral("--selftest")))
         return gvt::runSelfTest(args); // headless: no window, no live device
+    if (args.contains("--render-set") || args.contains("--check-set")) {
+        const bool check = args.contains("--check-set");
+        const int index = args.indexOf(check ? "--check-set" : "--render-set");
+        gvt::SetRenderRequest request; QString error;
+        if (!gvt::readSetRequest(args.value(index+1), request, &error)) {
+            std::fprintf(stderr,"%s\n",qUtf8Printable(error)); return 1;
+        }
+        const auto plan = gvt::planTransitionSet(request);
+        for (const auto& e:plan.errors) std::fprintf(stderr,"%s\n",qUtf8Printable(e));
+        if (!plan.valid()) return 1;
+        std::printf("%zu transitions / %zu songs, estimated %.1f minutes\n",
+            request.transitions.size(),plan.tracks.size(),plan.estimatedSeconds/60);
+        if (check) return 0;
+        const auto output = args.value(args.indexOf("--output")+1);
+        if (!args.contains("--output") || output.isEmpty()) {
+            std::fprintf(stderr,"--output <new.wav> is required\n"); return 1;
+        }
+        const auto result = gvt::renderTransitionSet(request,output,[](double fraction,const QString& status) {
+            std::printf("%5.1f%% %s\n",fraction*100,qUtf8Printable(status)); std::fflush(stdout);
+        });
+        if (!result.completed) { std::fprintf(stderr,"%s\n",qUtf8Printable(result.error)); return 1; }
+        std::printf("WAV ready: %s (%.3f seconds)\n",qUtf8Printable(output),result.manifest.value("duration_seconds").toDouble());
+        return 0;
+    }
     if (args.contains(QStringLiteral("--convert-transitions"))) {
         gvt::TransitionStore store;
         QStringList converted;

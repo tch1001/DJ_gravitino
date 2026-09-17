@@ -6,6 +6,59 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-17 (codex): **Full Like a G6 → Super Bass set delivered.** The
+  approved queue includes both Animals tracks and the late Bad → Albatraoz
+  exit: 47 songs / 46 transitions, 2:03:54.869. WAV, reusable local set queue
+  and all chapter timestamps are in the user's Recordings folder, not Git.
+  All embedded recipes/chapter offsets validate; all 226 protected recipe,
+  cue-cache and catalog files remain unchanged. No internal silence gaps;
+  the final ~19 seconds of silence originate in the Super Bass source asset.
+  QA: /tmp/gravitino-giant-set-qa.oN2WLu. Build, all 38 ctests and selftest
+  rerun successfully before checkpointing the set-recorder implementation.
+
+- 2026-09-17 (codex): **Smooth EQ between set transitions + extended export.**
+  Solo sections now interpolate actual LOW/MID/HIGH knob positions to the next
+  outgoing captured setup, sharing the BPM ramp's elapsed-time interval. Exact
+  endpoints prevent a setup-time EQ snap; missing targets/final tails retain
+  their current EQ, and zero-duration audible EQ mismatches refuse export.
+  Recorded timeline automation is unchanged. Renderer offline-set.v2 embeds
+  separate eq_ramps; transition schemas/files remain untouched. GUI help and
+  architecture updated. Audio regressions cover bass/mid boosts fading down,
+  treble cuts fading up, exact targets, recipe preservation and no-gap refusal.
+  Full build, all 38 ctests, selftest and compact UI check pass. Extended set
+  has 28 songs / 27 unique portable links, Like a G6 → Don't You Worry Child,
+  duration 1:15:48.883; WAV, local queue and timestamps are in Recordings.
+  RIFF/manifest/count/target checks pass; silence scan found only the natural
+  final tail. All source .transition/.gvt hashes and catalog match the initial
+  snapshot. Two cue-cache files changed during the ongoing live session;
+  this patch/export does not write them and they were left untouched. One
+  separate authored fader change (Live While We're Young → FE!N, 1 → .813 at
+  39:20.046) remains outside the requested EQ bridge. No app restart or push.
+  QA and protected-file baseline: /tmp/gravitino-eq-set-qa.qzz6kw. tmp/ untouched.
+
+- 2026-09-16 (codex): **Offline set recorder and first full-set WAV.** Added a
+  separate Record set window with checkbox selection, ordered queue, unique
+  song-list resolution, explicit compatible assets, stem preparation, saved
+  local .set.json queues, cancellable worker export and an Open WAV button.
+  Private ControlBus/AudioEngine/TransitionPlayer rendering shares Perform
+  setup and semantic cues/loops, schedules event boundaries within one sample,
+  and ramps BPM linearly in elapsed time over solo gaps. Authored automation
+  remains unchanged. RIFF WAV has 48 kHz stereo 16-bit PCM, INFO/chapter tags and
+  embedded full YAML recipes with exact frame timing and tempo ramps. Existing
+  outputs, stale recipes/assets, disconnected/ambiguous chains, missing stems
+  and invalid handoffs are refused. No live MASTER lease/device is taken.
+  GUI is also independently runnable with --set-builder; --check-set and
+  --render-set provide headless use. Live REC MASTER remains unchanged.
+  Build, all 38 ctests (including native accessibility), selftest and compact
+  rendered UI checks pass. Like a G6 → Call Me Maybe demo: 14 songs, 13 unique
+  portable edges, 37:47.661, saved with its queue in the user's Recordings
+  folder. WAV metadata/audio validation passed. During QA an older beatgrid
+  persistence test added one dummy catalog entry; its catalog is now isolated
+  and only that exact test entry was removed. All 216 protected transition,
+  cue-cache and catalog files match their pre-work hashes afterward. tmp/
+  was untouched. QA artifacts: /tmp/gravitino-set-qa.sl8rgX. The standalone
+  Set Recorder is open; the live DJ app was not restarted. Work not yet pushed.
+
 - 2026-09-16 (codex): **Lane-local automation deletion.** Deleting a knob/fader
   point selects the next point on the same deck/control, falling back to the
   previous point in that lane. An empty lane clears table/timeline selection

@@ -27,6 +27,7 @@ class MixerWidget;
 class LibraryWidget;
 class TransitionPanel;
 class TransitionEditorWindow;
+class SetRenderWindow;
 class PickupFuzzOverlay;
 class SetupMismatchOverlay;
 class HardwareGhostOverlay;
@@ -88,6 +89,7 @@ private:
     LibraryWidget* libraryWidget_ = nullptr;
     TransitionPanel* transitionPanel_ = nullptr;
     TransitionEditorWindow* transitionEditor_ = nullptr;
+    SetRenderWindow* setRenderWindow_ = nullptr;
     QSplitter* lowerWorkspaceSplitter_ = nullptr;
     QSplitter* lowerSplitter_ = nullptr;
     QPushButton* libraryToggleBtn_ = nullptr;
