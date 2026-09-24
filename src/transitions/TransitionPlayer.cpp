@@ -163,6 +163,7 @@ void TransitionPlayer::advanceToBeat(double rel) {
     emit progressChanged(rel, im2.totalBeats);
 
     if (rel >= im2.completionBeat) {
+        im2.bus->dispatch({kNoDeck, ControlId::TonePlayEnable, 0.0}, Origin::System);
         im2.active = false;
         im2.timer.stop();
         emit finished(true);
@@ -170,6 +171,9 @@ void TransitionPlayer::advanceToBeat(double rel) {
 }
 
 TransitionPlayer::~TransitionPlayer() {
+    // Stop sampler voices without emitting finished into a tearing-down UI.
+    if (impl_->active && impl_->file.tonePlay)
+        impl_->bus->dispatch({kNoDeck, ControlId::TonePlayEnable, 0.0}, Origin::System);
     modeTable().erase(this); // a heap-reused address must not inherit our mode
     preserveOutgoingTempoTable().erase(this);
 }
@@ -184,6 +188,16 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     if (!f.unsupportedRequirements.isEmpty()) {
         if (error) *error = QStringLiteral("unsupported transition capabilities: %1")
                                 .arg(f.unsupportedRequirements.join(", "));
+        return false;
+    }
+    if (f.tonePlay && f.tonePlay->enabled && modeTable()[this] == PlayerMode::Tutorial) {
+        if (error) *error = "Tutor View is unavailable for tone play: sampler notes are automated. Use Perform or the editor piano roll.";
+        return false;
+    }
+    if (f.tonePlay && !validateTonePlay(*f.tonePlay, error)) return false;
+    if (f.tonePlay && f.tonePlay->enabled && f.endBeat &&
+        *f.endBeat < tonePlayEndBeat(*f.tonePlay)) {
+        if (error) *error = "Transition end must include every tone-play note.";
         return false;
     }
     const int toDeck = (fromDeck == 0) ? 1 : 0;
@@ -258,7 +272,8 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     });
     im.done.assign(im.sched.size(), 0);
     im.prompted.assign(im.sched.size(), 0);
-    const double lastEventBeat = events.empty() ? 0.0 : events.back().beat;
+    const double lastEventBeat = std::max(events.empty() ? 0.0 : events.back().beat,
+        f.tonePlay && f.tonePlay->enabled ? tonePlayEndBeat(*f.tonePlay) : 0.0);
     im.totalBeats = f.endBeat.value_or(lastEventBeat);
     im.completionBeat = f.endBeat.value_or(lastEventBeat + kGraceBeats);
     im.haveLastBeat = false;
@@ -294,6 +309,19 @@ bool TransitionPlayer::arm(const GvtFile& f, int fromDeck, bool startNow,
     im.waitingLoopEndSec = outgoing.loopEndSec.load();
 
     im.active = true;
+    im.engine->clearTonePlay();
+    if (f.tonePlay && f.tonePlay->enabled) {
+        const auto track = im.engine->deck(fromDeck).track();
+        if (!track && error) *error = "Tone play needs the outgoing song loaded.";
+        if (!track || !im.engine->prepareTonePlay(*f.tonePlay, fromDeck,
+                track->secAtCanonicalBeat(f.tonePlay->sourceStartBeat),
+                track->secAtCanonicalBeat(f.tonePlay->sourceEndBeat),
+                transitionSecAtBeat(f, *track, im.anchorFrom), error)) {
+            im.active = false;
+            return false;
+        }
+        im.bus->dispatch({kNoDeck, ControlId::TonePlayEnable, 1.0}, Origin::System);
+    }
     if (!im.externalClock) im.timer.start();
     return true;
 }
@@ -303,6 +331,7 @@ void TransitionPlayer::abort() {
     if (!im.active) return;
     im.timer.stop();
     im.active = false;
+    im.bus->dispatch({kNoDeck, ControlId::TonePlayEnable, 0.0}, Origin::System);
     emit finished(false);
 }
 

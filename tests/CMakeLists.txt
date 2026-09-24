@@ -44,6 +44,7 @@ foreach(t ${TEST_SRCS})
             ${CMAKE_SOURCE_DIR}/src/ui/LibraryWidget.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionPanel.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionEditor.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/TonePlayEditor.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionFieldsEditor.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/SetRenderWindow.cpp
             ${CMAKE_SOURCE_DIR}/src/ui/TransitionGraphWindow.cpp

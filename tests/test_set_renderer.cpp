@@ -70,6 +70,28 @@ int main(int argc,char** argv)
     CHECK(std::fabs(manifest.value("duration_seconds").toDouble()-plan.estimatedSeconds)<.01);
     CHECK(request.assets[0]->hotCues[0]==.25);
 
+    // Tone notes reach the exact same master/WAV path and travel in its
+    // embedded recipe. The original source files and request remain untouched.
+    auto toneRequest=request;
+    TonePlayPattern pattern;
+    pattern.sourceStartBeat=1;pattern.sourceEndBeat=2;
+    pattern.notes={{.125,.5,60,.8},{1,.5,67,.8}};
+    toneRequest.transitions[0].tonePlay=pattern;
+    const auto toneResult=renderTransitionSet(toneRequest,dir.filePath("tone-play.wav"));
+    CHECK(toneResult.completed);
+    CHECK(audio(toneResult.outputPath)!=audio(output));
+    CHECK(audio(toneResult.outputPath).size()==audio(output).size());
+    const auto toneYaml=readRecordingManifest(toneResult.outputPath).value("transitions").toArray()[0]
+        .toObject().value("transition_yaml").toString();
+    GvtFile embedded;QString toneError;
+    CHECK(transitionParse(toneYaml,embedded,&toneError));
+    CHECK(embedded.tonePlay && embedded.tonePlay->notes.size()==2);
+    CHECK(embedded.tonePlay && !embedded.tonePlay->replaceOutgoing);
+    CHECK(!gvtSaveFile(toneRequest.transitions[0],dir.filePath("unsupported.gvt"),&toneError));
+    CHECK(!QFileInfo::exists(dir.filePath("unsupported.gvt")));
+    toneRequest.transitions[0].tonePlay->sourceStartBeat=-100;
+    CHECK(!planTransitionSet(toneRequest).valid());
+
     // Compatibility crossfader automation changes embedded data, never sound.
     auto compatibility=request;
     for(auto& f:compatibility.transitions) {

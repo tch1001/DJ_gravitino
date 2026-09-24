@@ -29,6 +29,7 @@ target_include_directories(miniaudio PUBLIC third_party)
 add_library(gvtcore STATIC
     src/control/ControlBus.cpp
     src/audio/AudioEngine.cpp
+    src/audio/TonePlayProcessor.cpp
     src/audio/Deck.cpp
     src/audio/Eq.cpp
     src/audio/Fx.cpp
@@ -47,6 +48,7 @@ add_library(gvtcore STATIC
     src/performance/PerformancePads.cpp
     src/transitions/GvtFormat.cpp
     src/transitions/TransitionFormat.cpp
+    src/transitions/TonePlay.cpp
     src/transitions/TransitionGraph.cpp
     src/transitions/TransitionTransportTrace.cpp
     src/transitions/TransitionRecorder.cpp
@@ -77,6 +79,7 @@ add_executable(gravitino MACOSX_BUNDLE
     src/ui/LibraryWidget.cpp
     src/ui/TransitionPanel.cpp
     src/ui/TransitionEditor.cpp
+    src/ui/TonePlayEditor.cpp
     src/ui/TransitionFieldsEditor.cpp
     src/ui/SetRenderWindow.cpp
     src/ui/TransitionGraphWindow.cpp

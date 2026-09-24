@@ -9,6 +9,7 @@
 #include "../control/ControlBus.h"
 
 namespace gvt {
+struct TonePlayPattern;
 namespace detail { struct AudioDeviceTestAccess; }
 
 constexpr int kNumDecks = 2;
@@ -168,6 +169,12 @@ public:
     // Offline mode for --selftest: instead of a live device, render `frames`
     // through the exact same mix path into an interleaved stereo buffer.
     void renderOffline(float* out, int frames);
+    // GUI-only immutable sampler preparation. Arm/stop through ControlBus.
+    bool prepareTonePlay(const TonePlayPattern&, int outgoingDeck,
+                         double sourceStartSec, double sourceEndSec,
+                         double anchorSec, QString* error);
+    void clearTonePlay();
+    double tonePlayBeat() const;
     // Test/diagnostic path: interleaved MASTER L/R, PHONES L/R.
     void renderOfflineFourChannel(float* out, int frames);
 

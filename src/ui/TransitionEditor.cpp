@@ -1,6 +1,7 @@
 // Full transition authoring window. The GUI edits a typed working copy and
 // auditions it through a private two-deck graph routed to the live MASTER.
 #include "TransitionEditor.h"
+#include "TonePlayEditor.h"
 #include "TransitionFieldsEditor.h"
 
 #include "Theme.h"
@@ -141,6 +142,7 @@ bool editableTimelineControl(ControlId control)
     case ControlId::PerformancePad7:
     case ControlId::PerformancePad8:
     case ControlId::TempoRange:
+    case ControlId::TonePlayEnable:
     case ControlId::Count:
         return false;
     default:
@@ -224,7 +226,7 @@ QByteArray fileHash(const QString& path)
 
 double latestBeat(const GvtFile& file)
 {
-    double result = 0.0;
+    double result = file.tonePlay && file.tonePlay->enabled ? tonePlayEndBeat(*file.tonePlay) : 0.0;
     for (const GvtEvent& event : file.events)
         if (transitionEventIsExecutable(event))
             result = std::max(result, event.beat);
@@ -349,7 +351,9 @@ QStringList TransitionEditorDocument::validationErrors() const
     if (!std::isfinite(file_.masterBpm) || file_.masterBpm < 20.0 ||
         file_.masterBpm > 400.0)
         errors.append(tr("Master BPM must be between 20 and 400"));
-    if (file_.events.empty()) errors.append(tr("Add at least one timeline action"));
+    if (file_.events.empty() && (!file_.tonePlay || !file_.tonePlay->enabled ||
+                                 file_.tonePlay->notes.empty()))
+        errors.append(tr("Add at least one timeline action or tone-play note"));
     if (file_.endBeat.has_value() &&
         (!std::isfinite(*file_.endBeat) || *file_.endBeat < latestBeat(file_)))
         errors.append(tr("End beat must be after every action and label"));
@@ -1544,10 +1548,12 @@ void TransitionEditorWindow::buildUi()
     toolbar->addWidget(zoomOut);
     toolbar->addWidget(zoomIn);
     connect(zoomOut, &QPushButton::clicked, this, [this] {
-        timeline_->setPixelsPerBeat(timeline_->pixelsPerBeat() / 1.25);
+        if (toneEditor_->isVisible()) toneEditor_->zoom(1.0 / 1.25);
+        else timeline_->setPixelsPerBeat(timeline_->pixelsPerBeat() / 1.25);
     });
     connect(zoomIn, &QPushButton::clicked, this, [this] {
-        timeline_->setPixelsPerBeat(timeline_->pixelsPerBeat() * 1.25);
+        if (toneEditor_->isVisible()) toneEditor_->zoom(1.25);
+        else timeline_->setPixelsPerBeat(timeline_->pixelsPerBeat() * 1.25);
     });
 
     auto* central = new QWidget(this);
@@ -1570,14 +1576,26 @@ void TransitionEditorWindow::buildUi()
             &TransitionEditorWindow::prepareRequiredStems);
 
     auto* mainSplit = new QSplitter(Qt::Horizontal, central);
+    auto* workspaceTabs = new QTabWidget(mainSplit);
+    workspaceTabs->setObjectName("transitionEditorWorkspace");
     timeline_ = new TransitionTimelineView(document_);
-    timelineScroll_ = new QScrollArea(mainSplit);
+    timelineScroll_ = new QScrollArea(workspaceTabs);
     timelineScroll_->setWidget(timeline_);
     timelineScroll_->setWidgetResizable(false);
     timelineScroll_->setFrameShape(QFrame::NoFrame);
     timeline_->installEventFilter(this);
     timelineScroll_->viewport()->installEventFilter(this);
-    mainSplit->addWidget(timelineScroll_);
+    workspaceTabs->addTab(timelineScroll_, tr("Transition timeline"));
+    toneEditor_ = new TonePlayEditor(document_, workspaceTabs);
+    workspaceTabs->addTab(toneEditor_, tr("Tone play • sampler / piano roll"));
+    connect(toneEditor_, &TonePlayEditor::auditionRequested, this, &TransitionEditorWindow::auditionTone);
+    connect(toneEditor_, &TonePlayEditor::previewRequested, this, &TransitionEditorWindow::startOrPausePreview);
+    connect(toneEditor_, &TonePlayEditor::cursorRequested, this, [this](double beat) {
+        if (preview_->active || previewPaused_) endPreview(false);
+        timeline_->setPlayheadBeat(beat);
+        toneEditor_->setPlayhead(beat);
+    });
+    mainSplit->addWidget(workspaceTabs);
 
     auto* inspectorHost = new QWidget(mainSplit);
     inspectorHost->setMinimumWidth(400);
@@ -2516,6 +2534,8 @@ void TransitionEditorWindow::refreshUi()
     if (refreshing_) return;
     refreshing_ = true;
     const GvtFile& file = document_->file();
+    toneEditor_->setTrack(outgoing_);
+    toneEditor_->refresh();
     nameEdit_->setText(file.name);
     authorEdit_->setText(file.author);
     descriptionEdit_->setPlainText(file.description);
@@ -4056,6 +4076,10 @@ bool TransitionEditorWindow::focusConsumesTransportShortcut() const
 
 bool TransitionEditorWindow::handleEditorKeyPress(QKeyEvent* event)
 {
+    // The piano roll owns note deletion, not the underlying automation table.
+    if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
+        QApplication::focusWidget() &&
+        toneEditor_->isAncestorOf(QApplication::focusWidget())) return false;
     const bool transportKey = event->key() == Qt::Key_C ||
                               event->key() == Qt::Key_Space ||
                               event->key() == Qt::Key_Delete ||
@@ -4126,8 +4150,37 @@ void TransitionEditorWindow::keyReleaseEvent(QKeyEvent* event)
     QMainWindow::keyReleaseEvent(event);
 }
 
+void TransitionEditorWindow::auditionTone(int pitch)
+{
+    const auto file = document_->file();
+    if (!file.tonePlay || !file.tonePlay->enabled || !outgoing_) return;
+    if (std::abs(pitch - file.tonePlay->rootNote) > 24) {
+        statusBar()->showMessage(tr("Choose a piano key within two octaves of the sample root."), 3000);
+        return;
+    }
+    stopPreview();
+    GvtFile audition = file;
+    audition.events.clear(); audition.cues.clear();
+    audition.initialComplete = true;
+    for (auto* setup : {&audition.initialFrom, &audition.initialTo}) {
+        setup->captured = true; setup->fader = 0; setup->playing = false;
+        setup->loopActive = false; setup->fxOn = false;
+    }
+    const double seconds = (file.tonePlay->sourceEndBeat - file.tonePlay->sourceStartBeat) * 60.0 / outgoing_->bpm;
+    const double duration = std::clamp(seconds / std::exp2((pitch-file.tonePlay->rootNote)/12.0) * file.masterBpm / 60, 1.0/64, 64.0);
+    audition.tonePlay->notes = {{0.0, duration, pitch, 1.0}};
+    audition.tonePlay->replaceOutgoing = false;
+    audition.endBeat = duration + .25;
+    const double returnBeat = timeline_->playheadBeat();
+    if (beginPreviewAt(0.0, true, &audition)) {
+        previewCueBeat_ = returnBeat;
+        toneAudition_ = true;
+    }
+}
+
 void TransitionEditorWindow::startOrPausePreview()
 {
+    if (toneAudition_) stopPreview();
     if (preview_->active) {
         if (preview_->leased) {
             liveEngine_->releaseExclusivePreview(preview_.get());
@@ -4145,7 +4198,7 @@ void TransitionEditorWindow::startOrPausePreview()
     beginPreviewAt(timeline_->playheadBeat(), !previewPaused_);
 }
 
-bool TransitionEditorWindow::beginPreviewAt(double beat, bool establishCue)
+bool TransitionEditorWindow::beginPreviewAt(double beat, bool establishCue, const GvtFile* audition)
 {
     if (!fieldsEditor_->applyPending()) {
         inspectorTabs_->setCurrentIndex(sectionCombo_->findText(tr("All fields")));
@@ -4192,7 +4245,7 @@ bool TransitionEditorWindow::beginPreviewAt(double beat, bool establishCue)
     };
     if (sameAsset(liveEngine_->deck(1).track(), outgoing_) ||
         sameAsset(liveEngine_->deck(0).track(), incoming_)) liveOutgoing = 1;
-    if (!preview_->reset(document_->file(), outgoing_, incoming_,
+    if (!preview_->reset(audition ? *audition : document_->file(), outgoing_, incoming_,
                          outgoingStems_, incomingStems_, *liveEngine_,
                          liveOutgoing, &error)) {
         QMessageBox::warning(this, tr("Could not prepare preview"), error);
@@ -4205,6 +4258,7 @@ bool TransitionEditorWindow::beginPreviewAt(double beat, bool establishCue)
     }
     preview_->leased = true;
     preview_->active = true;
+    toneAudition_ = false;
     previewPaused_ = false;
     if (establishCue || !previewCueValid_) {
         previewCueBeat_ = beat;
@@ -4215,7 +4269,7 @@ bool TransitionEditorWindow::beginPreviewAt(double beat, bool establishCue)
     previewTimer_->start();
     playButton_->setText(tr("❚❚ PAUSE (SPACE)"));
     stopButton_->setEnabled(true);
-    if (writeAutomationCheck_->isChecked()) beginAutomationTake();
+    if (!audition && writeAutomationCheck_->isChecked()) beginAutomationTake();
     statusBar()->showMessage(
         tr("Editor preview owns MASTER; the live decks are frozen and unchanged."));
     return true;
@@ -4238,6 +4292,7 @@ void TransitionEditorWindow::endPreview(bool returnToCue)
     }
     const bool hadTake = !takeEvents_.empty();
     preview_->active = false;
+    toneAudition_ = false;
     previewPaused_ = false;
     keyboardCueHeld_ = false;
     keyboardCueLatched_ = false;
@@ -4253,6 +4308,7 @@ void TransitionEditorWindow::returnPlayheadToPreviewCue()
 {
     if (!previewCueValid_ || !timeline_) return;
     timeline_->setPlayheadBeat(previewCueBeat_);
+    toneEditor_->setPlayhead(previewCueBeat_);
     playheadLabel_->setText(
         tr("Transition +%1 beats").arg(previewCueBeat_, 0, 'f', 3));
     const int x = kTimelineLeft + static_cast<int>(
@@ -4267,6 +4323,7 @@ void TransitionEditorWindow::updatePreviewTick()
     preview_->produce();
     const double audibleBeat = std::min(preview_->audibleBeat.load(), preview_->endBeat);
     timeline_->setPlayheadBeat(audibleBeat);
+    toneEditor_->setPlayhead(audibleBeat);
     playheadLabel_->setText(tr("Transition +%1 beats").arg(audibleBeat, 0, 'f', 3));
     const int x = kTimelineLeft + static_cast<int>(
         timeline_->playheadBeat() * timeline_->pixelsPerBeat());
@@ -4295,7 +4352,7 @@ void TransitionEditorWindow::recordControlValue(Role role, ControlId control,
     event.beat = preview_->active ? preview_->beat : timeline_->playheadBeat();
     if (preview_->active) {
         preview_->dispatch(role, control, value);
-        if (writeAutomationCheck_->isChecked())
+        if (!toneAudition_ && writeAutomationCheck_->isChecked())
             takeEvents_.push_back(event);
         // With Write off, the performance strip is a non-destructive audition
         // surface. With Write on, touched values stay in the pending take and

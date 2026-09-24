@@ -6,6 +6,28 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-24 (codex): **Tone-play sampler and piano-roll editor.** Added an
+  optional typed `performance.tone_play` with required `tone-play.v1`, lossless
+  extra fields, finite/range/polyphony validation and non-destructive legacy
+  save refusal. Editor has a source-waveform IN/OUT selector, root/level,
+  default layering (user confirmed), optional replace-outgoing, snap/draw/
+  move/resize/duplicate/delete piano notes, exact note fields, Undo/Redo,
+  key/snippet audition and whole-mix preview. Source song beats and note
+  transition beats are explicitly distinct. Tutor is disabled with a tooltip
+  and a player-side guard. Shared sample-clock audio uses a bounded 16-voice
+  one-shot resampler, not an editor-only synth; Perform/PRIME/set WAVs use it
+  too, with portable pattern metadata. Higher pitches shorten the snippet;
+  pitch-independent note stretching is not implemented. Sample layer has its
+  own gain after song DSP/fader; it does not inherit stems/FX/EQ automation.
+  Existing user recipes, audio, grids and permanent cues are untouched.
+  Added sampler/model/export/UI regressions and real editor/Perform audio
+  parity including reversed decks. QA artifacts: /tmp/gravitino-tone-qa.CsWSP3.
+  Before this feature, pushed software safety checkpoint e0f78db and the
+  separate 84-file transition backup f9e6a2a; tmp/ remains excluded.
+  Full build, all 44 ctests (including native Cocoa accessibility), isolated
+  selftest and a themed 1280×820 editor capture pass. No real-library audition
+  or app restart was performed for this feature; the user can listen in-editor.
+
 - 2026-09-24 (codex): **Grid recovery confirmed by the user.** After an explicit
   one-time authorization and closing the app, restored Low, S&M, How We Party
   and Turn Down for What anchors in only their four local caches/catalog assets.

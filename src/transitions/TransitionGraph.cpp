@@ -176,7 +176,8 @@ QString transitionGraphEndpointKey(const GvtTrackRef& endpoint)
 double transitionGraphEffectiveEndBeat(const GvtFile& file) noexcept
 {
     if (file.endBeat.has_value()) return std::max(0.0, *file.endBeat);
-    double latest = 0.0;
+    double latest = file.tonePlay && file.tonePlay->enabled
+        ? tonePlayEndBeat(*file.tonePlay) : 0.0;
     for (const GvtEvent& event : file.events)
         if (transitionEventIsExecutable(event))
             latest = std::max(latest, event.beat);

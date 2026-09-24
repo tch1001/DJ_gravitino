@@ -251,6 +251,13 @@ SetRenderPlan planTransitionSet(const SetRenderRequest& r)
             plan.errors << f.name + ": " + error; continue;
         }
         const auto& out=*plan.tracks[i];
+        if (f.tonePlay && f.tonePlay->enabled) {
+            const double a=out.secAtCanonicalBeat(f.tonePlay->sourceStartBeat);
+            const double b=out.secAtCanonicalBeat(f.tonePlay->sourceEndBeat);
+            if (!std::isfinite(a) || !std::isfinite(b) || a<0 || b>out.durationSec ||
+                b<=a || b-a>8.0+1e-9)
+                plan.errors << f.name + ": tone-play snippet must be inside the outgoing audio and at most eight seconds.";
+        }
         if (i==0) previousBeat=transitionBeatAtSec(f,out,0);
         const double anchorSeconds=transitionSecAtBeat(f,out,f.anchorFromBeat);
         if (anchorSeconds<0 || anchorSeconds>=out.durationSec || f.anchorFromBeat<previousBeat-0.02)

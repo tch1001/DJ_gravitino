@@ -10,6 +10,7 @@
 #include <optional>
 #include <vector>
 #include "../control/ControlBus.h"
+#include "TonePlay.h"
 
 namespace gvt {
 
@@ -45,7 +46,8 @@ struct GvtEvent {
 inline bool transitionEventIsExecutable(const GvtEvent& event) noexcept
 {
     return event.control != ControlId::Crossfader &&
-           event.control != ControlId::CrossfaderEnabled;
+           event.control != ControlId::CrossfaderEnabled &&
+           event.control != ControlId::TonePlayEnable;
 }
 
 struct TransitionFingerprint {
@@ -206,6 +208,7 @@ struct GvtFile {
     // Transition-owned saved loops, also allocated into the temporary CUSTOM
     // bank. Their canonical beat ranges survive changes to track loop slots.
     std::vector<TransitionSavedLoop> transitionLoops;
+    std::optional<TonePlayPattern> tonePlay;
     // [events], sorted by beat
     std::vector<GvtEvent> events;
 

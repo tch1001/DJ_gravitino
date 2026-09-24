@@ -534,6 +534,47 @@ prose/countdown/reset guidance lives in the transition control panel above
 CLOSE ENOUGH. Perform gives the guided run up to eight beats of pre-anchor
 countdown; Prime arms the same guidance against the live outgoing deck.
 
+### Tone-play authoring and shared sampler
+
+The editor's Tone play workspace separates a canonical outgoing-song source
+slice ruler from a transition-beat piano roll. Drag IN/OUT or type exact source
+beats; draw, move, resize, delete or duplicate notes and edit pitch/start/gate/
+velocity. The same document undo stack and guarded Save/Save As path own edits.
+Piano keys audition one isolated pitched note through the exclusive MASTER
+lease; returning restores the prior editing cue and cannot write an automation
+take. Preview mix/C/Space reuse normal editor audition. No automatic migration,
+source-audio writing, beatgrid edit or permanent cue change is involved.
+
+`TonePlayPattern`/`TonePlayNote` are optional typed transition data, with safe
+range/polyphony validation and unknown-field retention. `tone-play.v1` gates
+compatibility. Source slices use canonical track coordinates even while editing
+a legacy recipe; the recipe's transition anchor keeps its normal format-aware
+conversion. Enabled tone patterns refuse Tutorial in both UI and player, with
+an explanation on the disabled Tutor button. Legacy `.gvt` writes reject tone
+data before opening the target; modern editor saves remain separate YAML files.
+
+`AudioEngine::prepareTonePlay/clearTonePlay/tonePlayBeat` manage a GUI-prepared
+immutable PCM slice and schedule. `TransitionPlayer` prepares it at arm and
+uses the appended, runtime-only `TonePlayEnable` ControlBus action to enable or
+stop it. That action is excluded from recording, timeline parsing and editable
+lanes. `TonePlayProcessor` owns a fixed 16-voice array and the scratch path's
+band-limited resampler, initialized off the callback. A seq_cst reader gate
+drains callbacks before replacing/freeing source data; the audio thread never
+allocates or waits on a lock. Notes are sample-clocked from the outgoing entry
+crossing; subsequent loops, seeks and stops do not retrigger the melody. The
+clock integrates outgoing tempo, and live automation reads that same published
+beat. Ordinary non-tone transition scheduling remains unchanged.
+
+Sample voices join the outgoing deck's post-fader master and PFL streams, with
+their own gain, before crossfade and limiting. They layer by default; optional
+replacement ducks only original outgoing audio across the authored note phrase.
+They intentionally do not inherit the song's EQ/FX/stem/fader processing. A
+classic one-shot pitch shift also changes slice playback length; gates only
+shorten it. Preview, Perform and set export share this engine path, and the WAV
+manifest embeds the same YAML pattern. Tests protect fractional onset, octave
+pitch, block-size invariance, loop/stop clock continuity, safe replacement,
+both physical deck mappings, real editor-ring parity and exported audio/data.
+
 ## Offline set recording
 
 `SetRenderWindow` owns an ordered, read-only snapshot of transition recipes and

@@ -124,7 +124,8 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
             e.id == ControlId::HeadphoneMix ||
             e.id == ControlId::Trim ||
             e.id == ControlId::Crossfader ||
-            e.id == ControlId::CrossfaderEnabled)
+            e.id == ControlId::CrossfaderEnabled ||
+            e.id == ControlId::TonePlayEnable)
             return;
 
         if (e.deck >= 0 && e.deck < kNumDecks &&

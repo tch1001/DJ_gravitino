@@ -417,6 +417,7 @@ bool portableTimelineControlAllowed(ControlId control)
     case ControlId::TempoRange:
     case ControlId::Trim:
     case ControlId::CrossfaderEnabled:
+    case ControlId::TonePlayEnable:
     case ControlId::Count:
         return false;
     default:
@@ -761,6 +762,8 @@ void ensurePortableDefaults(GvtFile& file)
         file.requirements = {QStringLiteral("timeline.v1"),
                              QStringLiteral("temporary-cues.v1")};
     }
+    if (file.tonePlay && !file.requirements.contains("tone-play.v1"))
+        file.requirements.append("tone-play.v1");
     if (!file.transitionLoops.empty() &&
         !file.requirements.contains(QStringLiteral("temporary-loops.v1")))
         file.requirements.append(QStringLiteral("temporary-loops.v1"));
@@ -971,7 +974,8 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
     const QSet<QString> supported {QStringLiteral("timeline.v1"),
                                     QStringLiteral("temporary-cues.v1"),
                                     QStringLiteral("temporary-loops.v1"),
-                                    QStringLiteral("timeline-end.v1")};
+                                    QStringLiteral("timeline-end.v1"),
+                                    QStringLiteral("tone-play.v1")};
     for (const QString& requirement : file.requirements)
         if (!supported.contains(requirement))
             file.unsupportedRequirements.append(requirement);
@@ -1455,8 +1459,15 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
                          return a.beat < b.beat;
                      });
 
+    if (!parseTonePlay(performance.value("tone_play"), file.tonePlay, error)) return false;
+    if (file.tonePlay && !file.requirements.contains("tone-play.v1")) {
+        if (error) *error = "performance.tone_play requires capability tone-play.v1";
+        return false;
+    }
     if (file.endBeat.has_value()) {
         double latestBeat = 0.0;
+        if (file.tonePlay && file.tonePlay->enabled)
+            latestBeat = tonePlayEndBeat(*file.tonePlay);
         for (const GvtEvent& event : file.events)
             if (transitionEventIsExecutable(event))
                 latestBeat = std::max(latestBeat, event.beat);
@@ -1476,7 +1487,7 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
 
     file.performanceExtraYaml = without(performance,
         {"master_bpm", "end_beat", "anchors", "initial_state", "cues", "loops",
-         "labels", "timeline"});
+         "labels", "timeline", "tone_play"});
     file.extensions = root.value(QStringLiteral("extensions")).toObject();
     file.legacySourceId = file.extensions
         .value(QStringLiteral("gravitino.legacy"))
@@ -1514,6 +1525,8 @@ QJsonObject transitionDocumentFields(const GvtFile& source)
     root.insert(QStringLiteral("endpoints"), endpoints);
 
     QJsonObject performance = file.performanceExtraYaml;
+    if (file.tonePlay) performance.insert("tone_play", serializeTonePlay(*file.tonePlay));
+    else performance.remove("tone_play");
     performance.insert(QStringLiteral("master_bpm"), file.masterBpm);
     if (file.endBeat.has_value())
         performance.insert(QStringLiteral("end_beat"), *file.endBeat);

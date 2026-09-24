@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "TonePlayProcessor.h"
 #include "TempoRange.h"
 #include "AudioOutputRecovery.h"
 #include "AudioDeviceTestAccess.h"
@@ -50,6 +51,10 @@ struct AudioEngine::Impl {
 
     AudioEngine* owner = nullptr;
     std::array<Deck, kNumDecks> decks;
+    TonePlayProcessor tonePlay;
+    std::atomic<int> toneDeck {0};
+    std::array<float, static_cast<std::size_t>(kScratchFrames) * 2U> toneBuffer {};
+    std::array<float, static_cast<std::size_t>(kScratchFrames)> toneOriginalGain {};
     std::array<float, static_cast<std::size_t>(kScratchFrames) * 2U> deckA {};
     std::array<float, static_cast<std::size_t>(kScratchFrames) * 2U> deckB {};
     std::array<float, static_cast<std::size_t>(kScratchFrames) * 2U> cueA {};
@@ -282,8 +287,20 @@ struct AudioEngine::Impl {
         int rendered = 0;
         while (rendered < frames) {
             const int chunkFrames = std::min(kScratchFrames, frames - rendered);
+            const int toneDeckIndex = implToneDeck();
+            const double tonePosition = decks[toneDeckIndex].positionSec();
+            const bool tonePlaying = decks[toneDeckIndex].playing.load();
+            const double toneTempo = decks[toneDeckIndex].tempoRatio.load();
             decks[0].render(deckA.data(), chunkFrames, cueA.data());
             decks[1].render(deckB.data(), chunkFrames, cueB.data());
+            tonePlay.render(toneBuffer.data(), toneOriginalGain.data(), chunkFrames,
+                            tonePosition, tonePlaying, toneTempo);
+            auto& original = toneDeckIndex == 0 ? deckA : deckB;
+            auto& cue = toneDeckIndex == 0 ? cueA : cueB;
+            for (int i = 0; i < chunkFrames * 2; ++i) {
+                original[i] = original[i] * toneOriginalGain[i / 2] + toneBuffer[i];
+                cue[i] = cue[i] * toneOriginalGain[i / 2] + toneBuffer[i];
+            }
 
             float xf = owner->crossfaderEnabled.load(std::memory_order_relaxed)
                 ? owner->crossfader.load(std::memory_order_relaxed) : 0.5f;
@@ -386,6 +403,8 @@ struct AudioEngine::Impl {
             rendered += chunkFrames;
         }
     }
+
+    int implToneDeck() const noexcept { return toneDeck.load(); }
 
     bool startFlx4CueDevice()
     {
@@ -752,6 +771,20 @@ void AudioEngine::renderOffline(float* out, int frames)
     impl_->renderMix(out, frames, kMasterChannels);
 }
 
+bool AudioEngine::prepareTonePlay(const TonePlayPattern& pattern, int outgoing,
+                                  double start, double end, double anchor, QString* error)
+{
+    if (outgoing < 0 || outgoing >= kNumDecks || !deck(outgoing).track()) {
+        if (error) *error = "Tone play needs the outgoing song loaded.";
+        return false;
+    }
+    impl_->tonePlay.clear();
+    impl_->toneDeck.store(outgoing);
+    return impl_->tonePlay.prepare(*deck(outgoing).track(), pattern, start, end, anchor, error);
+}
+void AudioEngine::clearTonePlay() { impl_->tonePlay.clear(); }
+double AudioEngine::tonePlayBeat() const { return impl_->tonePlay.beat(); }
+
 void AudioEngine::renderOfflineFourChannel(float* out, int frames)
 {
     impl_->renderMix(out, frames, kFlx4Channels);
@@ -859,6 +892,10 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
     // and engine. This also makes an accidental late System/Replay action
     // harmless while the UI workspace is locked.
     if (exclusivePreviewActive()) return;
+    if (event.id == ControlId::TonePlayEnable) {
+        if (std::isfinite(event.value)) impl_->tonePlay.enable(event.value >= 0.5);
+        return;
+    }
 
     if (controlIsTrigger(event.id)) {
         if (!std::isfinite(event.value))
@@ -1123,6 +1160,7 @@ void AudioEngine::applyEvent(const ControlEvent& event, Origin origin)
     case ControlId::BrowseSelect:
     case ControlId::BrowseNavigate:
     case ControlId::Count:
+    case ControlId::TonePlayEnable:
         break;
     }
 }

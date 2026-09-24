@@ -336,11 +336,63 @@ offline clock steps produce matching audio; current live timer scheduling and
 pre-existing effect history are not a sample-accurate equivalence guarantee.
 No files are migrated or rewritten merely to display the clarified editor.
 
+## Tone-play sampler (`tone-play.v1`)
+
+`performance.tone_play` is optional and requires `tone-play.v1` whenever it is
+present (including a disabled pattern). Older applications therefore refuse
+playback instead of silently leaving out the melody. Existing recipes are not
+converted or modified when this feature is installed. Example:
+
+```yaml
+performance:
+  tone_play:
+    enabled: true
+    source_start_beat: 32.125
+    source_end_beat: 32.625
+    root_note: 60
+    gain: 0.7
+    replace_outgoing: false
+    notes:
+      - {at_beat: 0.25, duration_beats: 0.5, pitch: 60, velocity: 0.8}
+      - {at_beat: 1.0, duration_beats: 0.5, pitch: 67, velocity: 0.8}
+```
+
+Source IN/OUT are canonical **outgoing-song beats**; note start/duration are
+**transition beats**. Fractional and negative source beats remain supported if
+they resolve inside the actual audio. The source slice is a reference, not an
+embedded audio asset, so recipients still need a compatible outgoing song.
+Selecting/trimming never writes the source audio or changes its grid/hot cues.
+The editor must save legacy edits as `.transition`; `.gvt` saving explicitly
+refuses tone data rather than dropping it.
+
+MIDI pitch 60 is C4. `root_note` means the key that plays the snippet unchanged;
+it is chosen by the author, not an automatic pitch estimate. Pitch shifts use
+one-shot resampling: one octave higher plays twice as fast, one octave lower
+half as fast. Notes end at the earlier of their gate or the slice's end. This
+version does not independently time-stretch or loop sustained notes. A short
+attack/release suppresses clicks; velocity and gain multiply sample amplitude.
+The layer joins the outgoing master/PFL routes **after** channel DSP and fader,
+before crossfader/master limiting, with its own gain. Existing outgoing fader,
+EQ, FX and stem automation controls the song, not the separate sample layer.
+
+Layering is the default. `replace_outgoing: true` ducks only the original
+outgoing audio during the whole first-to-last-note phrase (including gaps),
+using short boundary fades; incoming audio is unchanged. Tutor View is disabled
+with a hover explanation for enabled tone patterns. Perform, PRIME, editor
+preview and offline set rendering use the same sampler implementation.
+
+Limits: slice at most 32 beats **and** eight decoded seconds, 512 notes, 16
+simultaneous gates, root/pitch C1–C7 and notes within ±24 semitones of root,
+note starts 0–16384, durations 1/64–64 beats, gain/velocity 0–1. All numeric
+values must be finite. Explicit transition end cannot precede enabled note
+ends. Unknown pattern/note fields round-trip losslessly. Piano-roll gestures
+and preview state are derived UI data, never serialized.
+
 ## Compatibility and safe parsing
 
 `requires` declares semantics necessary for correct playback. This build
-supports `timeline.v1`, `temporary-cues.v1`, `temporary-loops.v1`, and
-`timeline-end.v1`. Unknown required capabilities allow inspection but block
+supports `timeline.v1`, `temporary-cues.v1`, `temporary-loops.v1`,
+`timeline-end.v1`, and `tone-play.v1`. Unknown required capabilities allow inspection but block
 Perform/Tutorial with a clear
 compatibility error.
 

@@ -57,6 +57,7 @@ enum class ControlId : uint8_t {
     TransitionCue1, TransitionCue2, TransitionCue3, TransitionCue4,
     TransitionCue5, TransitionCue6, TransitionCue7, TransitionCue8,
     CrossfaderEnabled, // local mixer preference, 0 = bypass; never serialized
+    TonePlayEnable, // internal prepared sampler gate, never a timeline control
     Count
 };
 

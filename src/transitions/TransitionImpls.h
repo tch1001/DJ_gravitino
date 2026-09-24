@@ -173,6 +173,12 @@ struct TransitionPlayer::Impl {
     double xfaderRoleToPhysical(double v) const { return fromDeck == 0 ? v : 1.0 - v; }
 
     double currentRel() {
+        // Tone notes are audio-sample-clocked. Use that same monotonic ruler
+        // for the surrounding automation, including outgoing loop wraps/stops.
+        if (file.tonePlay && file.tonePlay->enabled) {
+            const double renderedBeat = engine->tonePlayBeat();
+            if (renderedBeat >= 0.0) return renderedBeat;
+        }
         Deck& d = engine->deck(fromDeck);
         const auto deckTrackBeat = [this, &d] {
             const TrackDataPtr track = d.track();

@@ -2061,8 +2061,16 @@ void TransitionPanel::updateControls()
     primeBtn_->setEnabled(selected && !busy && primeTimingReady && stemsReady);
     // The checked TUTOR VIEW remains closable during a guided run. It cannot be
     // opened on top of an unrelated automatic Perform or while recording.
+    const bool tonePlay = selected && matches_[static_cast<size_t>(selectedIndex)].file->tonePlay &&
+        matches_[static_cast<size_t>(selectedIndex)].file->tonePlay->enabled;
+    if (tonePlay && tutorialViewOpen_ && !tutorialActive_) {
+        closeTutorialOverlay(); emit tutorialViewChanged(false);
+    }
     tutorialBtn_->setEnabled(
-        selected && !recording && (!replaying || tutorialActive_));
+        selected && !tonePlay && !recording && (!replaying || tutorialActive_));
+    tutorialBtn_->setToolTip(tonePlay
+        ? tr("Tutor View is unavailable for tone play: pitched sampler notes are automated. Use Perform or audition/edit the piano roll in Edit Transition.")
+        : tr("Open controller guidance for manually performing this transition."));
     abortBtn_->setEnabled(busy);
     renameBtn_->setEnabled(selected && !busy);
     deleteBtn_->setEnabled(selected && !busy);
@@ -3015,6 +3023,7 @@ QString TransitionPanel::tutorialInstruction(
     case ControlId::TempoRange:
     case ControlId::CrossfaderEnabled:
     case ControlId::Count:
+    case ControlId::TonePlayEnable:
         break;
     }
     QString name = QString::fromUtf8(controlName(event.control));
@@ -3103,6 +3112,13 @@ void TransitionPanel::layoutTutorialOverlay()
 void TransitionPanel::onTutorialViewToggled(bool open)
 {
     if (open) {
+        const int selected = selectedMatch();
+        if (selected >= 0 && matches_[static_cast<size_t>(selected)].file->tonePlay &&
+            matches_[static_cast<size_t>(selected)].file->tonePlay->enabled) {
+            QSignalBlocker block(tutorialBtn_); tutorialBtn_->setChecked(false);
+            emit statusMessage(tr("Tone play uses automated sampler notes; use Perform or the editor piano roll."), 5000);
+            return;
+        }
         if (hardwareInputFrozen_) {
             QSignalBlocker block(tutorialBtn_);
             tutorialBtn_->setChecked(false);

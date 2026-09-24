@@ -14,6 +14,8 @@
 #include "ui/TransitionEditor.h"
 #include "ui/TransitionFieldsEditor.h"
 #include "ui/TransitionPanel.h"
+#include "ui/TonePlayEditor.h"
+#include "ui/Theme.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -366,6 +368,108 @@ void checkCustomBankSwitching(QApplication& app)
 }
 }
 
+void tone_workspace_edits_notes_without_touching_automation_or_original_files(QApplication& app)
+{
+    using namespace gvt;
+    ControlBus bus;
+    AudioEngine engine(&bus);
+    TrackLibrary library;
+    TransitionStore store;
+    TransitionRecorder recorder(&bus,&engine);
+    TransitionPlayer player(&bus,&engine);
+    const auto out=makeTrack("Tone piano outgoing","gvfp1:tone-out");
+    const auto in=makeTrack("Tone piano incoming","gvfp1:tone-in");
+    for (int i=0;i<1500;++i) {
+        const float v=.2f+.6f*std::abs(std::sin(i*.13));
+        out->overviewPeaks.push_back(v);out->overviewLow.push_back(v);
+        out->overviewMid.push_back(v*.8f);out->overviewHigh.push_back(v*.4f);
+    }
+    engine.deck(0).loadTrack(out);engine.deck(1).loadTrack(in);
+    GvtFile file;
+    file.name="Tone workspace synthetic fixture";
+    file.from.title=out->title;file.from.fingerprint=out->fingerprint;
+    file.to.title=in->title;file.to.fingerprint=in->fingerprint;
+    file.from.bpm=file.to.bpm=file.masterBpm=120;
+    file.from.durationSec=file.to.durationSec=16;
+    file.endBeat=16;
+    file.events={{0,Role::ToDeck,ControlId::Play,1,Curve::Step}};
+    QString error;
+    const auto path=store.save(file,&error);CHECK(!path.isEmpty());
+    CHECK(loadTransitionFile(path,file,&error));
+    QFile original(path);CHECK(original.open(QIODevice::ReadOnly));const auto bytes=original.readAll();original.close();
+    TransitionEditorWindow editor(&engine,&library,&store,&recorder,&player);
+    editor.setStyleSheet(appStyleSheet());
+    editor.openTransition(file);editor.resize(1280,820);app.processEvents();
+    CHECK(editor.width()<=1280);
+    auto* workspace=editor.findChild<QTabWidget*>("transitionEditorWorkspace");
+    auto* doc=editor.findChild<TransitionEditorDocument*>();
+    auto* tone=editor.findChild<TonePlayEditor*>();
+    auto* enabled=editor.findChild<QCheckBox*>("tonePlayEnabled");
+    auto* replace=editor.findChild<QCheckBox*>("toneReplaceOutgoing");
+    auto* roll=editor.findChild<QAbstractScrollArea*>("tonePianoRoll");
+    auto* beat=editor.findChild<QDoubleSpinBox*>("toneNoteBeat");
+    auto* duration=editor.findChild<QDoubleSpinBox*>("toneNoteDuration");
+    auto* timeline=editor.findChild<TransitionTimelineView*>();
+    CHECK(workspace&&doc&&tone&&enabled&&replace&&roll&&beat&&duration&&timeline);
+    if(!workspace||!doc||!tone||!enabled||!replace||!roll||!beat||!duration||!timeline)return;
+    workspace->setCurrentWidget(tone);enabled->setChecked(true);app.processEvents();
+    CHECK(doc->file().tonePlay && !replace->isChecked());
+    CHECK(doc->file().tonePlay->notes.size()==1);
+    auto* viewport=roll->viewport();
+    const auto mouse=[&](QEvent::Type type,QPoint at){
+        sendMouse(viewport,type,at,viewport->mapToGlobal(at),Qt::LeftButton,
+            type==QEvent::MouseButtonRelease?Qt::NoButton:Qt::LeftButton);
+    };
+    const int rootY=26+(96-60)*19-roll->verticalScrollBar()->value()+9;
+    const QPoint noteAt(66+48*2+3,rootY-3*19);
+    mouse(QEvent::MouseButtonDblClick,noteAt);app.processEvents();
+    CHECK(doc->file().tonePlay->notes.size()==2);
+    CHECK(doc->file().tonePlay->notes.back().pitch==63);
+    CHECK(doc->file().tonePlay->notes.back().beat==2);
+    beat->setValue(2.375);QMetaObject::invokeMethod(beat,"editingFinished",Qt::DirectConnection);
+    CHECK(doc->file().tonePlay->notes.back().beat==2.375);
+    duration->setValue(.75);QMetaObject::invokeMethod(duration,"editingFinished",Qt::DirectConnection);
+    CHECK(doc->file().tonePlay->notes.back().duration==.75);
+    // Move then resize a note; each drag is one undoable document operation.
+    const QPoint start(66+int(48*2.375)+4,rootY-3*19);
+    mouse(QEvent::MouseButtonPress,start);mouse(QEvent::MouseMove,start+QPoint(48,-19));mouse(QEvent::MouseButtonRelease,start+QPoint(48,-19));
+    CHECK(doc->file().tonePlay->notes.back().beat==3.5); // quarter-beat snap
+    CHECK(doc->file().tonePlay->notes.back().pitch==64);
+    const QPoint edge(66+int(48*4.25)-2,rootY-4*19);
+    mouse(QEvent::MouseButtonPress,edge);mouse(QEvent::MouseMove,edge+QPoint(24,0));mouse(QEvent::MouseButtonRelease,edge+QPoint(24,0));
+    CHECK(doc->file().tonePlay->notes.back().duration==1.25);
+    roll->setFocus();app.processEvents();
+    QKeyEvent deletion(QEvent::KeyPress,Qt::Key_Delete,Qt::NoModifier);
+    QApplication::sendEvent(roll,&deletion);
+    CHECK(doc->file().tonePlay->notes.size()==1);
+    CHECK(doc->file().events.size()==1);
+    doc->undoStack()->undo();CHECK(doc->file().tonePlay->notes.size()==2);
+    doc->mutate("Piano-only recipe",[](GvtFile& f){f.events.clear();});
+    CHECK(doc->validationErrors().isEmpty());
+    timeline->setPlayheadBeat(5);
+    QMetaObject::invokeMethod(tone,"auditionRequested",Qt::DirectConnection,Q_ARG(int,60));
+    CHECK(engine.exclusivePreviewActive());
+    auto* stop=editor.findChild<QPushButton*>("transitionEditorStop");CHECK(stop);
+    if(stop)stop->click();
+    CHECK(timeline->playheadBeat()==5);
+    CHECK(!engine.exclusivePreviewActive());
+    CHECK(doc->file().tonePlay->notes.size()==2);
+    // Tutor button is refused for tone-enabled files and explains why.
+    auto toneFile=doc->file();toneFile.id.clear();toneFile.filePath.clear();
+    const auto tonePath=store.save(toneFile,&error);CHECK(!tonePath.isEmpty());
+    TransitionPanel panel(&bus,&engine,&store,&recorder,&player);
+    panel.selectTransitionFile(tonePath);
+    QPushButton* tutor=nullptr;
+    for(auto* b:panel.findChildren<QPushButton*>())if(b->text()=="TUTOR VIEW")tutor=b;
+    CHECK(tutor && !tutor->isEnabled() && tutor->toolTip().contains("tone play"));
+    const auto screenshot=qgetenv("GRAVITINO_TONE_SCREENSHOT");
+    if(!screenshot.isEmpty()){app.processEvents();CHECK(editor.grab().save(QString::fromUtf8(screenshot)));}
+    CHECK(original.open(QIODevice::ReadOnly));CHECK(original.readAll()==bytes);
+    CHECK(out->firstBeatSec==0 && out->bpm==120 && out->hotCues[0]<0);
+    while(doc->undoStack()->canUndo())doc->undoStack()->undo();
+    editor.close();
+}
+
 void editor_event_types_and_auto_apply_keep_the_selected_action(QApplication& app)
 {
     using namespace gvt;
@@ -538,7 +642,7 @@ void editor_event_types_and_auto_apply_keep_the_selected_action(QApplication& ap
     editor.close();
 }
 
-void editor_audio_matches_perform_and_explains_the_two_beat_rulers(QApplication& app)
+void editor_audio_matches_perform_and_explains_the_two_beat_rulers(QApplication& app, bool tone = false)
 {
     using namespace gvt;
     ControlBus bus, referenceBus;
@@ -591,6 +695,13 @@ void editor_audio_matches_perform_and_explains_the_two_beat_rulers(QApplication&
     file.events = {press,
         {0.02, Role::ToDeck, ControlId::Play, 1, Curve::Step}, release,
         {0.05, Role::ToDeck, ControlId::FxWet, 0.7, Curve::Linear}};
+    if (tone) {
+        TonePlayPattern pattern;
+        pattern.sourceStartBeat = 2.125;
+        pattern.sourceEndBeat = 2.625;
+        pattern.notes = {{0,.125,60,.8},{.025,.125,67,.6}};
+        file.tonePlay = pattern;
+    }
     QString error;
     const QString path = store.save(file, &error);
     CHECK(!path.isEmpty());
@@ -856,6 +967,8 @@ int main(int argc, char** argv)
         QTemporaryDir parityDirectory;
         qputenv("GRAVITINO_TRANSITIONS_DIR", parityDirectory.path().toUtf8());
         editor_audio_matches_perform_and_explains_the_two_beat_rulers(app);
+        editor_audio_matches_perform_and_explains_the_two_beat_rulers(app, true);
+        tone_workspace_edits_notes_without_touching_automation_or_original_files(app);
         editor_event_types_and_auto_apply_keep_the_selected_action(app);
         qputenv("GRAVITINO_TRANSITIONS_DIR", previousDirectory);
     }

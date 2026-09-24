@@ -633,6 +633,10 @@ bool gvtLoadFile(const QString& path, GvtFile& out, QString* error,
 }
 
 bool gvtSaveFile(const GvtFile& f, const QString& path, QString* error) {
+    if (f.tonePlay) {
+        if (error) *error = QStringLiteral("Tone play requires .transition YAML; legacy .gvt cannot store sampler notes.");
+        return false;
+    }
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
         if (error) *error = QStringLiteral("cannot write %1: %2").arg(path, file.errorString());

@@ -39,6 +39,7 @@ class TransitionPlayer;
 class TransitionRecorder;
 class TransitionStore;
 class TransitionFieldsEditor;
+class TonePlayEditor;
 
 class TransitionEditorDocument final : public QObject {
     Q_OBJECT
@@ -216,7 +217,8 @@ private:
     void finishAutomationTake(bool commit);
     void updatePreviewTick();
     void prepareRequiredStems();
-    bool beginPreviewAt(double beat, bool establishCue = true);
+    bool beginPreviewAt(double beat, bool establishCue = true, const GvtFile* audition = nullptr);
+    void auditionTone(int pitch);
     void endPreview(bool returnToCue);
     void returnPlayheadToPreviewCue();
     int nextExecutableEventAtOrAfter(double beat) const;
@@ -250,6 +252,7 @@ private:
     int selectedEvent_ = -1;
 
     TransitionTimelineView* timeline_ = nullptr;
+    TonePlayEditor* toneEditor_ = nullptr;
     QScrollArea* timelineScroll_ = nullptr;
     QTabWidget* inspectorTabs_ = nullptr;
     QComboBox* sectionCombo_ = nullptr;
@@ -305,6 +308,7 @@ private:
     double previewCueBeat_ = 0.0;
     bool previewCueValid_ = false;
     bool previewPaused_ = false;
+    bool toneAudition_ = false;
     bool keyboardCueHeld_ = false;
     bool keyboardCueLatched_ = false;
 };
