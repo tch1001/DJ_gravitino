@@ -13,6 +13,7 @@
 //     grid position whose local onset peak is strong.
 
 #include "TrackData.h"
+#include "AnalysisInternal.h"
 
 #include <algorithm>
 #include <cmath>
@@ -85,6 +86,13 @@ FineResult refineBpm(const std::vector<double>& env, double envRate, double cent
 
 BeatAnalysis analyzeBeats(const float* mono, int64_t n, int sampleRate)
 {
+    return detail::analyzeBeatsWithProgress(mono, n, sampleRate, {});
+}
+
+BeatAnalysis detail::analyzeBeatsWithProgress(const float* mono, int64_t n,
+    int sampleRate, const WorkProgress& progress)
+{
+    if (progress) progress(0.0);
     BeatAnalysis result;
     if (!mono || sampleRate <= 0) return result;
     if (n < (int64_t)sampleRate * 5) return result;          // too short
@@ -98,6 +106,7 @@ BeatAnalysis analyzeBeats(const float* mono, int64_t n, int sampleRate)
     std::vector<double> env((size_t)nHops, 0.0);
     double peak = 0.0, prevLog = -9.0;
     for (int64_t h = 0; h < nHops; ++h) {
+        if (progress && h % 128 == 0) progress(.1 * double(h) / nHops);
         double e = 0.0;
         const float* p = mono + h * kHop;
         for (int i = 0; i < kHop; ++i) {
@@ -135,6 +144,7 @@ BeatAnalysis analyzeBeats(const float* mono, int64_t n, int sampleRate)
 
     std::vector<double> ac((size_t)lagTop, 0.0);
     for (int L = 1; L < lagTop; ++L) {
+        if (progress) progress(.1 + .4 * double(L) / lagTop);
         double s = 0.0;
         for (size_t i = 0; i + (size_t)L < nE; ++i) s += zc[i] * zc[i + (size_t)L];
         ac[(size_t)L] = std::max(0.0, s / (double)(nE - (size_t)L));
@@ -166,7 +176,9 @@ BeatAnalysis analyzeBeats(const float* mono, int64_t n, int sampleRate)
     if (candidates.empty()) candidates.push_back(std::clamp(coarseBpm, kBpmMin, kBpmMax));
 
     FineResult best, bestPreferred;
+    int candidateIndex = 0;
     for (double c : candidates) {
+        if (progress) progress(.5 + .5 * double(candidateIndex++) / candidates.size());
         const FineResult f = refineBpm(env, envRate, c);
         if (f.score > best.score) best = f;
         if (f.bpm >= kPreferMin && f.bpm <= kPreferMax && f.score > bestPreferred.score)

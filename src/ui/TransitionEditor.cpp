@@ -55,6 +55,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScopedValueRollback>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -153,6 +154,13 @@ bool isStemControl(ControlId control)
            control == ControlId::StemMelody ||
            control == ControlId::StemBass ||
            control == ControlId::StemDrums;
+}
+
+bool controlUsesTransitionReference(ControlId control)
+{
+    return (control >= ControlId::HotCue1 && control <= ControlId::HotCue8) ||
+           (control >= ControlId::SavedLoop1 && control <= ControlId::SavedLoop8) ||
+           (control >= ControlId::TransitionCue1 && control <= ControlId::TransitionCue8);
 }
 
 bool initialUsesStems(const GvtInitialState& state)
@@ -1738,9 +1746,11 @@ void TransitionEditorWindow::buildUi()
 
     auto* eventForm = new QFormLayout;
     roleCombo_ = new QComboBox(eventsPage);
+    roleCombo_->setObjectName(QStringLiteral("transitionEditorEventRole"));
     roleCombo_->addItem(tr("Outgoing"), static_cast<int>(Role::FromDeck));
     roleCombo_->addItem(tr("Incoming"), static_cast<int>(Role::ToDeck));
     controlCombo_ = new QComboBox(eventsPage);
+    controlCombo_->setObjectName(QStringLiteral("transitionEditorEventControl"));
     for (int value = 0; value < static_cast<int>(ControlId::Count); ++value) {
         const ControlId control = static_cast<ControlId>(value);
         if (editableTimelineControl(control))
@@ -1751,29 +1761,34 @@ void TransitionEditorWindow::buildUi()
     eventBeatSpin_->setRange(-1000000.0, 1000000.0);
     eventBeatSpin_->setDecimals(6);
     eventBeatSpin_->setSingleStep(0.01);
+    eventBeatSpin_->setKeyboardTracking(false);
     eventBeatSpin_->setToolTip(tr("timeline.at_beat: WHEN this action happens after transition start. "
         "This does not change its cue's source position. Decimal beats are allowed."));
     eventValueSpin_ = new QDoubleSpinBox(eventsPage);
     eventValueSpin_->setRange(-1024.0, 1024.0);
     eventValueSpin_->setDecimals(6);
     eventValueSpin_->setObjectName(QStringLiteral("transitionEditorEventValue"));
+    eventValueSpin_->setKeyboardTracking(false);
     eventSourceBeatLabel_ = new QLabel(QStringLiteral("—"), eventsPage);
     eventSourceBeatLabel_->setObjectName(
         QStringLiteral("transitionEditorEventSourceBeat"));
     eventSourceBeatLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     curveCombo_ = new QComboBox(eventsPage);
+    curveCombo_->setObjectName(QStringLiteral("transitionEditorEventCurve"));
     curveCombo_->addItem(tr("Instant change (step)"), static_cast<int>(Curve::Step));
     curveCombo_->addItem(tr("Ramp ends here (linear)"), static_cast<int>(Curve::Linear));
     curveCombo_->addItem(tr("Eased ramp ends here (S-curve)"), static_cast<int>(Curve::SCurve));
     curveCombo_->setToolTip(tr("A ramp ends at this event. It begins at the previous "
         "point for this song and control, or the initial value at beat zero."));
     gestureControlCombo_ = new QComboBox(eventsPage);
+    gestureControlCombo_->setObjectName(QStringLiteral("transitionEditorEventGesture"));
     gestureControlCombo_->addItem(tr("None"), static_cast<int>(ControlId::Count));
     for (int value = 0; value < static_cast<int>(ControlId::Count); ++value) {
         const ControlId control = static_cast<ControlId>(value);
         gestureControlCombo_->addItem(controlText(control), value);
     }
     gesturePadModeCombo_ = new QComboBox(eventsPage);
+    gesturePadModeCombo_->setObjectName(QStringLiteral("transitionEditorEventPadMode"));
     gesturePadModeCombo_->addItem(tr("None"), -1);
     for (int value = 0; value < static_cast<int>(PerformancePadMode::Count);
          ++value) {
@@ -1782,6 +1797,7 @@ void TransitionEditorWindow::buildUi()
             QString::fromLatin1(performancePadModeLabel(mode)), value);
     }
     eventReferenceEdit_ = new QLineEdit(eventsPage);
+    eventReferenceEdit_->setObjectName(QStringLiteral("transitionEditorEventReference"));
     eventReferenceEdit_->setPlaceholderText(tr("Optional semantic cue/loop ID"));
     eventForm->addRow(tr("Target"), roleCombo_);
     eventForm->addRow(tr("Control"), controlCombo_);
@@ -1818,7 +1834,7 @@ void TransitionEditorWindow::buildUi()
     moveLaunchTogetherCheck_ = new QCheckBox(tr("Move cue press + PLAY + release together"), eventsPage);
     moveLaunchTogetherCheck_->setObjectName(QStringLiteral("transitionEditorMoveLaunchTogether"));
     moveLaunchTogetherCheck_->setChecked(true);
-    moveLaunchTogetherCheck_->setToolTip(tr("When you change WHEN and click Apply, shift all three "
+    moveLaunchTogetherCheck_->setToolTip(tr("When a WHEN edit is applied, shift all three "
         "launch events by the same amount. Source cue position is unchanged. Uncheck for raw event editing."));
     eventsLayout->addWidget(moveLaunchTogetherCheck_);
     editSourceButton_ = new QPushButton(tr("Where: edit source cue / loop…"), eventsPage);
@@ -1837,11 +1853,23 @@ void TransitionEditorWindow::buildUi()
     applyEventButton_ = new QPushButton(tr("Apply"), eventsPage);
     applyEventButton_->setObjectName(
         QStringLiteral("transitionEditorApplyEvent"));
+    autoApplyEventCheck_ = new QCheckBox(tr("Auto apply"), eventsPage);
+    autoApplyEventCheck_->setObjectName(QStringLiteral("transitionEditorAutoApplyEvent"));
+    autoApplyEventCheck_->setChecked(true);
+    autoApplyEventCheck_->setMinimumWidth(autoApplyEventCheck_->sizeHint().width());
+    autoApplyEventCheck_->setToolTip(tr("Apply selected-event edits to the working copy automatically. "
+        "Finish typing a number or ID with Enter or by leaving the field. "
+        "Undo reverses edits; Save is still required to update the transition file."));
+    // Native button minimums waste space in the narrow inspector. Reserve
+    // enough for each label and keep the checkbox readable at 1100 px wide.
+    for (auto* button : {add, duplicate, deleteEventButton_, applyEventButton_})
+        button->setFixedWidth(button->fontMetrics().horizontalAdvance(button->text()) + 26);
     eventButtons->addWidget(add);
     eventButtons->addWidget(duplicate);
     eventButtons->addWidget(deleteEventButton_);
     eventButtons->addStretch();
     eventButtons->addWidget(applyEventButton_);
+    eventButtons->addWidget(autoApplyEventCheck_);
     eventsLayout->addLayout(eventButtons);
     eventsTabIndex_ = inspectorTabs_->addTab(eventsPage, tr("Events"));
     connect(add, &QPushButton::clicked, this, &TransitionEditorWindow::addEvent);
@@ -1853,19 +1881,41 @@ void TransitionEditorWindow::buildUi()
             &TransitionEditorWindow::applyEventInspector);
     connect(controlCombo_, &QComboBox::currentIndexChanged, this, [this] {
         if (refreshing_) return;
-        const ControlId control = static_cast<ControlId>(
-            controlCombo_->currentData().toInt());
-        const auto [minimum, maximum] = controlEditRange(control);
-        eventValueSpin_->setRange(minimum, maximum);
-        if (selectedEvent_ < 0)
-            eventValueSpin_->setValue(defaultControlValue(control));
-        curveCombo_->setCurrentIndex(
-            curveCombo_->findData(static_cast<int>(Curve::Step)));
-        curveCombo_->setEnabled(!controlIsTrigger(control));
-        updateEditingHelp();
+        {
+            // Dependent fields form ONE edit, not several recursive auto-applies.
+            const QScopedValueRollback guard(refreshing_, true);
+            const ControlId control = static_cast<ControlId>(
+                controlCombo_->currentData().toInt());
+            const auto [minimum, maximum] = controlEditRange(control);
+            eventValueSpin_->setRange(minimum, maximum);
+            if (selectedEvent_ < 0)
+                eventValueSpin_->setValue(defaultControlValue(control));
+            if (controlIsTrigger(control))
+                curveCombo_->setCurrentIndex(
+                    curveCombo_->findData(static_cast<int>(Curve::Step)));
+            curveCombo_->setEnabled(!controlIsTrigger(control));
+            const bool usesReference = controlUsesTransitionReference(control);
+            if (!usesReference) eventReferenceEdit_->clear();
+            eventReferenceEdit_->setEnabled(usesReference);
+            updateEditingHelp();
+        }
+        autoApplyEventInspector();
     });
     connect(eventValueSpin_, &QDoubleSpinBox::valueChanged, this,
-            [this] { if (!refreshing_) updateEditingHelp(); });
+            [this] {
+                if (refreshing_) return;
+                updateEditingHelp();
+                autoApplyEventInspector();
+            });
+    connect(eventBeatSpin_, &QDoubleSpinBox::valueChanged, this,
+            &TransitionEditorWindow::autoApplyEventInspector);
+    for (auto* combo : {roleCombo_, curveCombo_, gestureControlCombo_, gesturePadModeCombo_})
+        connect(combo, &QComboBox::currentIndexChanged, this,
+                &TransitionEditorWindow::autoApplyEventInspector);
+    connect(eventReferenceEdit_, &QLineEdit::editingFinished, this,
+            &TransitionEditorWindow::autoApplyEventInspector);
+    connect(autoApplyEventCheck_, &QCheckBox::toggled, this,
+            &TransitionEditorWindow::autoApplyEventInspector);
 
     // Semantic cues, loops and timeline labels.
     auto* performancePage = new QWidget(inspectorTabs_);
@@ -2692,6 +2742,9 @@ void TransitionEditorWindow::followEventSequence(double beat)
 
 void TransitionEditorWindow::updateEventInspector()
 {
+    // Selection, undo/redo and document refresh populate controls but are not
+    // user edits. Keep their signals from applying a half-populated inspector.
+    const QScopedValueRollback guard(refreshing_, true);
     const bool selected = selectedEvent_ >= 0 &&
         selectedEvent_ < static_cast<int>(document_->file().events.size());
     roleCombo_->setEnabled(true);
@@ -2709,6 +2762,7 @@ void TransitionEditorWindow::updateEventInspector()
         eventBeatSpin_->setValue(timeline_->playheadBeat());
         const ControlId control = static_cast<ControlId>(
             controlCombo_->currentData().toInt());
+        eventReferenceEdit_->setEnabled(controlUsesTransitionReference(control));
         const auto [minimum, maximum] = controlEditRange(control);
         eventValueSpin_->setRange(minimum, maximum);
         eventValueSpin_->setValue(defaultControlValue(control));
@@ -2747,6 +2801,7 @@ void TransitionEditorWindow::updateEventInspector()
     curveCombo_->setCurrentIndex(curveCombo_->findData(static_cast<int>(event.curve)));
     eventReferenceEdit_->setText(!event.cueId.isEmpty() ? event.cueId
                                                          : event.loopId);
+    eventReferenceEdit_->setEnabled(controlUsesTransitionReference(event.control));
     gestureControlCombo_->setCurrentIndex(gestureControlCombo_->findData(
         static_cast<int>(event.gestureControl)));
     gesturePadModeCombo_->setCurrentIndex(gesturePadModeCombo_->findData(
@@ -2867,7 +2922,8 @@ void TransitionEditorWindow::addEvent()
     event.gestureControl = static_cast<ControlId>(
         gestureControlCombo_->currentData().toInt());
     event.gesturePadMode = gesturePadModeCombo_->currentData().toInt();
-    const QString reference = eventReferenceEdit_->text().trimmed();
+    const QString reference = controlUsesTransitionReference(event.control)
+        ? eventReferenceEdit_->text().trimmed() : QString();
     for (const TransitionHotCue& cue : document_->file().transitionCues) {
         if (cue.id == reference && cue.role == event.role) {
             event.cueId = reference;
@@ -2886,13 +2942,7 @@ void TransitionEditorWindow::addEvent()
                 .arg(reference));
         return;
     }
-    const bool requiresReference =
-        (event.control >= ControlId::HotCue1 &&
-         event.control <= ControlId::HotCue8) ||
-        (event.control >= ControlId::SavedLoop1 &&
-         event.control <= ControlId::SavedLoop8) ||
-        (event.control >= ControlId::TransitionCue1 &&
-         event.control <= ControlId::TransitionCue8);
+    const bool requiresReference = controlUsesTransitionReference(event.control);
     if (requiresReference && reference.isEmpty()) {
         QMessageBox::information(this, tr("Choose a transition cue or loop"),
             tr("Create a transition-owned cue or loop first, then enter its semantic ID for this action."));
@@ -2944,14 +2994,32 @@ void TransitionEditorWindow::duplicateSelectedEvent()
 
 void TransitionEditorWindow::applyEventInspector()
 {
+    commitEventInspector(false);
+}
+
+void TransitionEditorWindow::autoApplyEventInspector()
+{
+    if (!refreshing_ && autoApplyEventCheck_->isChecked())
+        commitEventInspector(true);
+}
+
+void TransitionEditorWindow::commitEventInspector(bool automatic)
+{
     const int index = selectedEvent_;
-    if (index < 0) return;
+    if (refreshing_ || index < 0 ||
+        index >= static_cast<int>(document_->file().events.size())) return;
+    const auto invalid = [this, automatic](const QString& title, const QString& message) {
+        if (automatic)
+            statusBar()->showMessage(tr("Not applied: %1").arg(message), 8000);
+        else
+            QMessageBox::warning(this, title, message);
+    };
     GvtEvent event = document_->file().events[static_cast<std::size_t>(index)];
     event.role = static_cast<Role>(roleCombo_->currentData().toInt());
     event.control = static_cast<ControlId>(controlCombo_->currentData().toInt());
     if (event.role == Role::Mixer ||
         !transitionEventIsExecutable(event)) {
-        QMessageBox::warning(this, tr("Invalid target"),
+        invalid(tr("Invalid target"),
             tr("Crossfader and mixer actions are compatibility-only and cannot be edited."));
         return;
     }
@@ -2963,13 +3031,16 @@ void TransitionEditorWindow::applyEventInspector()
     event.gestureControl = static_cast<ControlId>(
         gestureControlCombo_->currentData().toInt());
     event.gesturePadMode = gesturePadModeCombo_->currentData().toInt();
-    const QString reference = eventReferenceEdit_->text().trimmed();
+    // Only cue/loop controls may consume a semantic reference. A stale ID must
+    // never override the type the user actually chose (e.g. Stem Melody).
+    const QString reference = controlUsesTransitionReference(event.control)
+        ? eventReferenceEdit_->text().trimmed() : QString();
     event.cueId.clear();
     event.loopId.clear();
     for (const TransitionHotCue& cue : document_->file().transitionCues) {
         if (cue.id != reference) continue;
         if (cue.role != event.role) {
-            QMessageBox::warning(this, tr("Cue belongs to another endpoint"),
+            invalid(tr("Cue belongs to another endpoint"),
                 tr("Cue “%1” belongs to %2. Change the event target or choose another cue.")
                     .arg(reference, roleText(cue.role)));
             return;
@@ -2980,7 +3051,7 @@ void TransitionEditorWindow::applyEventInspector()
     for (const TransitionSavedLoop& loop : document_->file().transitionLoops) {
         if (loop.id != reference) continue;
         if (loop.role != event.role) {
-            QMessageBox::warning(this, tr("Loop belongs to another endpoint"),
+            invalid(tr("Loop belongs to another endpoint"),
                 tr("Loop “%1” belongs to %2. Change the event target or choose another loop.")
                     .arg(reference, roleText(loop.role)));
             return;
@@ -2989,24 +3060,27 @@ void TransitionEditorWindow::applyEventInspector()
         event.control = ControlId::TransitionCue1;
     }
     if (!reference.isEmpty() && event.cueId.isEmpty() && event.loopId.isEmpty()) {
-        QMessageBox::warning(this, tr("Unknown semantic ID"),
+        invalid(tr("Unknown semantic ID"),
                              tr("No transition cue or loop has ID “%1”.").arg(reference));
         return;
     }
-    const bool requiresReference =
-        (event.control >= ControlId::HotCue1 &&
-         event.control <= ControlId::HotCue8) ||
-        (event.control >= ControlId::SavedLoop1 &&
-         event.control <= ControlId::SavedLoop8) ||
-        (event.control >= ControlId::TransitionCue1 &&
-         event.control <= ControlId::TransitionCue8);
+    const bool requiresReference = controlUsesTransitionReference(event.control);
     if (requiresReference && reference.isEmpty()) {
-        QMessageBox::information(this, tr("Choose a transition cue or loop"),
+        invalid(tr("Choose a transition cue or loop"),
             tr("This action must reference a transition-owned cue or loop ID."));
         return;
     }
+    if (statusBar()->currentMessage().startsWith(tr("Not applied: %1").arg(QString())))
+        statusBar()->clearMessage();
     std::vector<int> launchGroup;
     const auto& original = document_->file().events[static_cast<std::size_t>(index)];
+    // Auto-apply followed by clicking Apply (or focus-out) is one undo step.
+    if (event.role == original.role && event.control == original.control &&
+        event.beat == original.beat && event.value == original.value &&
+        event.curve == original.curve && event.cueId == original.cueId &&
+        event.loopId == original.loopId && event.gestureControl == original.gestureControl &&
+        event.gesturePadMode == original.gesturePadMode)
+        return;
     if (moveLaunchTogetherCheck_->isChecked() && event.role == original.role &&
         event.control == original.control && event.cueId == original.cueId &&
         event.loopId == original.loopId) {

@@ -3,19 +3,35 @@
 #pragma once
 #include <QString>
 #include <vector>
+#include <functional>
+#include "TrackData.h"
 
 namespace gvt::detail {
+
+// Worker-only callbacks. Fractions measure completed work, not elapsed time.
+// Callers may throw to cancel; resource-owning helpers must unwind safely.
+using WorkProgress = std::function<void(double)>;
+using AnalysisProgress = std::function<void(double, const QString&)>;
+QString decodedAudioHash(const std::vector<float>& pcm,
+                         const WorkProgress& progress = {});
+QString assetFileHash(const QString& path, const WorkProgress& progress = {});
+TrackDataPtr loadAndAnalyzeWithProgress(const QString& path, QString* error,
+                                      const AnalysisProgress& progress);
+BeatAnalysis analyzeBeatsWithProgress(const float* mono, int64_t frames,
+                                     int sampleRate, const WorkProgress& progress);
 
 // Decode supported audio to interleaved stereo f32 at kSampleRate (48 kHz).
 // Returns false and sets *error on failure.
 bool decodeAudioStereo48k(const QString& path, std::vector<float>& pcmOut,
-                          QString* error);
+                          QString* error, const WorkProgress& progress = {});
 
 // Read title/artist/album via TagLib; title falls back to the filename stem.
-void readTags(const QString& path, QString& title, QString& artist, QString& album);
+void readTags(const QString& path, QString& title, QString& artist, QString& album,
+              QString& isrc, QString& musicBrainzRecording);
 
 // Mono max-abs per 512-frame bin, 0..1 (for waveform overview drawing).
-std::vector<float> computeOverviewPeaks(const std::vector<float>& stereoPcm);
+std::vector<float> computeOverviewPeaks(const std::vector<float>& stereoPcm,
+                                      const WorkProgress& progress = {});
 
 // Serato-style band overviews: per 512-frame bin peak abs of the mono signal
 // split into low (<200 Hz), mid (200–2000 Hz), high (>2000 Hz) via one-pole
@@ -27,7 +43,8 @@ std::vector<float> computeOverviewPeaks(const std::vector<float>& stereoPcm);
 void computeBandOverviews(const std::vector<float>& stereoPcm,
                           std::vector<float>& low,
                           std::vector<float>& mid,
-                          std::vector<float>& high);
+                          std::vector<float>& high,
+                          const WorkProgress& progress = {});
 
 // 0.5*(L+R) mixdown.
 std::vector<float> monoMixdown(const std::vector<float>& stereoPcm);

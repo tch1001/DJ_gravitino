@@ -87,10 +87,13 @@ void real_backend_stop_and_notifications_reopen_without_resetting_decks()
     CHECK(engine.outputDevicePreference().isEmpty()); // Previous default retained.
     CHECK(detail::AudioDeviceTestAccess::backendActive(engine));
     engine.deck(0).stop();
-    const double cursor = engine.deck(0).positionSec();
     SilentPreview preview;
     CHECK(engine.acquireExclusivePreview(&preview,&error));
-    detail::AudioDeviceTestAccess::stopBackend(engine); engine.refreshOutputDevices();
+    detail::AudioDeviceTestAccess::stopBackend(engine);
+    // stop() is asynchronous to the callback. Let its in-flight block finish
+    // before measuring the cursor that recovery must preserve.
+    const double cursor = engine.deck(0).positionSec();
+    engine.refreshOutputDevices();
     CHECK(detail::AudioDeviceTestAccess::backendActive(engine));
     CHECK(engine.exclusivePreviewActive());
     CHECK(std::fabs(engine.deck(0).positionSec()-cursor)<1e-9);

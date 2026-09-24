@@ -73,8 +73,10 @@ double goertzelMag(const float* x, int n, double hz, double fs)
 
 } // namespace
 
-KeyResult analyzeKey(const float* stereoPcm, int64_t frames, int sampleRate)
+KeyResult analyzeKey(const float* stereoPcm, int64_t frames, int sampleRate,
+                     const std::function<void(double)>& progress)
 {
+    if (progress) progress(0.0);
     KeyResult r;
     if (!stereoPcm || frames <= 0 || sampleRate <= 0) return r;
 
@@ -117,6 +119,7 @@ KeyResult analyzeKey(const float* stereoPcm, int64_t frames, int sampleRate)
     int frameCount = 0;
     for (size_t start = 0; start + (size_t)kFrameLen <= mono.size();
          start += (size_t)kHopLen) {
+        if (progress) progress(double(start) / mono.size());
         for (int i = 0; i < kFrameLen; ++i)
             frame[(size_t)i] = mono[start + (size_t)i] * win[(size_t)i];
         std::array<double, 12> fchroma{};

@@ -5,6 +5,7 @@
 #include <QCheckBox>
 #include <QCryptographicHash>
 #include <QFile>
+#include <QLineEdit>
 #include <QPersistentModelIndex>
 #include <QSettings>
 #include <QSortFilterProxyModel>
@@ -20,6 +21,10 @@
 #include "ui/QtAccessibilityWorkaround.h"
 
 #include <cstdio>
+
+#ifdef Q_OS_MACOS
+void retireNativeTableRows(QAccessible::Id tableId);
+#endif
 
 namespace {
 int failures = 0;
@@ -104,6 +109,84 @@ void table_refreshes_keep_accessibility_alive(QApplication& app)
     CHECK(QAccessible::accessibleInterface(tableId) == nullptr);
 }
 
+void native_row_retirement_keeps_cells_alive_for_search(QApplication& app)
+{
+#ifdef Q_OS_MACOS
+    if (QGuiApplication::platformName() != QStringLiteral("cocoa")) return;
+    QStandardItemModel source(40, 7);
+    for (int row = 0; row < source.rowCount(); ++row)
+        for (int column = 0; column < source.columnCount(); ++column)
+            source.setData(source.index(row, column),
+                           QStringLiteral("Song %1 / %2").arg(row).arg(column));
+    QSortFilterProxyModel proxy;
+    proxy.setSourceModel(&source);
+    auto* tablePointer = new QTableView;
+    auto& table = *tablePointer;
+    table.setModel(&proxy);
+    table.resize(850, 400);
+    table.show();
+    app.processEvents();
+    auto* accessible = QAccessible::queryAccessibleInterface(&table);
+    const auto tableId = QAccessible::uniqueId(accessible);
+    auto* cell = accessible->tableInterface()->cellAt(2, 0);
+    const auto cellId = QAccessible::uniqueId(cell);
+    retireNativeTableRows(tableId);
+    CHECK(QAccessible::accessibleInterface(tableId) == accessible);
+    CHECK(QAccessible::accessibleInterface(cellId) == cell);
+    // This is the reported rowsRemoved -> QAccessibleTable::modelChange path.
+    // Unlike invalidate(), filtering does not clear the table's child-ID cache.
+    proxy.setFilterFixedString(QStringLiteral("Song 1"));
+    app.processEvents();
+    CHECK(cacheCells(table, true) == tableId);
+    QLineEdit search;
+    QObject::connect(&search, &QLineEdit::textChanged,
+                     &proxy, &QSortFilterProxyModel::setFilterFixedString);
+    const QStringList searches{QString(), QStringLiteral("Song 1"),
+        QStringLiteral("Song 12"), QStringLiteral("No matches"),
+        QStringLiteral("Song 3"), QString()};
+    QList<QAccessible::Id> finalCellIds;
+    for (int iteration = 0; iteration < 30; ++iteration) {
+        for (const QString& text : searches) {
+            // Actual textChanged path with partial and empty search results;
+            // preserve every live Qt cell ID across native-only retirement.
+            search.setText(text);
+            app.processEvents();
+            QList<QAccessible::Id> ids;
+            for (int row = 0; row < proxy.rowCount(); ++row)
+                for (int column = 0; column < proxy.columnCount(); ++column)
+                    ids.append(QAccessible::uniqueId(
+                        accessible->tableInterface()->cellAt(row, column)));
+            retireNativeTableRows(tableId);
+            for (auto id : ids) {
+                auto* current = QAccessible::accessibleInterface(id);
+                CHECK(current && current->isValid());
+                if (!current || !current->isValid()) continue;
+                auto* position = current->tableCellInterface();
+                CHECK(position);
+                if (position)
+                    CHECK(current->text(QAccessible::Name) ==
+                          proxy.index(position->rowIndex(), position->columnIndex())
+                              .data().toString());
+            }
+            CHECK(cacheCells(table, true) == tableId); // native cells recreate
+            finalCellIds = ids;
+        }
+        source.insertRow(0);
+        source.setData(source.index(0, 0), QStringLiteral("Inserted"));
+        retireNativeTableRows(tableId);
+        source.removeRow(0);
+        proxy.sort(0, iteration % 2 ? Qt::AscendingOrder : Qt::DescendingOrder);
+        retireNativeTableRows(tableId);
+    }
+    delete tablePointer;
+    app.processEvents();
+    CHECK(QAccessible::accessibleInterface(tableId) == nullptr);
+    for (auto id : finalCellIds) CHECK(QAccessible::accessibleInterface(id) == nullptr);
+#else
+    Q_UNUSED(app);
+#endif
+}
+
 void playing_tracks_reorder_the_real_transition_library(QApplication& app)
 {
     gvt::ControlBus bus;
@@ -164,6 +247,8 @@ void playing_tracks_reorder_the_real_transition_library(QApplication& app)
         if (!timer) return;
         timer->stop();
         const auto tableId = cacheCells(*table, true);
+        auto* search = widget.findChild<QLineEdit*>(QStringLiteral("librarySearchField"));
+        CHECK(search);
         for (int iteration = 0; iteration < 100; ++iteration) {
             const bool playB = iteration % 2;
             bus.dispatch({0, playB ? gvt::ControlId::Stop : gvt::ControlId::Play, 1}, gvt::Origin::Ui);
@@ -176,6 +261,22 @@ void playing_tracks_reorder_the_real_transition_library(QApplication& app)
             app.processEvents();
             CHECK(cacheCells(*table, true) == tableId);
             if (iteration % 10 == 0) {
+                if (search) {
+#ifdef Q_OS_MACOS
+                    if (QGuiApplication::platformName() == QStringLiteral("cocoa"))
+                        retireNativeTableRows(tableId);
+#endif
+                    search->setText(QStringLiteral("Alpha"));
+                    CHECK(table->model()->rowCount() == 1);
+                    QMetaObject::invokeMethod(&widget, "showTab", Q_ARG(int, 0));
+                    app.processEvents();
+                    search->setText(QStringLiteral("No matches"));
+                    CHECK(table->model()->rowCount() == 0);
+                    QMetaObject::invokeMethod(&widget, "showTab", Q_ARG(int, 2));
+                    search->clear();
+                    CHECK(table->model()->rowCount() == 2);
+                    CHECK(cacheCells(*table, true) == tableId);
+                }
                 auto* portable = widget.findChild<QCheckBox*>(QStringLiteral("portableTransitionFilter"));
                 CHECK(portable);
                 if (portable) {
@@ -223,6 +324,7 @@ int main(int argc, char** argv)
     qputenv("GRAVITINO_TRANSITIONS_DIR", temporary.filePath("transitions").toUtf8());
     QAccessible::setActive(true);
     if (native) CHECK(QAccessible::isActive());
+    native_row_retirement_keeps_cells_alive_for_search(app);
     table_refreshes_keep_accessibility_alive(app);
     playing_tracks_reorder_the_real_transition_library(app);
     if (failures) return 1;

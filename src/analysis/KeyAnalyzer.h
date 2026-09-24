@@ -4,6 +4,7 @@
 #pragma once
 #include <QString>
 #include <cstdint>
+#include <functional>
 
 namespace gvt {
 
@@ -16,6 +17,7 @@ struct KeyResult {
 // Analyze interleaved stereo f32 PCM at `sampleRate` (up to the first ~120 s
 // are used). Returns ok=false (empty strings) for input that is too short,
 // silent, or whose key correlation is degenerate. Thread-safe, no globals.
-KeyResult analyzeKey(const float* stereoPcm, int64_t frames, int sampleRate);
+KeyResult analyzeKey(const float* stereoPcm, int64_t frames, int sampleRate,
+                     const std::function<void(double)>& progress = {});
 
 } // namespace gvt

@@ -2,6 +2,7 @@
 // structurally compatible across WAV, FLAC, MP3, and AIFF containers.
 
 #include "analysis/TrackData.h"
+#include "../third_party/miniaudio.h"
 
 #include <QCoreApplication>
 #include <QFile>
@@ -15,6 +16,26 @@
 #include <cstdio>
 
 namespace {
+
+// The progress-aware QFile reader must decode identically to the original
+// miniaudio file reader, including encoder padding and sample-rate conversion.
+bool matchesOriginalDecoder(const QString& path, const std::vector<float>& pcm)
+{
+    ma_decoder decoder;
+    const auto config = ma_decoder_config_init(ma_format_f32, 2, gvt::kSampleRate);
+    if (ma_decoder_init_file(path.toUtf8().constData(), &config, &decoder) != MA_SUCCESS)
+        return false;
+    std::vector<float> original;
+    std::vector<float> chunk(65536 * 2);
+    for (;;) {
+        ma_uint64 count = 0;
+        const auto result = ma_decoder_read_pcm_frames(&decoder, chunk.data(), 65536, &count);
+        original.insert(original.end(), chunk.data(), chunk.data() + count * 2);
+        if (result != MA_SUCCESS || count < 65536) break;
+    }
+    ma_decoder_uninit(&decoder);
+    return original == pcm;
+}
 
 void append16(QByteArray& bytes, uint16_t value)
 {
@@ -95,6 +116,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "FAIL WAV: %s\n", qUtf8Printable(error));
         return 1;
     }
+    if (!matchesOriginalDecoder(wav, reference->pcm)) return 1;
     const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
     if (ffmpeg.isEmpty()) {
         std::printf("test_audio_formats: WAV passed; ffmpeg unavailable, codecs skipped\n");
@@ -105,9 +127,13 @@ int main(int argc, char** argv)
         const char* name;
         const char* suffix;
         QStringList args;
+        bool checkArrangement = true;
     } variants[] = {
         {"FLAC", "flac", {}},
         {"MP3", "mp3", {QStringLiteral("-b:a"), QStringLiteral("96k")}},
+        {"MP3-VBR", "mp3", {QStringLiteral("-q:a"), QStringLiteral("4")}},
+        {"MP3-no-length-header", "mp3", {QStringLiteral("-q:a"), QStringLiteral("4"),
+            QStringLiteral("-write_xing"), QStringLiteral("0")}, false},
         {"AIFF", "aiff", {QStringLiteral("-c:a"), QStringLiteral("pcm_s16be")}},
         {"gain/silence/resample", "flac",
          {QStringLiteral("-af"), QStringLiteral("adelay=750|750,volume=0.42"),
@@ -126,6 +152,17 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "FAIL decode %s: %s\n", variant.name,
                          qUtf8Printable(error));
             return 1;
+        }
+        if (!matchesOriginalDecoder(output, decoded->pcm)) {
+            std::fprintf(stderr, "FAIL PCM changed from original decoder: %s\n", variant.name);
+            return 1;
+        }
+        // Without Xing/LAME metadata both decoders retain encoder padding.
+        // This extra case protects decode/progress parity, not a new guarantee
+        // about the existing structural matcher across missing gapless metadata.
+        if (!variant.checkArrangement) {
+            std::printf("%s original-decoder PCM parity passed\n", variant.name);
+            continue;
         }
         const double similarity = gvt::structureFingerprintSimilarity(
             reference->structureFingerprint, decoded->structureFingerprint);

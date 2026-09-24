@@ -66,6 +66,8 @@ private:
     int sourceRowFor(const QModelIndex& proxyIndex) const;
     int trackRowFor(const GvtFile& transition, bool outgoing) const;
     void loadRowTo(int sourceRow, int deck);
+    void finishPendingLoads(int sourceRow);
+    void cancelUnsafePendingLoads();
     int selectedTransitionSourceRow() const;
 
     TrackLibrary* library_;
@@ -101,6 +103,11 @@ private:
     QPushButton* loadABtn_ = nullptr;
     QPushButton* loadBBtn_ = nullptr;
     QTimer* loadStateTimer_ = nullptr;
+    struct PendingLoad {
+        QString path;
+        TrackDataPtr previousTrack;
+    };
+    PendingLoad pendingLoads_[kNumDecks];
     bool transitionEditingEnabled_ = true;
     QString selectedTransitionPath_;
     TransitionGraphWindow* transitionGraphWindow_ = nullptr;

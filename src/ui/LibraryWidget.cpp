@@ -20,6 +20,7 @@
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
+#include <QStyle>
 #include <QTableView>
 #include <QTimer>
 #include <QTreeWidget>
@@ -210,7 +211,33 @@ public:
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override
     {
-        QStyledItemDelegate::paint(painter, option, index);
+        const QVariant progress = index.data(TrackLibrary::AnalysisProgressRole);
+        if (index.column() == 5 && progress.isValid()) {
+            QStyleOptionViewItem background(option);
+            initStyleOption(&background, index);
+            background.text.clear();
+            option.widget->style()->drawControl(QStyle::CE_ItemViewItem,
+                                               &background, painter, option.widget);
+            painter->save();
+            const QRect bar = option.rect.adjusted(4, 4, -4, -4);
+            const bool error = !index.data(TrackLibrary::AnalysisErrorRole).toString().isEmpty();
+            const QColor accent = error ? QColor(210, 110, 85)
+                : progress.toDouble() >= 1.0 ? QColor(90, 168, 126) : QColor(70, 164, 190);
+            painter->setPen(QPen(accent.darker(160), 1));
+            painter->setBrush(QColor(24, 32, 40));
+            painter->drawRoundedRect(bar, 3, 3);
+            const QRect fill = bar.adjusted(1, 1, -1, -1);
+            painter->fillRect(QRect(fill.topLeft(), QSize(
+                qRound(fill.width() * progress.toDouble()), fill.height())),
+                QColor(accent.red(), accent.green(), accent.blue(), 90));
+            painter->setPen(QColor(224, 232, 240));
+            const QString text = index.data().toString();
+            painter->drawText(bar.adjusted(3, 0, -3, 0), Qt::AlignCenter,
+                option.fontMetrics.elidedText(text, Qt::ElideRight, bar.width() - 6));
+            painter->restore();
+        } else {
+            QStyledItemDelegate::paint(painter, option, index);
+        }
         if (index.row() <= 0) return;
         const QVariant current = index.data(tierRole_);
         const QVariant previous = index.sibling(index.row() - 1,
@@ -618,6 +645,8 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
 
     loadABtn_ = new FitPushButton(tr("Load ▶ A"));
     loadBBtn_ = new FitPushButton(tr("Load ▶ B"));
+    loadABtn_->setObjectName(QStringLiteral("libraryLoadA"));
+    loadBBtn_->setObjectName(QStringLiteral("libraryLoadB"));
     const auto loadStyle = [](const QColor& accent) {
         return QStringLiteral(
             "QPushButton { color:%1; font-weight:bold; }"
@@ -660,6 +689,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     table_->verticalHeader()->setVisible(false);
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table_->setColumnWidth(5, 160);
     table_->setAlternatingRowColors(true);
     table_->setItemDelegate(
         new TierSeparatorDelegate(kRecommendationTierRole, table_));
@@ -835,6 +865,10 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     // Crate list follows the model's rows (rescan or incremental changes).
     connect(library_, &QAbstractItemModel::modelReset, this,
             &LibraryWidget::rebuildCrates);
+    connect(library_, &QAbstractItemModel::modelAboutToBeReset, this, [this] {
+        for (auto& pending : pendingLoads_) pending = {};
+    });
+    connect(library_, &TrackLibrary::trackReady, this, &LibraryWidget::finishPendingLoads);
     connect(library_, &QAbstractItemModel::rowsInserted, this,
             &LibraryWidget::rebuildCrates);
     connect(library_, &QAbstractItemModel::rowsRemoved, this,
@@ -1396,10 +1430,16 @@ void LibraryWidget::loadRowTo(int sourceRow, int deck)
     }
     TrackDataPtr t = library_->trackAt(sourceRow);
     if (!t) {
-        emit statusMessage(tr("Track is still analyzing — try again shortly"),
-                           4000);
+        const QString path = library_->pathAt(sourceRow);
+        if (path.isEmpty()) return;
+        pendingLoads_[deck] = {path, engine_->deck(deck).track()};
+        library_->prioritizeAnalysis(sourceRow);
+        emit statusMessage(tr("Prioritizing “%1” — will load to deck %2 when ready")
+            .arg(QFileInfo(path).completeBaseName(), deck == 0 ? "A" : "B"), 5000);
+        updateLoadButtons();
         return;
     }
+    pendingLoads_[deck] = {};
     engine_->deck(deck).loadTrack(t); // direct API per contract
     emit statusMessage(tr("Loaded \"%1\" to deck %2")
                            .arg(t->title.isEmpty() ? t->filePath : t->title)
@@ -1410,8 +1450,38 @@ void LibraryWidget::loadRowTo(int sourceRow, int deck)
     updateLoadButtons();
 }
 
+void LibraryWidget::cancelUnsafePendingLoads()
+{
+    for (int deck = 0; deck < kNumDecks; ++deck) {
+        auto& pending = pendingLoads_[deck];
+        if (!pending.path.isEmpty() && (!isEnabled() || engine_->exclusivePreviewActive() ||
+            engine_->deck(deck).playing.load() ||
+            engine_->deck(deck).track() != pending.previousTrack)) {
+            pending = {};
+            emit statusMessage(tr("Pending load cancelled: deck %1 is now in use")
+                .arg(deck == 0 ? "A" : "B"), 4000);
+        }
+    }
+}
+
+void LibraryWidget::finishPendingLoads(int sourceRow)
+{
+    cancelUnsafePendingLoads();
+    const QString path = library_->pathAt(sourceRow);
+    for (int deck = 0; deck < kNumDecks; ++deck) {
+        if (pendingLoads_[deck].path.isEmpty() || pendingLoads_[deck].path != path) continue;
+        pendingLoads_[deck] = {};
+        if (library_->trackAt(sourceRow)) loadRowTo(sourceRow, deck);
+        else emit statusMessage(tr("Could not load “%1”: %2")
+            .arg(QFileInfo(path).completeBaseName(),
+                 library_->index(sourceRow, 5).data(TrackLibrary::AnalysisErrorRole).toString()), 7000);
+    }
+    updateLoadButtons();
+}
+
 void LibraryWidget::updateLoadButtons()
 {
+    cancelUnsafePendingLoads();
     if (!loadABtn_ || !loadBBtn_) return;
     const bool libraryPage = stack_ && stack_->currentIndex() == 0;
     const int sourceRow = sourceRowFor(table_->currentIndex());
@@ -1420,7 +1490,7 @@ void LibraryWidget::updateLoadButtons()
 
     const auto update = [&](QPushButton* button, int deck) {
         const bool playing = engine_->deck(deck).playing.load();
-        button->setEnabled(libraryPage && ready && !playing);
+        button->setEnabled(libraryPage && selected && !playing && !engine_->exclusivePreviewActive());
         const QString deckName = deck == 0 ? QStringLiteral("A")
                                            : QStringLiteral("B");
         if (!libraryPage)
@@ -1431,7 +1501,8 @@ void LibraryWidget::updateLoadButtons()
         else if (!selected)
             button->setToolTip(tr("Select a track first"));
         else if (!ready)
-            button->setToolTip(tr("This track is still being analyzed"));
+            button->setToolTip(tr("Prioritize analysis, then load onto deck %1 when ready")
+                                  .arg(deckName));
         else
             button->setToolTip(tr("Load the selected track onto deck %1")
                                    .arg(deckName));

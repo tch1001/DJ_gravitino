@@ -8,11 +8,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_AUTOMOC ON)
 
 list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/qt /opt/homebrew)
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui GuiPrivate Widgets Concurrent)
 
 add_library(gvtqtcompat STATIC src/ui/QtAccessibilityWorkaround.mm)
 target_include_directories(gvtqtcompat PUBLIC src)
 target_link_libraries(gvtqtcompat PUBLIC Qt6::Gui "-framework Foundation")
+target_link_libraries(gvtqtcompat PRIVATE Qt6::GuiPrivate)
 
 find_library(RTMIDI_LIB rtmidi PATHS /opt/homebrew/opt/rtmidi/lib REQUIRED)
 find_path(RTMIDI_INCLUDE rtmidi/RtMidi.h PATHS /opt/homebrew/opt/rtmidi/include REQUIRED)

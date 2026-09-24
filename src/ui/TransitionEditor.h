@@ -197,6 +197,8 @@ private:
     void rebuildPerformanceDefinitions();
     void rebuildInitialStateTable();
     void updateEventInspector();
+    void autoApplyEventInspector();
+    void commitEventInspector(bool automatic);
     void updateEditingHelp();
     void editReferencedPosition();
     void updateValidation();
@@ -278,6 +280,7 @@ private:
     QComboBox* gesturePadModeCombo_ = nullptr;
     QLineEdit* eventReferenceEdit_ = nullptr;
     QPushButton* applyEventButton_ = nullptr;
+    QCheckBox* autoApplyEventCheck_ = nullptr;
     QPushButton* deleteEventButton_ = nullptr;
     QTableWidget* performanceTable_ = nullptr;
     QLineEdit* definitionStart_ = nullptr;

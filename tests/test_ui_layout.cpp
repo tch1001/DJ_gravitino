@@ -20,6 +20,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QEventLoop>
+#include <QFile>
 #include <QImage>
 #include <QLabel>
 #include <QKeyEvent>
@@ -365,6 +366,178 @@ void checkCustomBankSwitching(QApplication& app)
 }
 }
 
+void editor_event_types_and_auto_apply_keep_the_selected_action(QApplication& app)
+{
+    using namespace gvt;
+    ControlBus bus;
+    AudioEngine engine(&bus);
+    TrackLibrary library;
+    TransitionStore store;
+    TransitionRecorder recorder(&bus, &engine);
+    TransitionPlayer player(&bus, &engine);
+    GvtFile original;
+    original.name = "Editor auto-apply synthetic fixture";
+    original.from.title = "Outgoing fixture";
+    original.to.title = "Incoming fixture";
+    original.from.bpm = original.to.bpm = original.masterBpm = 120;
+    original.from.durationSec = original.to.durationSec = 16;
+    original.endBeat = 16;
+    original.requirements = {"timeline.v1", "temporary-cues.v1", "temporary-loops.v1"};
+    TransitionHotCue cue;
+    cue.id = "launch"; cue.role = Role::FromDeck; cue.trackBeat = 2;
+    original.transitionCues.push_back(cue);
+    TransitionSavedLoop loop;
+    loop.id = "intro"; loop.role = Role::FromDeck;
+    loop.startTrackBeat = 4; loop.endTrackBeat = 8;
+    original.transitionLoops.push_back(loop);
+    GvtEvent cueEvent {1, Role::FromDeck, ControlId::TransitionCue1, 1, Curve::Step};
+    cueEvent.cueId = cue.id;
+    GvtEvent loopEvent = cueEvent;
+    loopEvent.beat = 2; loopEvent.cueId.clear(); loopEvent.loopId = loop.id;
+    original.events = {cueEvent, loopEvent,
+        {3, Role::FromDeck, ControlId::EqLow, 0.5, Curve::Linear},
+        {4, Role::ToDeck, ControlId::Play, 1, Curve::Step}};
+    QString error;
+    const QString path = store.save(original, &error);
+    CHECK(!path.isEmpty());
+    CHECK(loadTransitionFile(path, original, &error));
+    const auto readSource = [&] {
+        QFile source(path);
+        CHECK(source.open(QIODevice::ReadOnly));
+        return source.readAll();
+    };
+    const QByteArray sourceBefore = readSource();
+    TransitionEditorWindow editor(&engine, &library, &store, &recorder, &player);
+    editor.openTransition(original);
+    app.processEvents();
+    auto* document = editor.findChild<TransitionEditorDocument*>();
+    auto* table = editor.findChild<QTableWidget*>("transitionEditorEvents");
+    auto* control = editor.findChild<QComboBox*>("transitionEditorEventControl");
+    auto* role = editor.findChild<QComboBox*>("transitionEditorEventRole");
+    auto* curve = editor.findChild<QComboBox*>("transitionEditorEventCurve");
+    auto* gesture = editor.findChild<QComboBox*>("transitionEditorEventGesture");
+    auto* padMode = editor.findChild<QComboBox*>("transitionEditorEventPadMode");
+    auto* beat = editor.findChild<QDoubleSpinBox*>("transitionEditorEventBeat");
+    auto* value = editor.findChild<QDoubleSpinBox*>("transitionEditorEventValue");
+    auto* reference = editor.findChild<QLineEdit*>("transitionEditorEventReference");
+    auto* apply = editor.findChild<QPushButton*>("transitionEditorApplyEvent");
+    auto* automatic = editor.findChild<QCheckBox*>("transitionEditorAutoApplyEvent");
+    CHECK(document && table && control && role && curve && gesture && padMode &&
+          beat && value && reference && apply && automatic);
+    if (!document || !table || !control || !role || !curve || !gesture || !padMode ||
+        !beat || !value || !reference || !apply || !automatic) return;
+    CHECK(automatic->isChecked());
+    auto* undo = document->undoStack();
+    for (int row : {0, 2, 1, 3, 0}) table->setCurrentCell(row, 0);
+    CHECK(!document->isDirty() && undo->count() == 0);
+
+    // Reproduce the stuck-type bug for both semantic cue and saved-loop IDs.
+    automatic->setChecked(false);
+    for (int row : {0, 1}) {
+        document->reset(original);
+        table->setCurrentCell(row, 0);
+        CHECK(!reference->text().isEmpty());
+        control->setCurrentIndex(control->findData(static_cast<int>(ControlId::StemMelody)));
+        CHECK(document->file().events[row].control == ControlId::TransitionCue1);
+        CHECK(reference->text().isEmpty() && !reference->isEnabled());
+        apply->click();
+        const auto& event = document->file().events[row];
+        CHECK(event.control == ControlId::StemMelody);
+        CHECK(event.cueId.isEmpty() && event.loopId.isEmpty());
+        CHECK(document->file().transitionCues.size() == 1);
+        CHECK(document->file().transitionLoops.size() == 1);
+        CHECK(undo->count() == 1);
+        undo->undo();
+        CHECK(document->file().events[row].control == ControlId::TransitionCue1);
+        CHECK(reference->isEnabled());
+        CHECK(!document->isDirty());
+        undo->redo();
+        CHECK(document->file().events[row].control == ControlId::StemMelody);
+    }
+
+    document->reset(original);
+    table->setCurrentCell(2, 0);
+    automatic->setChecked(true);
+    CHECK(undo->count() == 0); // enabling with unchanged fields isn't an edit
+    for (ControlId stem : {ControlId::StemVocals, ControlId::StemMelody,
+                           ControlId::StemBass, ControlId::StemDrums}) {
+        document->reset(original);
+        table->setCurrentCell(2, 0);
+        control->setCurrentIndex(control->findData(static_cast<int>(stem)));
+        CHECK(document->file().events[2].control == stem);
+        CHECK(document->file().events[2].curve == Curve::Linear);
+        CHECK(undo->count() == 1);
+        apply->click();
+        CHECK(undo->count() == 1); // no duplicate undo after auto-apply
+        undo->undo();
+        CHECK(document->file().events[2].control == ControlId::EqLow);
+        CHECK(!document->isDirty());
+        undo->redo();
+        CHECK(document->file().events[2].control == stem);
+    }
+    value->setValue(0.25);
+    CHECK(document->file().events[2].value == 0.25);
+    CHECK(!value->keyboardTracking() && !beat->keyboardTracking());
+    value->setFocus();
+    value->findChild<QLineEdit*>()->setText("0.125");
+    CHECK(document->file().events[2].value == 0.25); // don't apply half-typed numbers
+    QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(value, &enter);
+    CHECK(document->file().events[2].value == 0.125);
+    beat->setValue(7.25);
+    CHECK(table->currentRow() == 3);
+    CHECK(document->file().events[3].beat == 7.25);
+    CHECK(document->file().events[3].control == ControlId::StemDrums);
+    curve->setCurrentIndex(curve->findData(static_cast<int>(Curve::SCurve)));
+    CHECK(document->file().events[3].curve == Curve::SCurve);
+    role->setCurrentIndex(role->findData(static_cast<int>(Role::ToDeck)));
+    CHECK(document->file().events[3].role == Role::ToDeck);
+    gesture->setCurrentIndex(gesture->findData(static_cast<int>(ControlId::PerformancePad1)));
+    CHECK(document->file().events[3].gestureControl == ControlId::PerformancePad1);
+    padMode->setCurrentIndex(padMode->findData(static_cast<int>(PerformancePadMode::PadFx1)));
+    CHECK(document->file().events[3].gesturePadMode == static_cast<int>(PerformancePadMode::PadFx1));
+
+    // Incomplete/invalid cue references remain a visible draft, with a useful
+    // non-modal error. They must not change the model or open a dialog on typing.
+    document->reset(original);
+    table->setCurrentCell(2, 0);
+    control->setCurrentIndex(control->findData(static_cast<int>(ControlId::TransitionCue1)));
+    CHECK(document->file().events[2].control == ControlId::EqLow);
+    CHECK(editor.statusBar()->currentMessage().startsWith("Not applied:"));
+    reference->setText("missing-cue");
+    QMetaObject::invokeMethod(reference, "editingFinished", Qt::DirectConnection);
+    CHECK(document->file().events[2].control == ControlId::EqLow);
+    reference->setText("launch");
+    QMetaObject::invokeMethod(reference, "editingFinished", Qt::DirectConnection);
+    CHECK(document->file().events[2].control == ControlId::TransitionCue1);
+    CHECK(document->file().events[2].cueId == "launch");
+    CHECK(undo->count() == 1);
+    CHECK(!editor.statusBar()->currentMessage().startsWith("Not applied:"));
+
+    // Turning auto-apply back on applies a staged edit, while no selection
+    // remains a form for Add and must not alter any existing point.
+    automatic->setChecked(false);
+    value->setValue(0.0);
+    CHECK(document->file().events[2].value == 0.5);
+    automatic->setChecked(true);
+    CHECK(document->file().events[2].value == 0.0);
+    CHECK(readSource() == sourceBefore); // Apply isn't Save
+    document->reset(original);
+    table->setCurrentCell(-1, -1);
+    value->setValue(0.75);
+    CHECK(!document->isDirty());
+    table->setCurrentCell(2, 0);
+    const QByteArray screenshot = qgetenv("GRAVITINO_AUTO_APPLY_SCREENSHOT");
+    if (!screenshot.isEmpty()) {
+        editor.resize(1100, 700);
+        app.processEvents();
+        CHECK(automatic->width() >= automatic->sizeHint().width());
+        CHECK(automatic->geometry().right() < automatic->parentWidget()->width());
+        CHECK(editor.grab().save(QString::fromUtf8(screenshot)));
+    }
+    editor.close();
+}
+
 void editor_audio_matches_perform_and_explains_the_two_beat_rulers(QApplication& app)
 {
     using namespace gvt;
@@ -683,6 +856,7 @@ int main(int argc, char** argv)
         QTemporaryDir parityDirectory;
         qputenv("GRAVITINO_TRANSITIONS_DIR", parityDirectory.path().toUtf8());
         editor_audio_matches_perform_and_explains_the_two_beat_rulers(app);
+        editor_event_types_and_auto_apply_keep_the_selected_action(app);
         qputenv("GRAVITINO_TRANSITIONS_DIR", previousDirectory);
     }
 

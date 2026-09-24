@@ -141,7 +141,9 @@ int main()
     CHECK(afterForwardScratch > 2.0);
 
     bus.dispatch({0, ControlId::PlatterScratch, -1.0}, Origin::Midi);
-    engine.renderOffline(audio, 256);
+    // Direction changes decelerate/reverse continuously (about 12 ms), not
+    // in an instantaneous callback-sized jump.
+    for (int i = 0; i < 3; ++i) engine.renderOffline(audio, 256);
     CHECK(deck.positionSec() < afterForwardScratch);
     bus.dispatch({0, ControlId::PlatterTouch, 0.0}, Origin::Midi);
     CHECK(deck.playing.load());

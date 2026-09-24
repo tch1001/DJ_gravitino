@@ -15,7 +15,16 @@ class TrackLibrary : public QAbstractTableModel {
     Q_OBJECT
 public:
     explicit TrackLibrary(QObject* parent = nullptr);
+    ~TrackLibrary() override;
     void scanFolder(const QString& dir);     // async; default ~/Music
+    // Promote an unfinished track (or retry an error). At most four workers,
+    // with one slot reserved for interactive load requests. GUI thread only.
+    bool prioritizeAnalysis(int row);
+    enum AnalysisRole {
+        AnalysisProgressRole = Qt::UserRole + 100, // fraction 0..1
+        AnalysisActiveRole,                       // false while queued/done
+        AnalysisErrorRole                        // full diagnostic string
+    };
     int  trackCount() const;
     TrackDataPtr trackAt(int row) const;     // null while still analyzing
     QString pathAt(int row) const;
@@ -44,6 +53,8 @@ signals:
     // Emitted after the rebuildable song -> transition reverse index changes.
     // Smart library views use this to refresh transition coverage.
     void transitionGraphChanged();
+private:
+    void dispatchAnalysis();
 };
 
 // Portable .transition files and readable legacy .gvt files.

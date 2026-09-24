@@ -5,10 +5,20 @@ foreach(t ${TEST_SRCS})
     get_filename_component(name ${t} NAME_WE)
     add_executable(${name} ${t})
     target_link_libraries(${name} PRIVATE gvtcore)
-    if(name STREQUAL "test_fit_button" OR name STREQUAL "test_library_accessibility")
+    if(name STREQUAL "test_library_analysis_queue")
+        target_sources(${name} PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/ui/Theme.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/LibraryWidget.cpp
+            ${CMAKE_SOURCE_DIR}/src/ui/TransitionGraphWindow.cpp)
+        target_link_libraries(${name} PRIVATE Qt6::Widgets)
+    elseif(name STREQUAL "test_fit_button" OR name STREQUAL "test_library_accessibility")
         target_link_libraries(${name} PRIVATE Qt6::Widgets)
         if(name STREQUAL "test_library_accessibility")
             target_link_libraries(${name} PRIVATE gvtqtcompat)
+            if(APPLE)
+                target_sources(${name} PRIVATE NativeAccessibilityProbe.mm)
+                target_link_libraries(${name} PRIVATE "-framework AppKit")
+            endif()
             target_sources(${name} PRIVATE
                 ${CMAKE_SOURCE_DIR}/src/ui/LibraryWidget.cpp
                 ${CMAKE_SOURCE_DIR}/src/ui/TransitionGraphWindow.cpp)

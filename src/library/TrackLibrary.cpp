@@ -2,10 +2,11 @@
 // Owned by claude-analysis. See docs/ARCHITECTURE.md ("library").
 //
 // The pinned header exposes no data members, so per-instance state lives in a
-// file-local registry keyed by the model pointer (cleaned up on destroyed()).
+// file-local registry keyed by the model pointer (cleaned up after joining workers).
 
 #include "TrackLibrary.h"
 #include "SongCatalog.h"
+#include "LibraryAnalysisInternal.h"
 #include "../analysis/AnalysisInternal.h"
 #include "../analysis/BeatGridEditor.h"
 
@@ -13,6 +14,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -25,6 +27,9 @@
 #include <QtConcurrent/QtConcurrent>
 
 #include <cmath>
+#include <atomic>
+#include <algorithm>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -41,7 +46,10 @@ constexpr int kAnalysisVersion = 2; // gvsf2 structural identity + audio tags
 struct Row {
     QString      path;
     TrackDataPtr track;             // null until analyzed
-    QString      status = QStringLiteral("analyzing…");
+    QString      status = QStringLiteral("Queued");
+    double progress = 0.0;
+    bool active = false;
+    QString error;
 };
 
 struct LibState {
@@ -51,10 +59,17 @@ struct LibState {
     int total = 0;
     int analyzed = 0;               // GUI thread only
     int generation = 0;             // invalidates in-flight workers on rescan
+    int active = 0;
+    std::deque<int> pending;
+    std::deque<int> urgent;
+    std::shared_ptr<std::atomic_bool> cancelled =
+        std::make_shared<std::atomic_bool>(false);
+    detail::LibraryAnalyzer analyzer;
     LibState() { pool.setMaxThreadCount(4); }
 };
 
 std::mutex g_regMutex;
+std::mutex g_cacheWriteMutex;
 std::unordered_map<const TrackLibrary*, std::shared_ptr<LibState>> g_registry;
 
 std::shared_ptr<LibState> state(const TrackLibrary* m)
@@ -142,13 +157,10 @@ void preserveAuthoredState(const QJsonObject& previous, TrackData& analyzed)
 {
     const QString recordedSource =
         previous.value(QStringLiteral("beatGridSource")).toString();
-    // A cache without a source marker may contain an old manual correction;
-    // protecting it is safer than guessing that it was disposable analysis.
-    // Once a source marker exists, only non-analysis grids are protected when
-    // a future analysis algorithm is intentionally refreshed.
-    const bool protectGrid = recordedSource.isEmpty() ||
-                             recordedSource != QStringLiteral("analysis");
-    if (protectGrid && hasStoredGrid(previous)) {
+    // Even an originally automatic grid may now be the coordinate system of
+    // saved transitions. Refresh detector results separately; changing the
+    // effective grid requires an explicit user edit, not an analysis upgrade.
+    if (hasStoredGrid(previous)) {
         analyzed.bpm = previous.value(QStringLiteral("bpm")).toDouble();
         analyzed.firstBeatSec =
             previous.value(QStringLiteral("firstBeatSec")).toDouble();
@@ -158,10 +170,64 @@ void preserveAuthoredState(const QJsonObject& previous, TrackData& analyzed)
     loadPerformanceState(previous, analyzed);
 }
 
+// Similarity fingerprints deliberately tolerate changes and cannot authorize
+// overwriting user work. Require exact audio/asset evidence across file changes.
+bool verifyCachedAudio(const QJsonObject& previous, const TrackData& current,
+                       qint64 mtimeMs, QString* error)
+{
+    if (current.decodedAudioSha256.isEmpty() || current.assetSha256.isEmpty()) {
+        if (error) *error = QStringLiteral("Could not verify the audio file; saved settings were kept unchanged. Please retry Load.");
+        return false;
+    }
+    if (previous.isEmpty()) return true;
+    const QString pcm = previous.value(QStringLiteral("decodedAudioSha256")).toString();
+    const QString asset = previous.value(QStringLiteral("assetSha256")).toString();
+    if (!pcm.isEmpty()) {
+        if (pcm == current.decodedAudioSha256) return true;
+    } else if (!asset.isEmpty()) {
+        if (asset == current.assetSha256) return true;
+    } else if (cacheMatchesFile(previous, mtimeMs)) {
+        // Old records lacking exact evidence can be upgraded in place only
+        // while their original file timestamp and legacy evidence still agree.
+        const QString fingerprint = previous.value(QStringLiteral("fingerprint")).toString();
+        const double duration = previous.value(QStringLiteral("durationSec")).toDouble();
+        if (!fingerprint.isEmpty() && fingerprint == current.fingerprint &&
+            std::abs(duration - current.durationSec) < 1.0 / kSampleRate)
+            return true;
+    }
+    if (error) *error = QStringLiteral(
+        "Audio changed or its identity cannot be verified. Your saved BPM, downbeat, "
+        "hot cues and loops have been kept unchanged; this file was not loaded. "
+        "Restore the original audio, or keep the replacement under a different filename "
+        "and review its beat grid before using transitions.");
+    return false;
+}
+
+bool preserveCacheBytes(const QString& path, const QByteArray& bytes, QString* error)
+{
+    // Content-addressed, immutable copies avoid duplicate backups on retries.
+    const QString dir = cacheDirPath() + QStringLiteral("/preserved");
+    const QString backup = dir + QLatin1Char('/') + QFileInfo(path).baseName() +
+        QLatin1Char('-') + QString::fromLatin1(QCryptographicHash::hash(
+            bytes, QCryptographicHash::Sha256).toHex()) + QStringLiteral(".json");
+    QFile existing(backup);
+    if (existing.exists()) {
+        if (existing.open(QIODevice::ReadOnly) && existing.readAll() == bytes) return true;
+    } else if (QDir().mkpath(dir)) {
+        QSaveFile saved(backup);
+        if (saved.open(QIODevice::WriteOnly) && saved.write(bytes) == bytes.size() &&
+            saved.commit()) return true;
+    }
+    if (error) *error = QStringLiteral("Could not back up saved setup; existing cache was not changed: %1").arg(backup);
+    return false;
+}
+
 bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
                 const TrackData* gridOverride = nullptr,
-                const TrackData* performanceOverride = nullptr)
+                const TrackData* performanceOverride = nullptr,
+                const QJsonObject* expectedPrevious = nullptr)
 {
+    std::lock_guard<std::mutex> guard(g_cacheWriteMutex);
     if (error)
         error->clear();
     const QString dirPath = cacheDirPath();
@@ -171,7 +237,33 @@ bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
                          .arg(dirPath);
         return false;
     }
-    QJsonObject o;
+    const QString cachePath = cacheFileFor(t.filePath);
+    QFile previousFile(cachePath);
+    const bool existed = previousFile.exists();
+    QByteArray previousBytes;
+    if (existed) {
+        if (!previousFile.open(QIODevice::ReadOnly)) {
+            if (error) *error = QStringLiteral("Could not read saved setup; cache was not changed");
+            return false;
+        }
+        previousBytes = previousFile.readAll();
+    }
+    const QJsonDocument previousDocument = QJsonDocument::fromJson(previousBytes);
+    if (existed && !previousDocument.isObject()) {
+        if (error) *error = QStringLiteral("Saved setup is unreadable; cache was not changed");
+        return false;
+    }
+    const QJsonObject previous = previousDocument.object();
+    if (expectedPrevious && previous != *expectedPrevious) {
+        if (error) *error = QStringLiteral("Saved setup changed during analysis. Please retry Load; no settings were overwritten.");
+        return false;
+    }
+    if ((gridOverride || performanceOverride) && !previous.isEmpty() &&
+        !cacheMatchesFile(previous, mtimeMs)) {
+        if (error) *error = QStringLiteral("Audio file changed on disk. Reload it before saving the grid or cues; existing settings were kept.");
+        return false;
+    }
+    QJsonObject o = previous; // retain optional future local fields
     o[QStringLiteral("cacheVersion")] = kCacheSchemaVersion;
     o[QStringLiteral("analysisVersion")] = kAnalysisVersion;
     o[QStringLiteral("path")]         = t.filePath;
@@ -194,6 +286,7 @@ bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
     o[QStringLiteral("fingerprint")]  = t.fingerprint;
     o[QStringLiteral("structureFingerprint")] = t.structureFingerprint;
     o[QStringLiteral("assetSha256")] = t.assetSha256;
+    o[QStringLiteral("decodedAudioSha256")] = t.decodedAudioSha256;
     o[QStringLiteral("audibleDurationSec")] = t.audibleDurationSec;
     o[QStringLiteral("songId")] = t.songId;
     o[QStringLiteral("camelotKey")]   = t.camelotKey;
@@ -213,14 +306,17 @@ bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
     }
     o[QStringLiteral("savedLoops")] = savedLoops;
 
-    QSaveFile f(cacheFileFor(t.filePath));
+    const QByteArray json = QJsonDocument(o).toJson(QJsonDocument::Indented);
+    if (json == previousBytes) return true;
+    if (!previousBytes.isEmpty() && !preserveCacheBytes(cachePath, previousBytes, error))
+        return false;
+    QSaveFile f(cachePath);
     if (!f.open(QIODevice::WriteOnly)) {
         if (error)
             *error = QStringLiteral("Could not open analysis cache: %1")
                          .arg(f.errorString());
         return false;
     }
-    const QByteArray json = QJsonDocument(o).toJson(QJsonDocument::Indented);
     if (f.write(json) != json.size()) {
         if (error)
             *error = QStringLiteral("Could not write analysis cache: %1")
@@ -239,14 +335,26 @@ bool writeCache(const TrackData& t, qint64 mtimeMs, QString* error = nullptr,
 
 // Cache hit: decode PCM (needed for playback) but skip beat analysis.
 TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs,
-                           const QJsonObject& o, QString* error)
+                           const QJsonObject& o, QString* error,
+                           const detail::AnalysisProgress& progress)
 {
-    if (!cacheMatchesFile(o, mtimeMs) || !hasCurrentAnalysis(o))
+    if (!hasCurrentAnalysis(o))
         return nullptr;
 
     auto t = std::make_shared<TrackData>();
     t->filePath = path;
-    if (!detail::decodeAudioStereo48k(path, t->pcm, error)) return nullptr;
+    if (!detail::decodeAudioStereo48k(path, t->pcm, error, [&](double p) {
+            if (progress) progress(.6 * p, QStringLiteral("Decoding"));
+        })) return nullptr;
+    t->durationSec = double(t->frameCount()) / kSampleRate;
+    t->decodedAudioSha256 = detail::decodedAudioHash(t->pcm, [&](double p) {
+        if (progress) progress(.6 + .05 * p, QStringLiteral("Checking audio"));
+    });
+    t->assetSha256 = detail::assetFileHash(path, [&](double p) {
+        if (progress) progress(.65 + .05 * p, QStringLiteral("Checking audio"));
+    });
+    t->fingerprint = computeFingerprint(t->pcm.data(), t->frameCount());
+    if (!verifyCachedAudio(o, *t, mtimeMs, error)) return nullptr;
     t->title        = o.value(QStringLiteral("title")).toString();
     t->artist       = o.value(QStringLiteral("artist")).toString();
     t->album        = o.value(QStringLiteral("album")).toString();
@@ -264,10 +372,8 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs,
         o.value(QStringLiteral("beatGridSource")).toString();
     if (t->beatGridSource.isEmpty())
         t->beatGridSource = QStringLiteral("legacy-preserved");
-    t->fingerprint  = o.value(QStringLiteral("fingerprint")).toString();
     t->structureFingerprint =
         o.value(QStringLiteral("structureFingerprint")).toString();
-    t->assetSha256 = o.value(QStringLiteral("assetSha256")).toString();
     t->audibleDurationSec =
         o.value(QStringLiteral("audibleDurationSec")).toDouble();
     t->songId = o.value(QStringLiteral("songId")).toString();
@@ -275,32 +381,60 @@ TrackDataPtr loadFromCache(const QString& path, qint64 mtimeMs,
     t->keyName      = o.value(QStringLiteral("keyName")).toString();
     t->durationSec  = (double)t->frameCount() / (double)kSampleRate;
     loadPerformanceState(o, *t);
+    if (!cacheMatchesFile(o, mtimeMs) ||
+        t->assetSha256 != o.value(QStringLiteral("assetSha256")).toString())
+        detail::readTags(path, t->title, t->artist, t->album, t->isrc, t->musicBrainzRecording);
     if (t->title.isEmpty()) t->title = QFileInfo(path).completeBaseName();
-    t->overviewPeaks = detail::computeOverviewPeaks(t->pcm);
-    detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh);
+    t->overviewPeaks = detail::computeOverviewPeaks(t->pcm, [&](double p) {
+        if (progress) progress(.7 + .05 * p, QStringLiteral("Waveform"));
+    });
+    detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh,
+        [&](double p) {
+            if (progress) progress(.75 + .24 * p, QStringLiteral("Waveform"));
+        });
+    if (progress) progress(.99, QStringLiteral("Finishing"));
     return t;
 }
 
-TrackDataPtr analyzeWithCache(const QString& path, QString* error)
+TrackDataPtr analyzeWithCache(const QString& path, QString* error,
+                             const detail::AnalysisProgress& progress)
 {
     const qint64 mtimeMs = QFileInfo(path).lastModified().toMSecsSinceEpoch();
+    const qint64 fileSize = QFileInfo(path).size();
     const QJsonObject previous = readCacheObject(path);
-    if (TrackDataPtr cached = loadFromCache(path, mtimeMs, previous, error)) {
+    if (error) error->clear();
+    if (QFileInfo::exists(cacheFileFor(path)) && previous.isEmpty()) {
+        if (error) *error = QStringLiteral("Saved setup is unreadable; kept unchanged. Restore its cache backup before loading this song.");
+        return nullptr;
+    }
+    const auto unchangedFile = [&] {
+        const QFileInfo now(path);
+        if (now.lastModified().toMSecsSinceEpoch() == mtimeMs && now.size() == fileSize)
+            return true;
+        if (error) *error = QStringLiteral("Audio changed during analysis. Please retry Load; saved settings were kept.");
+        return false;
+    };
+    if (TrackDataPtr cached = loadFromCache(path, mtimeMs, previous, error, progress)) {
+        if (!unchangedFile()) return nullptr;
         if (previous.value(QStringLiteral("cacheVersion")).toInt() <
                 kCacheSchemaVersion ||
             !previous.contains(QStringLiteral("analyzedBpm")) ||
-            !previous.contains(QStringLiteral("beatGridSource"))) {
+            !previous.contains(QStringLiteral("beatGridSource")) ||
+            previous.value(QStringLiteral("decodedAudioSha256")).toString() != cached->decodedAudioSha256 ||
+            !cacheMatchesFile(previous, mtimeMs) ||
+            previous.value(QStringLiteral("assetSha256")).toString() != cached->assetSha256) {
             // Schema-only migrations rewrite the already-loaded record; they
             // never re-run analysis or discard effective/performance state.
-            (void)writeCache(*cached, mtimeMs);
+            if (!writeCache(*cached, mtimeMs, error, nullptr, nullptr, &previous)) return nullptr;
         }
         return cached;
     }
-    TrackDataPtr t = loadAndAnalyzeTrack(path, error);
+    if (error && !error->isEmpty()) return nullptr; // never re-analyze around an identity refusal
+    TrackDataPtr t = detail::loadAndAnalyzeWithProgress(path, error, progress);
     if (t) {
-        if (cacheMatchesFile(previous, mtimeMs))
-            preserveAuthoredState(previous, *t);
-        (void)writeCache(*t, mtimeMs);
+        if (!unchangedFile() || !verifyCachedAudio(previous, *t, mtimeMs, error)) return nullptr;
+        preserveAuthoredState(previous, *t);
+        if (!writeCache(*t, mtimeMs, error, nullptr, nullptr, &previous)) return nullptr;
     }
     return t;
 }
@@ -333,10 +467,23 @@ QString naturalKeySortValue(const QString& key)
 TrackLibrary::TrackLibrary(QObject* parent) : QAbstractTableModel(parent)
 {
     state(this); // create per-instance state
-    connect(this, &QObject::destroyed, [p = this] {
-        std::lock_guard<std::mutex> lk(g_regMutex);
-        g_registry.erase(p);
-    });
+}
+
+TrackLibrary::~TrackLibrary()
+{
+    auto st = state(this);
+    st->cancelled->store(true);
+    // Workers only post queued callbacks; they never wait on the GUI. Join
+    // before QObject teardown, so neither callbacks nor pool destruction can
+    // race a worker's access to this object.
+    st->pool.waitForDone();
+    std::lock_guard<std::mutex> lk(g_regMutex);
+    g_registry.erase(this);
+}
+
+void detail::setLibraryAnalyzerForTesting(TrackLibrary& library, LibraryAnalyzer analyzer)
+{
+    state(&library)->analyzer = std::move(analyzer);
 }
 
 void TrackLibrary::scanFolder(const QString& dirIn)
@@ -358,42 +505,123 @@ void TrackLibrary::scanFolder(const QString& dirIn)
     }
     files.sort();
 
+    st->cancelled->store(true);
+    st->cancelled = std::make_shared<std::atomic_bool>(false);
     st->generation++;
-    const int gen = st->generation;
+    st->pending.clear();
+    st->urgent.clear();
 
     beginResetModel();
     st->rows.clear();
     st->rows.reserve((size_t)files.size());
-    for (const QString& f : files)
-        st->rows.push_back(Row{f, nullptr, QStringLiteral("analyzing…")});
+    for (const QString& f : files) {
+        st->pending.push_back(static_cast<int>(st->rows.size()));
+        st->rows.push_back(Row{f});
+    }
     st->total = (int)files.size();
     st->analyzed = 0;
     endResetModel();
     emit scanProgress(0, st->total);
 
+    dispatchAnalysis();
+}
+
+bool TrackLibrary::prioritizeAnalysis(int row)
+{
+    auto st = state(this);
+    if (row < 0 || row >= static_cast<int>(st->rows.size())) return false;
+    auto& item = st->rows[row];
+    if (item.track || item.active) return true;
+    if (!item.error.isEmpty()) {
+        --st->analyzed;
+        item.error.clear();
+        item.progress = 0;
+        emit scanProgress(st->analyzed, st->total);
+    }
+    std::erase(st->pending, row);
+    std::erase(st->urgent, row);
+    st->urgent.push_front(row);
+    item.status = tr("Queued · priority");
+    emit dataChanged(index(row, ColStatus), index(row, ColStatus));
+    dispatchAnalysis();
+    return true;
+}
+
+void TrackLibrary::dispatchAnalysis()
+{
+    auto st = state(this);
     QPointer<TrackLibrary> self(this);
-    for (int i = 0; i < (int)st->rows.size(); ++i) {
+    // Three background jobs cannot occupy the interactive fourth slot.
+    // Never submit the whole library to QThreadPool's opaque FIFO.
+    while (st->active < 4 && (!st->urgent.empty() ||
+                            (st->active < 3 && !st->pending.empty()))) {
+        auto& queue = st->urgent.empty() ? st->pending : st->urgent;
+        const int i = queue.front();
+        queue.pop_front();
+        const int gen = st->generation;
+        const auto cancelled = st->cancelled;
+        st->rows[i].active = true;
+        st->rows[i].status = tr("Starting");
+        ++st->active;
+        emit dataChanged(index(i, ColStatus), index(i, ColStatus));
         const QString path = st->rows[(size_t)i].path;
-        auto task = [st, self, gen, i, path] {
+        const auto analyzer = st->analyzer ? st->analyzer : analyzeWithCache;
+        auto task = [st, self, gen, i, path, cancelled, analyzer] {
             QString err;
-            TrackDataPtr t = analyzeWithCache(path, &err);
+            TrackDataPtr t;
+            struct Cancelled {};
+            QElapsedTimer throttle;
+            throttle.start();
+            QString lastStage;
+            const auto progress = [&](double fraction, const QString& stage) {
+                if (cancelled->load()) throw Cancelled{};
+                if (stage == lastStage && throttle.elapsed() < 100) return;
+                lastStage = stage;
+                throttle.restart();
+                QMetaObject::invokeMethod(self, [st, self, gen, i, fraction, stage] {
+                    if (!self || gen != st->generation || !st->rows[i].active) return;
+                    auto& row = st->rows[i];
+                    if (std::isfinite(fraction))
+                        row.progress = std::max(row.progress, std::clamp(fraction, 0.0, .99));
+                    row.status = stage;
+                    emit self->dataChanged(self->index(i, ColStatus), self->index(i, ColStatus));
+                }, Qt::QueuedConnection);
+            };
+            try {
+                progress(0, QStringLiteral("Starting"));
+                t = analyzer(path, &err, progress);
+            } catch (const Cancelled&) {
+            } catch (const std::exception& exception) {
+                err = QString::fromUtf8(exception.what());
+            } catch (...) {
+                err = QStringLiteral("Unexpected analysis failure");
+            }
             TrackLibrary* obj = self.data();
             if (!obj) return;
-            QMetaObject::invokeMethod(obj, [st, self, gen, i, t] {
+            QMetaObject::invokeMethod(obj, [st, self, gen, i, t, err] {
                 TrackLibrary* m = self.data();
-                if (!m || gen != st->generation || i >= (int)st->rows.size()) return;
+                --st->active;
+                if (!m) return;
+                if (gen != st->generation) {
+                    m->dispatchAnalysis();
+                    return;
+                }
                 if (t) {
                     t->songId = st->catalog.registerAsset(*t);
                     t->canonicalBeatOffset =
                         st->catalog.canonicalBeatOffsetForAsset(t->filePath);
                 }
-                st->rows[(size_t)i].track = t;
-                st->rows[(size_t)i].status = t ? QStringLiteral("ready")
-                                               : QStringLiteral("error");
+                auto& row = st->rows[i];
+                row.track = t;
+                row.active = false;
+                row.progress = t ? 1.0 : row.progress;
+                row.error = t ? QString() : (err.isEmpty() ? tr("Could not analyze audio") : err);
+                row.status = t ? tr("ready") : tr("Needs attention");
                 st->analyzed++;
                 emit m->dataChanged(m->index(i, 0), m->index(i, ColCount - 1));
                 emit m->trackReady(i);
                 emit m->scanProgress(st->analyzed, st->total);
+                m->dispatchAnalysis();
             }, Qt::QueuedConnection);
         };
         (void)QtConcurrent::run(&st->pool, std::move(task));
@@ -563,6 +791,15 @@ QVariant TrackLibrary::data(const QModelIndex& idx, int role) const
         return {};
     const Row& r = st->rows[(size_t)idx.row()];
 
+    if (role == AnalysisProgressRole) return r.progress;
+    if (role == AnalysisActiveRole) return r.active;
+    if (role == AnalysisErrorRole) return r.error;
+    if (role == Qt::ToolTipRole)
+        return r.error.isEmpty() ? r.path + QLatin1Char('\n') + r.status +
+            (r.track ? QString() : tr("\nLoad or double-click to prioritize this song."
+                                     " Progress measures analysis work, not time remaining."))
+                                : r.path + QLatin1Char('\n') + r.error;
+
     if (role == Qt::TextAlignmentRole) {
         if (idx.column() == ColBpm || idx.column() == ColKey || idx.column() == ColDuration)
             return QVariant(Qt::AlignRight | Qt::AlignVCenter);
@@ -605,7 +842,8 @@ QVariant TrackLibrary::data(const QModelIndex& idx, int role) const
     case ColDuration:
         return r.track ? formatDuration(r.track->durationSec) : QString();
     case ColStatus:
-        return r.status;
+        return r.progress >= 1.0 ? r.status
+            : QStringLiteral("%1 · %2%").arg(r.status).arg(qRound(r.progress * 100));
     }
     return {};
 }

@@ -188,6 +188,7 @@ int main(int argc, char** argv)
     oldCache.remove(QStringLiteral("musicBrainzRecording"));
     oldCache.remove(QStringLiteral("structureFingerprint"));
     oldCache.remove(QStringLiteral("assetSha256"));
+    oldCache.remove(QStringLiteral("decodedAudioSha256"));
     oldCache.remove(QStringLiteral("audibleDurationSec"));
     oldCache.insert(QStringLiteral("bpm"), 123.45);
     oldCache.insert(QStringLiteral("firstBeatSec"), 0.234);

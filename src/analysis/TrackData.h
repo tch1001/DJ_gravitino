@@ -62,6 +62,10 @@ struct TrackData {
     QString structureFingerprint;
     // Exact bytes identify one asset, never the abstract song arrangement.
     QString assetSha256;
+    // Local cache safety evidence: exact decoded f32 stereo/48k audio, excluding
+    // only terminal digital silence/subnormal decoder padding (never the start).
+    // Not a portable song fingerprint and never serialized into transitions.
+    QString decodedAudioSha256;
     QString songId;
 
     // Musical key in Camelot notation ("8A" = A minor, "8B" = C major...);

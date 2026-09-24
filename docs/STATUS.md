@@ -6,6 +6,122 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-24 (codex): **Grid recovery confirmed by the user.** After an explicit
+  one-time authorization and closing the app, restored Low, S&M, How We Party
+  and Turn Down for What anchors in only their four local caches/catalog assets.
+  No BPM, hot cues, saved loops, audio, `.transition` or `.gvt` files changed;
+  all 110 transition-library file hashes were verified unchanged. Exact prior
+  settings and field-level notes are in the local backup
+  ~/.gravitino/backups/grid-restore-20260924.SuG6G2 (do not commit private caches).
+  User listened to the suggested transitions and confirmed they are all good.
+  Added a permanent data-safety checklist to CLAUDE.md so future work cannot
+  mistake a timestamp refresh or beat-zero edit for disposable analysis.
+
+- 2026-09-24 (codex): **Protect saved song setup across file/cache refreshes.**
+  Fixed the pre-existing timestamp-mismatch path that re-analyzed audio and
+  discarded its effective BPM/downbeat, hot cues and saved loops. Cache reuse
+  now verifies local decoded identity independently of mtime; tag-only changes
+  refresh metadata without regridding. The optional `gvpcm1` cache identity is
+  exact and position-sensitive except for terminal digital silence/subnormal
+  padding (a real Low MP3 tag edit changed 88 such frames). Playback PCM is not
+  modified. Legacy caches upgrade using exact file SHA where available; changed
+  legacy files without enough identity evidence remain unloaded rather than
+  guessing. Analysis upgrades also retain automatic grids, since existing
+  transitions may reference them. Unverifiable/replaced audio, corrupt caches,
+  failed backups and concurrent/stale writes cannot overwrite the saved setup.
+  Cache writes atomically archive their preceding JSON in cache/preserved;
+  failures show Needs attention and a detailed load/hover explanation.
+  New temporary-only regression coverage protects timestamps, WAV/MP3 tags,
+  legacy upgrades, changes beyond the short fingerprint window, restored audio,
+  backup failure, stale decks, leading/interior silence and analysis upgrades.
+  A copy of the actual Low MP3 retains its test downbeat/cue after timestamp and
+  tag edits; Gangnam/Low PCM still matches the original decoder sample-for-sample.
+  Full build, all 43 ctests and isolated selftest pass. QA:
+  /tmp/gravitino-grid-preservation-qa.wzLUKq. No user transition, audio, cue/grid
+  cache or catalog modified; no old reference downbeat automatically restored.
+  Prior dirty changes and tmp/ preserved. App not restarted; not committed/pushed.
+
+- 2026-09-22 (codex): **Interactive analysis priority and per-song progress.**
+  TrackLibrary now owns explicit pending/urgent queues instead of submitting the
+  entire scan to the thread pool. Three background jobs reserve a fourth slot
+  for LOAD/double-click/controller requests; pending requests are promoted and
+  deduplicated, active jobs continue, errors can be retried. Generation-scoped
+  cancellation and destructor joining protect rescans/shutdown. Status cells
+  show queued 0% bars, weighted decoding/waveform/fingerprint/BPM/key progress,
+  ready bars, and error details. Internal callbacks are throttled on delivery;
+  decoding measures file reads without an expensive MP3 frame-length query.
+  Unfinished songs can be requested for either stopped deck and load once ready;
+  a new request replaces the old one, while playing/replaced decks, disabled UI,
+  preview leases and resets cancel unsafe delayed loads. No automatic playback.
+  Synthetic gated-worker/UI tests cover priority, duplicate requests, monotonic
+  progress, retries, rescans, shutdown, sorting, double-click and load guards.
+  Original/new decoder PCM matches exactly for WAV/FLAC/AIFF, CBR/VBR MP3,
+  missing-Xing MP3 and resampling; existing cache/grid/cue tests also pass.
+  Missing-Xing coverage asserts decoder parity only, not a new structural-match
+  guarantee (the existing matcher scores that padded synthetic fixture lower).
+  Full build, all 42 ctests, isolated selftest and themed compact library capture
+  pass. QA: /tmp/gravitino-analysis-priority-qa.IrvFXG. Protected transition/cache
+  hashes unchanged; all prior dirty work and tmp/ preserved. This improves access
+  during analysis, not synchronous discovery or full-library memory use. App not
+  restarted; changes not committed or pushed.
+
+- 2026-09-18 (codex): **Library search accessibility crash repaired.** Reproduced
+  the supplied crash at exactly `QAccessibleTable::modelChange + 220` with an
+  isolated native table. The earlier Cocoa workaround protected borrowed table
+  IDs but still deleted real cell interfaces from native row cleanup, leaving
+  Qt's child-ID cache stale for the next search/filter removal. Cleanup now
+  evicts only the matching Cocoa representation; Qt owns interface lifetime.
+  The repair retains its Qt 6.11.0/1 gate, checks the native eviction symbol,
+  and links matching GuiPrivate headers without altering installed Qt binaries.
+  Added an Objective-C++ regression probe that resolves native placeholders and
+  drains both construction/retirement autoreleases before the next search.
+  Repeated partial/empty searches, native cell recreation, inserts/removes/sorts,
+  library/transition tab switching, and final cell-ID cleanup all pass. The
+  pre-fix reproduction intentionally crashed a test process, never the live
+  library. Full build, all 41 ctests and isolated audio selftest pass; QA at
+  /tmp/gravitino-library-search-qa.8jfdpe. All 275 protected transition/cache/
+  catalog files matched their initial hashes before reopening the app. Existing
+  scratch/editor changes and tmp/ preserved. Rebuilt process launched (PID 15522)
+  but macOS is waiting on a new Music-library permission prompt before its window
+  can be constructed (confirmed by startup sample and TCC logs); user asked to
+  allow access. Not committed.
+
+- 2026-09-18 (codex): **Editor action types, default Auto apply, and per-load stem reset.**
+  Events no longer let a stale semantic cue/loop ID override a chosen non-cue
+  control such as Stem Melody. Incompatible references clear, definitions remain
+  intact, and continuous control changes preserve their ramp curve. Added Auto
+  apply beside Apply, checked by default; combos and completed numeric/reference
+  edits change only the working copy. Refresh/selection/Undo/Redo are guarded,
+  unchanged Apply is a no-op, sorting retains selection, and invalid cue IDs
+  show a non-modal explanation. Manual Apply remains available when unchecked.
+  Deck loading resets all four stem gains under the render gate, only on the
+  replaced deck; later stem attachment/transition automation still retain their
+  intended values. Added synthetic UI/source-preservation/undo tests and stem
+  replacement checks under active audio rendering. Full build, all 41 ctests,
+  selftest and compact-window screenshot inspection pass; QA at
+  /tmp/gravitino-editor-auto-apply-qa.4wKHqt. User files and tmp/ untouched.
+  A parallel rerun hit the existing replay progress/timer assertion once;
+  the complete serial rerun passed without changing that test.
+  Existing scratch changes preserved. App not restarted (user may be editing);
+  this work is not committed or pushed yet.
+
+- 2026-09-17 (codex): **Continuous, band-limited platter scratch audio.**
+  Touch-gated wheel motion now follows a bounded physical-position target with
+  two 6 ms sample-clock smoothers, replacing callback-sized audio bursts and
+  empty blocks between MIDI reports. A precomputed-table 64-tap adaptive sinc
+  reader suppresses fast-scratch aliasing in either direction; gentle stationary
+  gating and 64-frame touch/release de-clicks avoid held-sample DC and edge pops.
+  Release retains the exact final wheel displacement, including reports before
+  the next callback; seeks/reloads reset smoothing. Mouse fine-jog sensitivity,
+  play/pause behavior, rim bending, loop clamps and recording controls stay intact.
+  New synthetic audio regressions cover sparse packets, block-size independence,
+  reverse/high-speed filtering, key-lock release, stem/PFL parity, bounds and
+  finite-input safety. The existing output-recovery test now drains its callback
+  before taking its cursor baseline, eliminating an asynchronous-stop test race.
+  Full build, all 41 ctests and selftest pass. No user transitions, cues, grids,
+  audio assets or tmp/ edited. Real-controller listening/feel remains a user check.
+  Restarted the dev app and verified its main window (PID 99491). Not yet committed.
+
 - 2026-09-17 (codex): **Output hot-plug recovery and default crossfader bypass.**
   AudioEngine now owns MIDI-independent output recovery, resolving default
   endpoint IDs and reinitializing stopped/interrupted/stalled streams on the

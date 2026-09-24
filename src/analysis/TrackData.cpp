@@ -16,27 +16,107 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QByteArray>
+#include <QtEndian>
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 namespace gvt {
 
 namespace detail {
 
+QString decodedAudioHash(const std::vector<float>& pcm, const WorkProgress& progress)
+{
+    static_assert(sizeof(float) == 4);
+    // MP3 tag/gapless metadata can change how much end-padding the decoder
+    // flushes. Ignore only terminal stereo frames of digital silence/subnormal
+    // filter residue (below float's minimum normal magnitude). Never trim the
+    // front, normal-valued audio, or interior silence: their timing is authored.
+    size_t samples = pcm.size();
+    while (samples >= 2 &&
+           std::abs(pcm[samples - 1]) < std::numeric_limits<float>::min() &&
+           std::abs(pcm[samples - 2]) < std::numeric_limits<float>::min()) {
+        samples -= 2;
+        if (progress && samples % 262144 == 0) progress(0.0);
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(QByteArrayView("gravitino-pcm-v1/f32le/48000/stereo/no-terminal-digital-padding"));
+    constexpr size_t chunk = 262144;
+    for (size_t start = 0; start < samples; start += chunk) {
+        if (progress) progress(double(start) / samples);
+        const size_t count = std::min(chunk, samples - start);
+        if constexpr (std::endian::native == std::endian::little) {
+            hash.addData(QByteArrayView(reinterpret_cast<const char*>(pcm.data() + start),
+                                       qsizetype(count * sizeof(float))));
+        } else {
+            std::vector<quint32> little(count);
+            for (size_t i = 0; i < count; ++i)
+                little[i] = qToLittleEndian(std::bit_cast<quint32>(pcm[start + i]));
+            hash.addData(QByteArrayView(reinterpret_cast<const char*>(little.data()),
+                                       qsizetype(count * sizeof(quint32))));
+        }
+    }
+    if (progress) progress(1.0);
+    return QStringLiteral("gvpcm1:") + QString::fromLatin1(hash.result().toHex());
+}
+
+QString assetFileHash(const QString& path, const WorkProgress& progress)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    while (!file.atEnd()) {
+        const QByteArray bytes = file.read(1 << 20);
+        if (bytes.isEmpty() && file.error() != QFileDevice::NoError) return {};
+        hash.addData(bytes);
+        if (progress) progress(double(file.pos()) / std::max<qint64>(1, file.size()));
+    }
+    return QString::fromLatin1(hash.result().toHex());
+}
+
 bool decodeAudioStereo48k(const QString& path, std::vector<float>& pcmOut,
-                          QString* error)
+                          QString* error, const WorkProgress& progress)
 {
     pcmOut.clear();
-    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, (ma_uint32)kSampleRate);
-    ma_decoder dec;
-    if (ma_decoder_init_file(path.toUtf8().constData(), &cfg, &dec) != MA_SUCCESS) {
+    QFile source(path);
+    if (!source.open(QIODevice::ReadOnly)) {
         if (error) *error = QStringLiteral("cannot open/decode: %1").arg(path);
         return false;
     }
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, (ma_uint32)kSampleRate);
+    ma_decoder dec;
+    const auto read = [](ma_decoder* decoder, void* output, size_t bytes,
+                         size_t* bytesRead) -> ma_result {
+        const qint64 count = static_cast<QFile*>(decoder->pUserData)->read(
+            static_cast<char*>(output), static_cast<qint64>(bytes));
+        if (bytesRead) *bytesRead = count > 0 ? static_cast<size_t>(count) : 0;
+        return count < 0 ? MA_IO_ERROR : count == 0 ? MA_AT_END : MA_SUCCESS;
+    };
+    const auto seek = [](ma_decoder* decoder, ma_int64 offset,
+                         ma_seek_origin origin) -> ma_result {
+        auto* file = static_cast<QFile*>(decoder->pUserData);
+        const qint64 base = origin == ma_seek_origin_start ? 0
+            : origin == ma_seek_origin_end ? file->size() : file->pos();
+        return file->seek(base + offset) ? MA_SUCCESS : MA_BAD_SEEK;
+    };
+    if (ma_decoder_init(read, seek, &source, &cfg, &dec) != MA_SUCCESS) {
+        if (error) *error = QStringLiteral("cannot open/decode: %1").arg(path);
+        return false;
+    }
+    struct Cleanup {
+        ma_decoder* decoder;
+        ~Cleanup() { ma_decoder_uninit(decoder); }
+    } cleanup{&dec};
+    // The native MP3 length query can decode the ENTIRE file a second time.
+    // Measure actual compressed-file read position instead; buffered read-ahead
+    // makes this an approximation, capped until decode really reaches EOF.
+    const qint64 length = source.size();
+    double completed = 0;
+    if (progress) progress(0.0);
     constexpr ma_uint64 kChunkFrames = 1 << 16;
     std::vector<float> buf((size_t)kChunkFrames * 2);
     for (;;) {
@@ -44,13 +124,18 @@ bool decodeAudioStereo48k(const QString& path, std::vector<float>& pcmOut,
         const ma_result res = ma_decoder_read_pcm_frames(&dec, buf.data(), kChunkFrames, &read);
         if (read > 0)
             pcmOut.insert(pcmOut.end(), buf.data(), buf.data() + read * 2);
+        if (progress) {
+            completed = std::max(completed, length > 0
+                ? std::clamp(double(source.pos()) / length, 0.0, .99) : 0.0);
+            progress(completed);
+        }
         if (res != MA_SUCCESS || read < kChunkFrames) break;
     }
-    ma_decoder_uninit(&dec);
     if (pcmOut.empty()) {
         if (error) *error = QStringLiteral("no audio frames in: %1").arg(path);
         return false;
     }
+    if (progress) progress(1.0);
     return true;
 }
 
@@ -83,13 +168,15 @@ void readTags(const QString& path, QString& title, QString& artist,
         title = QFileInfo(path).completeBaseName();
 }
 
-std::vector<float> computeOverviewPeaks(const std::vector<float>& stereoPcm)
+std::vector<float> computeOverviewPeaks(const std::vector<float>& stereoPcm,
+                                      const WorkProgress& progress)
 {
     constexpr int kBin = 512; // frames per bin
     const int64_t frames = (int64_t)stereoPcm.size() / 2;
     std::vector<float> peaks;
     peaks.reserve((size_t)(frames / kBin + 1));
     for (int64_t start = 0; start < frames; start += kBin) {
+        if (progress && start % 65536 == 0) progress(double(start) / frames);
         const int64_t end = std::min<int64_t>(frames, start + kBin);
         float mx = 0.0f;
         for (int64_t i = start; i < end; ++i) {
@@ -99,13 +186,14 @@ std::vector<float> computeOverviewPeaks(const std::vector<float>& stereoPcm)
         }
         peaks.push_back(std::min(1.0f, mx));
     }
+    if (progress) progress(1.0);
     return peaks;
 }
 
 void computeBandOverviews(const std::vector<float>& stereoPcm,
                           std::vector<float>& low,
                           std::vector<float>& mid,
-                          std::vector<float>& high)
+                          std::vector<float>& high, const WorkProgress& progress)
 {
     constexpr int kBin = 512; // frames per bin — must match computeOverviewPeaks
     const int64_t frames = (int64_t)stereoPcm.size() / 2;
@@ -123,6 +211,7 @@ void computeBandOverviews(const std::vector<float>& stereoPcm,
     float lp200 = 0.0f, lp2000 = 0.0f;
 
     for (int64_t i = 0; i < frames; ++i) {
+        if (progress && i % 65536 == 0) progress(double(i) / frames);
         const float m = 0.5f * (stereoPcm[(size_t)(2 * i)] +
                                 stereoPcm[(size_t)(2 * i + 1)]);
         lp200  += aLo * (m - lp200);
@@ -301,29 +390,45 @@ double structureFingerprintSimilarity(const QString& a, const QString& b)
 
 TrackDataPtr loadAndAnalyzeTrack(const QString& audioPath, QString* error)
 {
+    return detail::loadAndAnalyzeWithProgress(audioPath, error, {});
+}
+
+TrackDataPtr detail::loadAndAnalyzeWithProgress(
+    const QString& audioPath, QString* error, const AnalysisProgress& progress)
+{
+    const auto phase = [&](double start, double weight, const QString& name) {
+        return [&, start, weight, name](double fraction) {
+            if (progress) progress(start + weight * fraction, name);
+        };
+    };
     auto t = std::make_shared<TrackData>();
     t->filePath = audioPath;
 
-    if (!detail::decodeAudioStereo48k(audioPath, t->pcm, error))
+    if (!detail::decodeAudioStereo48k(audioPath, t->pcm, error,
+                                    phase(0, .35, QStringLiteral("Decoding"))))
         return nullptr;
 
     detail::readTags(audioPath, t->title, t->artist, t->album,
                      t->isrc, t->musicBrainzRecording);
     t->durationSec = (double)t->frameCount() / (double)kSampleRate;
-    t->overviewPeaks = detail::computeOverviewPeaks(t->pcm);
-    detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh);
+    t->overviewPeaks = detail::computeOverviewPeaks(t->pcm,
+        phase(.35, .05, QStringLiteral("Waveform")));
+    detail::computeBandOverviews(t->pcm, t->overviewLow, t->overviewMid, t->overviewHigh,
+        phase(.40, .15, QStringLiteral("Waveform")));
+    if (progress) progress(.55, QStringLiteral("Fingerprint"));
     t->fingerprint = computeFingerprint(t->pcm.data(), t->frameCount());
     t->structureFingerprint = computeStructureFingerprint(
         t->pcm.data(), t->frameCount(), &t->audibleDurationSec);
-    QFile asset(audioPath);
-    if (asset.open(QIODevice::ReadOnly)) {
-        QCryptographicHash hash(QCryptographicHash::Sha256);
-        while (!asset.atEnd()) hash.addData(asset.read(1 << 20));
-        t->assetSha256 = QString::fromLatin1(hash.result().toHex());
-    }
+    t->decodedAudioSha256 = detail::decodedAudioHash(t->pcm,
+        phase(.60, .025, QStringLiteral("Checking audio")));
+    t->assetSha256 = detail::assetFileHash(audioPath,
+        phase(.625, .025, QStringLiteral("Checking audio")));
 
+    if (progress) progress(.65, QStringLiteral("BPM"));
     const std::vector<float> mono = detail::monoMixdown(t->pcm);
-    const BeatAnalysis ba = analyzeBeats(mono.data(), (int64_t)mono.size(), kSampleRate);
+    const BeatAnalysis ba = detail::analyzeBeatsWithProgress(
+        mono.data(), (int64_t)mono.size(), kSampleRate,
+        phase(.65, .20, QStringLiteral("BPM")));
     if (ba.ok) {
         t->bpm = ba.bpm;
         t->firstBeatSec = ba.firstBeatSec;
@@ -331,12 +436,14 @@ TrackDataPtr loadAndAnalyzeTrack(const QString& audioPath, QString* error)
         t->analyzedFirstBeatSec = ba.firstBeatSec;
     } // else leave bpm = 0 (track still usable, no grid)
 
-    const KeyResult key = analyzeKey(t->pcm.data(), t->frameCount(), kSampleRate);
+    const KeyResult key = analyzeKey(t->pcm.data(), t->frameCount(), kSampleRate,
+        phase(.85, .14, QStringLiteral("Key")));
     if (key.ok) {
         t->camelotKey = key.camelotKey;
         t->keyName = key.keyName;
     } // else leave both empty (unknown key)
 
+    if (progress) progress(.99, QStringLiteral("Finishing"));
     return t;
 }
 

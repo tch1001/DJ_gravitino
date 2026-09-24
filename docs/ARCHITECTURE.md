@@ -50,16 +50,28 @@ synthesized table rows, columns and placeholder cells borrow the table's
 accessibility ID, but these releases remove that ID when disposing them.
 This can recursively destroy a table/cell during a proxy layout refresh
 (`QAccessibleCache::deleteInterface`), including the playing-FROM timer.
-The repair checks the runtime version and Objective-C ivar layout, then guards
-the two native cleanup methods so only real elements remove owned IDs.
+The repair checks the runtime version, Objective-C ivar layout and native-only
+cache-eviction symbol, then guards the two native cleanup methods. Synthesized
+elements never remove their borrowed table ID. Retiring real Cocoa cells evicts
+only their native representation through `removeAccessibleElement`, not their
+Qt interface: `QAccessibleTable` still owns/references those IDs during search
+filter row removals. Native identity checks avoid evicting newer replacements;
+Qt remains responsible for deleting interfaces on row removal/reset/destruction.
+The compatibility target requires matching Qt GuiPrivate headers. Its one
+non-public eviction method is resolved only on the reviewed runtime, before any
+hooks are installed; no private cache layout is read or written.
 It neither disables accessibility nor changes sorting/model notifications,
 and does not modify the installed Qt libraries. Offscreen/other Qt versions
 are untouched. Review/remove this narrow workaround when upgrading Qt; do not
 blindly widen its version gate. The relevant upstream implementation is
 [Qt's Cocoa accessibility element](https://code.qt.io/cgit/qt/qtbase.git/tree/src/plugins/platforms/cocoa/qcocoaaccessibilityelement.mm?h=v6.11.1).
 `test_library_accessibility_native` exercises the native bridge with temporary
-fixtures (requires a macOS GUI session); the offscreen counterpart alone cannot
-catch this bug. Its explicit `--native --unpatched` diagnostic mode reproduces
+fixtures (requires a macOS GUI session), including explicit autorelease-pool
+draining after native placeholders become real cells, repeated text searches,
+hidden-tab filtering and final cell-ID cleanup. Merely calling processEvents
+can leave native rows pending in an outer pool and miss the search crash. The
+offscreen counterpart alone cannot catch this bug.
+Its explicit `--native --unpatched` diagnostic mode reproduces
 the old failure and must not be used as a passing test.
 
 Qt is used in: library, ui, app, and for signals in ControlBus (QObject).
@@ -75,7 +87,10 @@ no widgets) so they stay testable headless.
 - **Track replacement**: `Deck::loadTrack()` closes the render gate, drains
   any active callback, clears the old PCM/stems/FX state, publishes the new
   source, and returns stopped at frame zero. It must never crossfade or layer
-  the old source with the replacement.
+  the old source with the replacement. All four stem levels reset to unity on
+  that deck, so an old mute/solo cannot leak into the next song. The other deck,
+  EQ/faders and permanent cue metadata are unchanged. Attaching prepared stems
+  does not reset levels; authored transition setup may restore its own levels.
 - **Transition-editor preview**: the GUI thread renders a private two-deck
   `AudioEngine` into a bounded lock-free stereo ring. While its exclusive
   preview lease is held, the live callback reads that ring into MASTER and
@@ -85,8 +100,14 @@ no widgets) so they stay testable headless.
   remains allocation- and lock-free; preview bypasses the live master tap.
 - **MIDI thread** (RtMidi callback): converts raw MIDI → ControlEvent, posts to
   GUI thread via queued signal. LEDs written directly from GUI thread.
-- **Analysis**: QtConcurrent / std::thread per track, results delivered via
-  queued signal.
+- **Library analysis**: a GUI-owned pending/urgent queue feeds QtConcurrent
+  workers. Three background jobs leave the fourth worker slot available for
+  interactive loads; requests promote/deduplicate a pending row, or retry an
+  error. Already-running work is not restarted. Additional urgent requests run
+  before ordinary queued songs as capacity becomes available. Generation-scoped
+  cancellation stops superseded scans; the library destructor cancels and joins
+  its workers before QObject teardown. Results and throttled progress (at most
+  10 Hz per worker plus stage changes) are delivered on the GUI thread.
 - Transition Player runs on a GUI-thread QTimer (~5 ms) reading the master
   deck's beat position from the audio engine (atomic double).
   Its event-step implementation is also used by editor audition through the
@@ -117,6 +138,17 @@ Deck B PCM ─▶ tempo/trim/EQ/filter/FX ─┤─▶ channel fader ─┘
   Stretch time-stretching preserves musical pitch; scratch remains direct.
   The pitch fader has persisted Serato-style ±8%, ±16%, and ±50% ranges;
   selecting a different range never changes the current ratio by itself.
+- Touch-gated platter scratching follows an atomic physical-position target
+  using two sample-clock 6 ms smoothers (roughly 12 ms group delay). Sparse MIDI
+  packets no longer become isolated callback-sized bursts separated by silence.
+  Scratch-only 64-tap, speed-adaptive windowed-sinc resampling suppresses aliasing
+  in both directions; lookup tables are constructed before audio starts, with
+  no callback allocations or locks. Near-zero motion fades to silence and
+  64-sample de-clicks bridge touch/release, including key-lock re-entry. Release
+  commits the final hand position, even for packets arriving between callbacks.
+  Seeks/reloads reset the smoothing state; active loops retain their clamp bounds.
+  Untouched mouse-platter input remains an exact fine positional nudge without
+  pausing playback; jog-rim tempo bending and transition schemas are unchanged.
 - EQ: RBJ biquad low-shelf 250 Hz / peak 1 kHz / high-shelf 4 kHz, ±26 dB with
   full-kill at slider bottom.
 - Limiter: soft-clip tanh on master to avoid inter-deck clipping.
@@ -174,6 +206,40 @@ fields refresh. Records predating the source marker are conservatively treated
 as protected because they may contain manual work. The tempo candidate search
 includes octave, 3:2, and 4:3 ratios so prominent pop subdivisions do not force
 a harmonic BPM alias.
+
+Cache reuse/preservation verifies audio identity independently of modification
+time. `TrackData::decodedAudioSha256` and the optional same-named cache-v2 field
+contain `gvpcm1:` plus a SHA-256 over a format-domain prefix and decoded
+48 kHz stereo float32 samples in little-endian order. Only terminal stereo
+frames of digital silence/subnormal decoder residue are excluded: MP3 tag edits
+can change this inaudible end-padding. Leading/interior silence and every
+normal-valued sample (even extremely quiet ones) remain exact and position-sensitive.
+This does not alter playback PCM. It is local safety evidence,
+not an encode-tolerant song fingerprint, and never enters `.transition` or `.gvt`.
+An exact decoded match permits tag/timestamp changes while retaining the whole
+effective grid, cues and saved loops and refreshing tags/file hash. Legacy caches
+without PCM identity can use an exact asset-byte SHA; caches predating both
+hashes are migrated only with unchanged timestamp, matching historical fingerprint
+and exact decoded duration. A changed legacy file without sufficient evidence is
+refused, not guessed safe from approximate structural similarity. Analysis-version
+migrations preserve every existing effective grid, including automatic grids
+that saved transitions may already reference; refreshed detector results remain
+separate until the user explicitly changes the effective grid.
+
+Different or unverifiable audio at an existing cached path is left unloaded with
+a persistent error tooltip and a message on LOAD; the old cache and catalog entry
+stay untouched. Restore the original audio or give a replacement its own filename
+and review/bind its grid. Corrupt caches and failed verification/write/backups
+also fail closed. Before any changed cache write (including manual setup edits),
+the exact previous JSON bytes are atomically archived under
+`~/.gravitino/cache/preserved/<path-hash>-<content-hash>.json`; duplicate snapshots
+are reused, never overwritten with different contents. These are local backups,
+not transition files. Writers are serialized and automatic refresh checks its
+starting cache snapshot so it cannot overwrite a newer saved edit. A loaded deck
+cannot save setup against a file whose timestamp has since changed: reload first.
+Scans reject files whose timestamp/size changes during processing. No automatic
+recovery is inferred from transition endpoint assumptions, so a newer intentional
+downbeat correction is never replaced by an older recipe's reference downbeat.
 
 ## Transition record/replay
 
@@ -277,6 +343,29 @@ automatic **Undone** smart folder: once a track is analyzed, it appears there
 only when the catalog's rebuildable reverse graph has neither an incoming nor
 outgoing transition for its canonical song identity. Transition reloads and
 track-analysis completion refresh this coverage without touching audio tags.
+Each song's Status cell paints an analysis progress bar, including empty
+**Queued · 0%** tracks. `TrackLibrary::prioritizeAnalysis(row)` is the shared
+path for mouse/double-click/hardware LOAD requests. Internal progress callbacks
+report decoding, waveform, fingerprint, BPM and key stages; the model exposes
+fraction/active/error roles without changing the six table columns. Fractions
+are monotonically weighted work estimates, not a remaining-time prediction;
+100% is published only after successful library registration. Cache hits report
+only decoding/waveform work. Decoding measures compressed-file read position
+through the same miniaudio decoder rather than querying MP3 frame length (which
+can decode the entire file again). PCM parity with the original file reader is
+tested across supported formats, VBR MP3 and missing-length-header MP3.
+
+LOAD stays available for queued tracks on stopped decks. `LibraryWidget` keeps
+one pending path per deck and automatically loads that exact song once ready,
+even if the table has since been searched or sorted. It does not start playback.
+A newer load replaces that request; playing/changed decks, disabled live UI,
+an exclusive editor preview lease, or a library reset cancel it. Worker errors
+clear the pending load and expose a retryable diagnostic. Background failures
+remain visible in the row tooltip. Permanent grids, hot cues/saved loops,
+transition files, catalog matching rules and cache schema are unchanged.
+This is queue responsiveness, not lazy loading: directory discovery is still
+synchronous, and each analyzed track is still fully decoded into memory.
+
 Library sorting uses typed model roles: BPM and duration compare numerically,
 while Camelot keys compare by their numeric wheel position and A/B suffix.
 The Library page's default-on **Recommended** mode is a view-only priority
@@ -354,6 +443,14 @@ own `(role, control)` lane, or the previous point in that lane at the end; an
 empty lane clears selection instead of targeting another knob/deck. Discrete
 action-card deletion retains chronological following. Both the button and
 Delete/Backspace keys support rapid cleanup.
+The Events inspector defaults to **Auto apply**, beside Apply: finished number
+or reference edits and selector changes update the undoable working copy, not
+the saved file. Turning it off stages changes for explicit Apply. Refresh,
+selection and Undo/Redo cannot trigger auto-apply, and unchanged Apply does not
+create duplicate undo steps. Changing a point to a non-cue control clears its
+obsolete cue/loop reference instead of silently coercing it back to a cue.
+Continuous-to-continuous type edits retain the ramp curve; incomplete cue IDs
+report a non-modal error without mutating the model.
 Starting preview reconstructs cursor state by rendering the private graph from
 beat zero, then routes only that graph to MASTER. It can resolve the currently
 loaded deck assets while the library scan catches up and does not mutate the
