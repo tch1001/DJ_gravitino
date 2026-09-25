@@ -201,16 +201,13 @@ TransitionRecorder::TransitionRecorder(ControlBus* bus, AudioEngine* engine,
         // its beat forward — a rolling window would swallow a whole slow
         // gesture into one snap. Negative deltas (clock jumps) start a new
         // event instead of corrupting an old bucket.
-        if (!controlIsTrigger(g.control)) {
+        if (!controlIsTrigger(g.control) && g.gestureControl == ControlId::Count) {
             for (auto it = im.events.rbegin(); it != im.events.rend(); ++it) {
                 if (it->role != g.role || it->control != g.control) continue;
+                if (it->gestureControl != ControlId::Count) break;
                 const double delta = g.beat - it->beat;
                 if (delta >= 0.0 && delta < kCoalesceBeats) {
                     it->value = g.value;
-                    if (g.gestureControl != ControlId::Count) {
-                        it->gestureControl = g.gestureControl;
-                        it->gesturePadMode = g.gesturePadMode;
-                    }
                     emit eventCaptured((int)im.events.size());
                     return;
                 }
@@ -360,39 +357,53 @@ GvtFile TransitionRecorder::finish() {
             if (im.events[j].role == first.role &&
                 im.events[j].control == first.control)
                 run.push_back(j);
-        if (run.size() < 2) continue;
-
-        // Greedy thinning: anchor at last kept point, drop middles that are
-        // linear (within eps) between the anchor and the next point.
-        size_t a = 0;
-        for (size_t m = 1; m + 1 < run.size(); ++m) {
-            const GvtEvent& pa = im.events[run[a]];
-            const GvtEvent& pm = im.events[run[m]];
-            const GvtEvent& pb = im.events[run[m + 1]];
-            const double span = pb.beat - pa.beat;
-            double expect = pb.value;
-            if (span > 1e-9)
-                expect = pa.value + (pb.value - pa.value) * (pm.beat - pa.beat) / span;
-            if (std::fabs(pm.value - expect) <= kLinearEps)
-                keep[run[m]] = false;
-            else
-                a = m;
+        const auto thinRun = [&](const std::vector<size_t> &segment) {
+            const auto &run = segment;
+            if (run.size() < 2)
+                return;
+            // Greedy thinning: anchor at last kept point, drop middles that are
+            // linear (within eps) between the anchor and the next point.
+            size_t a = 0;
+            for (size_t m = 1; m + 1 < run.size(); ++m) {
+                const GvtEvent &pa = im.events[run[a]];
+                const GvtEvent &pm = im.events[run[m]];
+                const GvtEvent &pb = im.events[run[m + 1]];
+                const double span = pb.beat - pa.beat;
+                double expect = pb.value;
+                if (span > 1e-9)
+                    expect = pa.value + (pb.value - pa.value) * (pm.beat - pa.beat) / span;
+                if (std::fabs(pm.value - expect) <= kLinearEps)
+                    keep[run[m]] = false;
+                else
+                    a = m;
+            }
+            // Survivors after the first of the run glide linearly into place —
+            // unless the value jumped (a toggle like a stem mute or a fader slam
+            // must snap on replay, not fade across the gap since the last event).
+            bool firstKept = true;
+            double prevKeptValue = 0.0;
+            for (size_t idx : run) {
+                if (!keep[idx])
+                    continue;
+                const bool bigJump =
+                    !firstKept && std::fabs(im.events[idx].value - prevKeptValue) > 0.45;
+                im.events[idx].curve = (firstKept || bigJump) ? Curve::Step : Curve::Linear;
+                prevKeptValue = im.events[idx].value;
+                firstKept = false;
+            }
+        };
+        // A pad macro is an instantaneous state assignment, even for knobs.
+        // Never smear its press/release across the preceding hold or coalesce
+        // away a quick tap. Manual knob streams after it can still be thinned.
+        std::vector<size_t> segment;
+        for (const auto idx : run) {
+            if (im.events[idx].gestureControl != ControlId::Count && !segment.empty()) {
+                thinRun(segment);
+                segment.clear();
+            }
+            segment.push_back(idx);
         }
-        // Survivors after the first of the run glide linearly into place —
-        // unless the value jumped (a toggle like a stem mute or a fader slam
-        // must snap on replay, not fade across the gap since the last event).
-        bool firstKept = true;
-        double prevKeptValue = 0.0;
-        for (size_t idx : run) {
-            if (!keep[idx]) continue;
-            const bool bigJump =
-                !firstKept &&
-                std::fabs(im.events[idx].value - prevKeptValue) > 0.45;
-            im.events[idx].curve =
-                (firstKept || bigJump) ? Curve::Step : Curve::Linear;
-            prevKeptValue = im.events[idx].value;
-            firstKept = false;
-        }
+        thinRun(segment);
     }
 
     for (size_t i = 0; i < im.events.size(); ++i)

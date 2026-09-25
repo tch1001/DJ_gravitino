@@ -7,6 +7,11 @@
 #include "../analysis/TrackData.h"
 
 #include <QDir>
+#include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QFileSystemWatcher>
+#include <QMap>
+#include <QTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QSet>
@@ -106,6 +111,10 @@ struct TransitionStore::Impl {
     QString dir;
     std::vector<GvtFile> files;
     SongCatalog* catalog = nullptr;
+    std::unique_ptr<QFileSystemWatcher> watcher;
+    QTimer debounce, poll;
+    QMap<QString, QByteArray> digests;
+    QMap<QString, QPair<qint64, qint64>> stamps;
 };
 
 namespace {
@@ -141,6 +150,26 @@ TransitionStore::TransitionStore(QObject* parent)
                      QStringLiteral("/Music/Gravitino/Transitions");
     impl_->dir = QFileInfo(impl_->dir).absoluteFilePath();
     QDir().mkpath(impl_->dir);
+    if (QCoreApplication::instance()) {
+        impl_->watcher = std::make_unique<QFileSystemWatcher>();
+        impl_->debounce.setSingleShot(true);
+        impl_->debounce.setInterval(200);
+        connect(&impl_->debounce, &QTimer::timeout, this, &TransitionStore::reload);
+        const auto schedule = [this](const QString&) { impl_->debounce.start(); };
+        connect(impl_->watcher.get(), &QFileSystemWatcher::directoryChanged, this, schedule);
+        connect(impl_->watcher.get(), &QFileSystemWatcher::fileChanged, this, schedule);
+        // Watch events can be coalesced/dropped, and atomic saves replace inodes.
+        // Poll metadata only; parsing/hashing occurs only when a scan is needed.
+        impl_->poll.setInterval(2000);
+        connect(&impl_->poll, &QTimer::timeout, this, [this] {
+            QMap<QString, QPair<qint64, qint64>> stamps;
+            const QDir d(impl_->dir);
+            for (const auto& fi : d.entryInfoList({"*.transition", "*.gvt"}, QDir::Files, QDir::Name))
+                stamps.insert(fi.absoluteFilePath(), {fi.size(), fi.lastModified().toMSecsSinceEpoch()});
+            if (stamps != impl_->stamps) impl_->debounce.start();
+        });
+        impl_->poll.start();
+    }
     reload();
 }
 
@@ -177,17 +206,34 @@ bool TransitionStore::matchesEndpoint(const GvtFile& file, bool outgoing,
 
 void TransitionStore::reload()
 {
-    impl_->files.clear();
+    impl_->debounce.stop();
+    std::vector<GvtFile> next;
+    QMap<QString, QByteArray> digests;
+    QMap<QString, QPair<qint64, qint64>> stamps;
     const QDir d(impl_->dir);
     for (const QFileInfo& fi :
          d.entryInfoList({QStringLiteral("*.transition"), QStringLiteral("*.gvt")},
-                         QDir::Files | QDir::Readable, QDir::Name)) {
+                         QDir::Files, QDir::Name)) {
+        const QString path = fi.absoluteFilePath();
+        stamps.insert(path, {fi.size(), fi.lastModified().toMSecsSinceEpoch()});
+        QFile input(path);
+        QByteArray hash("unreadable");
+        if (fi.size() > 2 * 1024 * 1024) hash = "oversized";
+        else if (input.open(QIODevice::ReadOnly))
+            hash = QCryptographicHash::hash(input.readAll(), QCryptographicHash::Sha256);
+        digests.insert(path, hash);
+        if (impl_->digests.value(path) == hash) {
+            const auto previous = std::find_if(impl_->files.begin(), impl_->files.end(),
+                [&path](const GvtFile& f) { return f.filePath == path; });
+            if (previous != impl_->files.end()) next.push_back(*previous);
+            continue;
+        }
         GvtFile f;
         QString error;
         QStringList warnings;
         if (loadTransitionFile(fi.absoluteFilePath(), f, &error, &warnings)) {
             f.filePath = fi.absoluteFilePath();
-            impl_->files.push_back(std::move(f));
+            next.push_back(std::move(f));
         } else {
             qWarning("TransitionStore: skipping %s: %s",
                      qUtf8Printable(fi.absoluteFilePath()), qUtf8Printable(error));
@@ -196,6 +242,21 @@ void TransitionStore::reload()
             qWarning("TransitionStore: %s: %s",
                      qUtf8Printable(fi.absoluteFilePath()), qUtf8Printable(w));
     }
+    impl_->stamps = std::move(stamps);
+    if (impl_->watcher) {
+        // Include invalid files so a later correction is detected as well.
+        QStringList wanted = impl_->stamps.keys();
+        if (QDir(impl_->dir).exists()) wanted.append(impl_->dir);
+        const auto watched = impl_->watcher->files() + impl_->watcher->directories();
+        for (const auto& path : watched)
+            if (!wanted.contains(path)) impl_->watcher->removePath(path);
+        for (const auto& path : wanted)
+            if (!watched.contains(path)) impl_->watcher->addPath(path);
+    }
+    if (digests == impl_->digests) return;
+    emit aboutToChange();
+    impl_->files = std::move(next);
+    impl_->digests = std::move(digests);
     emit changed();
 }
 

@@ -227,6 +227,10 @@ private:
         bool on = false;
         double wet = 0.5;
         double beats = 0.5;
+        TrackDataPtr track;
+        PerformancePadMode mode = PerformancePadMode::PadFx1;
+        bool restoreStems = false;
+        std::array<double, 4> stems {1, 1, 1, 1};
     } padFxSnapshot_;
 
     // Loop / beat-jump row (below the hot cues).

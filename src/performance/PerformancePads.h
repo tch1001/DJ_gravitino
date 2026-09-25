@@ -28,6 +28,8 @@ enum class PerformancePadAction {
     KeyboardNote,
     KeyShift,
     SavedLoop,
+    VocalEcho,
+    InstrumentalEcho,
 };
 
 // UI-independent assignment state. Unsupported actions are still represented
@@ -47,6 +49,7 @@ const char* performancePadModeKey(PerformancePadMode mode);
 const char* performancePadModeLabel(PerformancePadMode mode);
 bool performancePadModeIsShifted(PerformancePadMode mode);
 bool performancePadActionIsSupported(PerformancePadAction action);
+bool performancePadActionIsStemEcho(PerformancePadAction action);
 
 PerformancePadAssignment defaultPerformancePadAssignment(
     PerformancePadMode mode, int pad);

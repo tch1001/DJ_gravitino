@@ -6,6 +6,175 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-25 (codex): **Transition-pair analysis priority and Status.**
+  Cached catalog profiles let transition selection find both endpoints before
+  background decoding finishes. Both are promoted to the interactive queue;
+  the owned pending pair loads only after fresh matching of both decoded assets.
+  Intervening deck changes/playback, selections, rescans and preview leases
+  cancel unsafe pending loads. Transition Status shows both endpoint progress
+  and errors, or Ready (2/2 songs). Does not alter grids, cues or recipes.
+  Regression coverage verifies both urgent jobs, no half-loaded pair, fresh
+  validation and readiness updates alongside the existing deferred-load tests.
+
+- 2026-09-25 (codex): **Separate draft 4 with user-specified stem stages.**
+  Created draft 4.transition with a new UUID from the user's latest edited
+  draft 3 (634f38aa…). Anchor is canonical Not Like Us beat 102.40: bass/drums
+  off at +0, melody off at +4 (106.40), half-beat vocal echo at +8 (110.40).
+  Retained the user's echo-wetness ramp, late FX-off and long fader fade;
+  shifted the remaining schedule +7.6 beats to preserve original song-relative
+  timing. Nor slice, hold, all 160 notes, pitches/gates/velocities and Gasolina
+  alignment unchanged. Private engine render asserts each staged stem/FX state,
+  incoming launch, post-stop sampler clock and final handoff. Peak .7600;
+  54.316 s MP3: Recordings/not-like-us-to-gasolina-draft-4-staged-exit-20260925.mp3.
+  QA/source snapshot: /tmp/gravitino-draft4.H5cH4F. No software, existing recipe,
+  grid or hot-cue edits; no restart. Library discovers draft 4 automatically.
+
+- 2026-09-25 (codex): **Draft 3 earlier vocal-echo entrance (recipe only).**
+  User disliked the abrupt full-mix opening sampler hit. Authorized revision
+  starts four beats earlier at canonical outgoing beat 110, fades instrumental
+  stems out over one beat, then enables half-beat echo on vocals only. Removed
+  the opening sampler retrigger; original vocal fades/stops at +4.48 while the
+  echo rings into a gentler 180 ms hold attack. Fader fades by +8, before rapid
+  tones; FX/stems restored while stopped. Four-beat nor opening remains; rapid
+  passes now start at +8/+24, Gasolina PLAY +23.837692984435865. The 160 rapid
+  notes, slice, pitch/gates/velocity, effects and relative incoming timing are
+  unchanged. Prepared outgoing stems are required; cached stems were used for
+  a real-engine render with stem isolation, echo/tail, stopped-dry, sampler-clock
+  and handoff assertions. Five targeted tests pass. No application code/grid/
+  permanent cue changes or restart. Previous recipe backed up under
+  ~/.gravitino/backups/draft3-vocal-echo.usb5jc; QA in
+  /tmp/gravitino-vocal-echo.xeTLCT. Updated 54.316 s WAV/MP3:
+  Recordings/not-like-us-to-gasolina-draft-3-vocal-echo-20260925.{wav,mp3}.
+
+- 2026-09-25 (codex): **Live transition-file refresh and approved draft 3 hold.**
+  Store file/directory watching + metadata fallback/hash caching handle external
+  edits, atomic replacement, rename/delete and invalid-file repair. Model reset
+  begins before store replacement; panel owns recipe snapshots and defers updates
+  until finish/abort. Clean idle editors reload while retaining their cursor;
+  unsaved/staged edits and audition are preserved, with explicit Reload Saved and
+  existing conflict-safe saving. Source files are never written by reload.
+  Fractional canonical offsets now phase editor beat grids correctly; fixed
+  negative local beats receiving erroneous downbeat emphasis in detail waveform.
+  User saved/closed Gravitino and explicitly authorized Not Like Us downbeat at
+  canonical 10.40: effective firstBeatSec 7.1917696288176325, catalog offset 10.4,
+  BPM unchanged. All canonical timestamps, permanent cues/loops, detector evidence
+  and other song grids preserved. Original bytes backed up at
+  ~/.gravitino/backups/draft3-hold-grid.MPeN7d; QA in
+  /tmp/gravitino-live-reload.C1RyYo. Draft 3 retains slice 114–114.5 and note pitches:
+  original syllable once through the existing quiet echo/reverb, exposed vowel
+  hold for four beats, rapid tone passes at 4 and 20, no drums-only lead-in.
+  Gasolina PLAY at 19.837692984435865 includes measured key-lock attack latency
+  at the authored BPM. Separate actual-engine renders reduced repeating attack
+  phase difference from ~37 ms to <1 ms (individual leading-edge median ~2.5 ms;
+  vocals/weaker attacks have larger detection uncertainty, not a perfect guarantee).
+  The 34-beat song lead-in remains in the share preview. No format-schema change.
+  Full build, all 44 ctests, isolated selftest and compact editor capture pass.
+  Integrity comparison of 565 existing cache/transition files changed only the
+  approved draft 3 and Not Like Us cache; catalog semantic diff is restricted to
+  that asset's anchor/offset. Export: Recordings/not-like-us-to-gasolina-draft-3-
+  four-beat-hold-20260925.{wav,mp3}, 54.316 s. Other drafts/hot cues untouched.
+
+- 2026-09-25 (codex): **User rejected draft 3's drums-only lead-in.**
+  Restored the pre-drums full Gasolina entrance exactly: transition beat 16,
+  source beat 0, all stems at unity, no stem-restore events at beat 32. Kept the
+  revised 160 notes, effect tails and background hold/duck unchanged. No app-code
+  changes or restart in this turn. Backup of the drums version:
+  ~/.gravitino/backups/draft3-no-drum-leadin.QBqu4b/draft 3.before.transition.
+  Recipe-only QA/preview: /tmp/gravitino-tone-no-drums.VRQvNU. This supersedes
+  the drums arrangement described in the previous entry; it is a restoration
+  of the requested entrance, not another attack-alignment adjustment.
+
+- 2026-09-25 (codex): **Short-note tails and corrected draft 3 rhythm.**
+  Added optional `TonePlayEffects`/`tone-play-effects.v1`: independent quiet
+  echo/reverb returns preserve the dry sample, bounded tails extend validation,
+  and optional smoothed hold ducking lowers only the sustained background under
+  short hits. Editor SHORT-NOTE TAILS exposes all settings with Undo and audition;
+  preview/Perform/export share the sampler, with FX allocated/initialized off
+  the callback. Unknown fields survive and absent/disabled effects preserve old
+  audio. Tests cover dry C-sharp preservation, tails, tempo, block invariance,
+  background isolation/ducking, capabilities/limits, real editor-ring parity,
+  UI/Undo and WAV export. Full build, all 44 ctests, selftest and compact editor
+  captures pass. A new test initially held a dangling QJsonValueRef; fixed it to
+  own a QJsonValue, then reran the entire suite successfully.
+  With explicit user approval, revised only draft 3: two exactly 16-beat passes
+  of the measured Gasolina attack pattern (160 short notes), drums-only at 16,
+  full incoming stems at 32, quiet tails and 90% foreground-triggered hold duck.
+  Original slice/root/short gate and C/C-sharp pitch contour stay intact. Incoming
+  recipe source offset aligns its drum build; neither song's grid was changed.
+  Prior check measured deck-clock phase only, NOT musical attack accuracy. Do
+  not mistake it for onset validation again: this audit used the melodic stem's
+  smoothed leading edges and repeating two-beat rhythm (not loudness peaks).
+  Exact pre-edit backup: ~/.gravitino/backups/draft3-refine.UxWYiA.
+  QA scripts/candidate/actual-engine WAV and captures:
+  /tmp/gravitino-tone-refine.k8Y4CI. Render peak .7564; 32.038 s audition, with
+  explicit no-opening-loop/drums-only/full-stem-restoration assertions.
+  Post-save hashes verify all other 549 transition/cache files are byte-identical;
+  only the authorized draft 3 differs. Existing unrelated dirty work
+  and tmp/ are preserved. No commit/push requested. Running app still needs
+  the new build; restart approval was requested, not assumed.
+
+- 2026-09-25 (codex): **Independent sustained vowel beneath tone-play hits.**
+  Added optional typed `tone_play.sustain` and `tone-play-sustain.v1`, retaining
+  unknown fields and refusing missing capabilities. Existing one-shot notes are
+  unchanged. One dedicated background voice loops a pre-crossfaded vowel region
+  inside the original slice with independent beat/length, pitch, level and
+  attack/release; it never loops deck transport or stacks retriggers. Preview,
+  Perform and export share the allocation-free sampler path. Editor has a
+  BACKGROUND HOLD panel, purple source-region selection and timeline band,
+  isolated Preview hold and ordinary combined Preview mix. Slice/key audition
+  explicitly excludes the background. Edits are undoable and preserve the
+  foreground pattern. Compact windows scroll the sampler workspace instead of
+  compressing fields into the piano roll. Full build, all 44 ctests, isolated
+  selftest and 1280×820 top/bottom editor captures pass. Tests cover independent
+  layer summation, long holds, smooth boundaries, callback-block invariance,
+  tempo/loop/stop continuity, capability/unknown-field round trips, source-region
+  drag/Undo, isolated audition, real editor-ring parity and WAV metadata/export.
+  Applied only the user-authorized draft 3: a quiet hold at beats 0.4–32 inside
+  the original 114–114.5 slice, keeping all 118 short hits and handoff unchanged.
+  The other 498 transition/cache files are byte-identical. Exact backup:
+  ~/.gravitino/backups/draft3-sustain.nIfQRF; QA/audio artifacts:
+  /tmp/gravitino-tone-sustain-qa.nsUGMS. Existing dirty work and repo tmp/ remain
+  untouched; no commit/push requested. App gracefully restarted with this build
+  on 2026-09-25 after user approval; draft 3's saved bytes stayed unchanged.
+
+- 2026-09-25 (codex): **Tone slice navigation and multi-bar note editing.**
+  Added separate source-waveform −/+ zoom, Fit slice, Whole song, pointer-anchored
+  Command-wheel zoom, pan scrolling and a scrollbar; START/END handles, fractional
+  grid labels and the duration readout make close trimming explicit. Existing
+  slice opens fitted; enabling a new instrument also fits it. Piano ruler drag
+  selects bars, empty-area drag selects a rectangle, Shift-click changes membership.
+  Command-C/V and Copy/Paste retain the selected range's silence and note timing,
+  pitch, gate, velocity and extra fields. Repeated paste advances by range length;
+  grouped move/resize/delete/duplicate are undoable. Clipboard parsing is bounded
+  and uses tone validation. Added 1/32 and 1/64 beat plus Off snap, removed the
+  quarter-beat drawing minimum, and raised piano zoom to 1024 px/beat. The existing
+  1/64-beat schema limit and playback remain unchanged. Prior CUSTOM echo patch
+  remains in the worktree; no user audio, recipe, grid or permanent cue edited.
+  Full build, all 44 ctests, isolated selftest and the 1280×820 themed editor
+  capture pass, including anchor-preserving zoom, non-mutating pan, trim/Undo,
+  forward/reverse bar selection, repeated paste, rectangle/Shift selection,
+  malformed clipboard refusal and drawing/resizing short gates. Gravitino was
+  gracefully restarted with this build. No commit/push requested for this patch.
+  QA artifacts: /tmp/gravitino-tone-selection-qa.32Ikge.
+
+- 2026-09-24 (codex): **CUSTOM Vocal Echo / Instrumental Echo and editor wheel axes.**
+  NORMAL CUSTOM pad right-click menus now select either stem-echo action or the
+  existing saved-loop/audio behavior, without clearing saved loops/cues or audio
+  assignments. Hold isolates vocals or instruments and applies echo; release
+  restores the prior FX and fractional stem levels. Wet/beat settings are editable.
+  Missing stems refuse the action with preparation guidance. Every underlying
+  FX/stem press and restoration travels through ControlBus with a pad input hint;
+  the recorder preserves discrete macro steps instead of thinning/coalescing a
+  quick tap or smearing restoration into a ramp. Existing transition controls and
+  YAML format are unchanged. Mode/bank changes release effects; track reload
+  discards stale restoration. Main timeline and tone piano roll use vertical wheel,
+  Shift-horizontal and Command-zoom, preserving native trackpad axes. Synthetic
+  tests exercise actual assignment menus, persisted settings, missing stems,
+  recording/YAML/player round trip, prior enabled FX, cue/loop preservation,
+  reload safety and both scroll axes. Full build, all 44 ctests and isolated
+  selftest pass; QA output: /tmp/gravitino-stem-echo-qa.tZuwiV. No user recipe,
+  audio, grid or cue data modified. App not restarted; patch not committed/pushed.
+
 - 2026-09-24 (codex): **Tone-play sampler and piano-roll editor.** Added an
   optional typed `performance.tone_play` with required `tone-play.v1`, lossless
   extra fields, finite/range/polyphony validation and non-destructive legacy

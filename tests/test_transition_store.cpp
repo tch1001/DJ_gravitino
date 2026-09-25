@@ -1,9 +1,15 @@
+// Protect external file updates without ever opening the user's library.
 #include "library/TrackLibrary.h"
 
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QThread>
 #include <QFileInfo>
 #include <QTemporaryDir>
 
 #include <cstdio>
+#include <algorithm>
 
 namespace {
 int failures = 0;
@@ -15,8 +21,9 @@ int failures = 0;
 } while (0)
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    QCoreApplication app(argc, argv);
     using namespace gvt;
     QTemporaryDir dir;
     CHECK(dir.isValid());
@@ -187,6 +194,50 @@ int main()
     CHECK(upgradedLoop.requirements.contains(
         QStringLiteral("temporary-loops.v1")));
     CHECK(QFileInfo::exists(legacyPath));
+
+    // Edits/replacements/renames/deletes are picked up by the event loop.
+    const auto waitFor = [&](auto condition) {
+        QElapsedTimer elapsed; elapsed.start();
+        while (!condition() && elapsed.elapsed() < 3500) {
+            app.processEvents(); QThread::msleep(10);
+        }
+        CHECK(condition());
+    };
+    const auto named = [&](const QString& name) {
+        return std::any_of(store.all().begin(), store.all().end(),
+            [&](const auto& f) { return f.name == name; });
+    };
+    GvtFile external = rawLoop;
+    external.name = "Live external";
+    external.id.clear();
+    const auto externalPath = dir.filePath("external.transition");
+    CHECK(transitionSaveFile(external, externalPath, &error));
+    waitFor([&] { return named("Live external"); });
+    int resets = 0;
+    QObject::connect(&store, &TransitionStore::changed, &store, [&] { ++resets; });
+    store.reload(); CHECK(resets == 0); // unchanged bytes never churn UI models
+    external.name = "Updated atomically";
+    CHECK(transitionSaveFile(external, externalPath, &error));
+    waitFor([&] { return named(external.name); });
+    CHECK(!named("Live external"));
+    // In-place writes must also trigger, not only directory changes.
+    external.name = "Updated in place";
+    QFile disk(externalPath); CHECK(disk.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    disk.write(transitionSerialize(external).toUtf8()); disk.close();
+    waitFor([&] { return named(external.name); });
+    CHECK(disk.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    disk.write("format: [unfinished"); disk.close();
+    waitFor([&] { return !named(external.name); }); // invalid file cannot launch stale audio
+    CHECK(transitionSaveFile(external, externalPath, &error));
+    waitFor([&] { return named(external.name); });
+    const auto movedPath = dir.filePath("external-renamed.transition");
+    CHECK(QFile::rename(externalPath, movedPath));
+    waitFor([&] {
+        return std::any_of(store.all().begin(), store.all().end(),
+            [&](const auto& f) { return f.filePath == movedPath; });
+    });
+    CHECK(QFile::remove(movedPath));
+    waitFor([&] { return !named(external.name); });
 
     qunsetenv("GRAVITINO_TRANSITIONS_DIR");
     if (failures) return 1;

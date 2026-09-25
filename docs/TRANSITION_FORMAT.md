@@ -369,7 +369,7 @@ MIDI pitch 60 is C4. `root_note` means the key that plays the snippet unchanged;
 it is chosen by the author, not an automatic pitch estimate. Pitch shifts use
 one-shot resampling: one octave higher plays twice as fast, one octave lower
 half as fast. Notes end at the earlier of their gate or the slice's end. This
-version does not independently time-stretch or loop sustained notes. A short
+one-shot mode does not time-stretch or sustain the foreground notes. A short
 attack/release suppresses clicks; velocity and gain multiply sample amplitude.
 The layer joins the outgoing master/PFL routes **after** channel DSP and fader,
 before crossfader/master limiting, with its own gain. Existing outgoing fader,
@@ -388,11 +388,83 @@ values must be finite. Explicit transition end cannot precede enabled note
 ends. Unknown pattern/note fields round-trip losslessly. Piano-roll gestures
 and preview state are derived UI data, never serialized.
 
+### Independent background vowel (`tone-play-sustain.v1`)
+
+An optional `performance.tone_play.sustain` adds one held background voice while
+the existing piano-roll notes retain their one-shot timing, pitch and velocity.
+It requires `tone-play-sustain.v1` even when disabled; older builds refuse
+playback rather than silently omit the held layer. The document version remains 1.
+
+```yaml
+sustain:
+  enabled: true
+  at_beat: 0.4
+  duration_beats: 31.6
+  loop_start_beat: 32.25
+  loop_end_beat: 32.4
+  pitch: 60
+  gain: 0.3
+  crossfade_ms: 15
+  attack_ms: 50
+  release_ms: 150
+```
+
+IN/OUT are canonical outgoing-song beats wholly inside the existing source
+slice. Only this steady vowel region repeats, starting inside the vowel rather
+than retriggering the slice's consonant. Transition start/length govern one
+continuous voice. Its gain multiplies the instrument gain, independently of
+foreground velocity. Pitch uses the same root as the notes. Attack/release are
+inside the authored duration, so there is no untracked tail after the end.
+Loop joins are prepared with linear crossfades off the audio thread; crossfade
+length is capped to half the selected region. Playback uses periodic,
+band-limited resampling and never wraps either deck's transport.
+
+Limits: start 0–16384 beats, duration 1/64–256 beats, pitch C1–C7 within two
+octaves of root, gain 0–1, crossfade 1–100 ms, attack/release 1–2000 ms.
+The region must span at least 0.001 canonical beat and two decoded milliseconds.
+Unknown sustain fields round-trip. Enabled holds participate in transition-end
+validation and optional outgoing replacement, but consume a separate fixed voice,
+leaving all 16 foreground voices available. Existing documents without this
+object serialize and sound unchanged. This is sustain looping, not granular
+freeze or independent time stretching; unsuitable vowel boundaries can still
+sound buzzy and should be auditioned.
+
+### Independent short-note effects (`tone-play-effects.v1`)
+
+Optional `performance.tone_play.effects` adds parallel, wet-only returns to the
+foreground notes. It never processes the held vowel or the original decks:
+
+```yaml
+effects:
+  enabled: true
+  echo: 0.06
+  reverb: 0.10
+  echo_beats: 0.25
+  tail_beats: 4
+  sustain_ducking: 0.9
+```
+
+Echo/reverb are independent 0–1 return gains, not a dry/wet crossfade. Echo
+spacing is 0.25–4 transition beats and follows the effective tempo. Existing
+DeckFx feedback/decay is reused. Tail length (0.25–16 beats) bounds playback
+after the final foreground gate, fading out over the last quarter beat. This
+end participates in transition validation and replacement-mode duration.
+Optional `sustain_ducking` defaults to zero (0–1); it lowers only the background
+hold while a foreground voice plays, with approximately 3 ms attack and 50 ms
+recovery. The original short-note pitch, gate and resampler remain unchanged.
+
+All numbers must be finite. Unknown fields round-trip, and presence requires
+`tone-play-effects.v1`, including disabled objects, so older players cannot
+silently discard the effects. Documents without effects retain their old sound.
+The editor exposes these settings in SHORT-NOTE TAILS, with Undo and isolated
+slice/key audition including tails. Preview hold stays dry.
+
 ## Compatibility and safe parsing
 
 `requires` declares semantics necessary for correct playback. This build
 supports `timeline.v1`, `temporary-cues.v1`, `temporary-loops.v1`,
-`timeline-end.v1`, and `tone-play.v1`. Unknown required capabilities allow inspection but block
+`timeline-end.v1`, `tone-play.v1`, `tone-play-sustain.v1`, and
+`tone-play-effects.v1`. Unknown required capabilities allow inspection but block
 Perform/Tutorial with a clear
 compatibility error.
 
@@ -417,9 +489,13 @@ as one undo step.
 Autosave drafts live outside the transition library under
 `~/.gravitino/drafts`. Saving a legacy file, changing either canonical
 endpoint, or choosing Save As always creates a new UUID-backed
-`.transition`; the source is retained. If the source changes on disk while the
-editor is open, the editor offers to reload it or save the working copy as a
-new edge. Unknown YAML mappings/extensions survive both inspector and source
+`.transition`; the source is retained. External changes to `.transition` and
+`.gvt` files refresh the library automatically without restarting. Clean idle
+editors reload too; unsaved/unapplied edits, focused inputs and running/paused
+preview remain intact. **Reload Saved** explicitly replaces the working copy
+after confirmation; saving a conflicted copy still offers reload or Save As.
+Armed/running performances retain their original snapshot until finish/abort.
+Unknown YAML mappings/extensions survive both inspector and source
 round trips.
 
 Additive optional fields may be introduced within version 1. Unknown mapping

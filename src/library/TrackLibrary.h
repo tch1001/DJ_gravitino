@@ -27,6 +27,9 @@ public:
     };
     int  trackCount() const;
     TrackDataPtr trackAt(int row) const;     // null while still analyzing
+    // Ready track or cached identity, for discovery/queuing only. Playback must
+    // use trackAt() and revalidate matching after analysis succeeds.
+    TrackDataPtr profileAt(int row) const;
     QString pathAt(int row) const;
     QStringList compatibleAssetPaths(int row) const;
     std::vector<CatalogTransitionLink> transitionsForTrack(int row) const;
@@ -88,6 +91,8 @@ public:
     int upgradePortableSavedLoops(QStringList* upgradedPaths = nullptr,
                                   QStringList* errors = nullptr);
 signals:
+    // Emitted before all()/matching() pointers are invalidated by a reload.
+    void aboutToChange();
     void changed();
 private:
     struct Impl; std::unique_ptr<Impl> impl_;

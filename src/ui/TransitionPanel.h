@@ -125,7 +125,7 @@ private:
         Raw,
     };
     struct Match {
-        const GvtFile* file = nullptr;
+        std::shared_ptr<const GvtFile> file;
         int fromDeck = 0;          // physical deck holding the [from] track
         MatchQuality quality = MatchQuality::None;
     };
@@ -136,6 +136,7 @@ private:
         Done,
         Blocked,
     };
+    bool deferredStoreRefresh_ = false;
     void showBanner(const QString& text, const QColor& color, int timeoutMs);
     int selectedMatch() const;     // index into matches_, -1 if none
     bool replayLifecycleMatches(const Match& match) const;

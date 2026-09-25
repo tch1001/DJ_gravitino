@@ -547,8 +547,12 @@ TransitionPanel::TransitionPanel(ControlBus* bus, AudioEngine* engine,
     connect(toleranceBtn_, &QPushButton::clicked, this,
             &TransitionPanel::onEditSetupTolerance);
 
-    connect(store_, &TransitionStore::changed, this,
-            &TransitionPanel::refreshMatches);
+    connect(store_, &TransitionStore::changed, this, [this] {
+        if (player_->isActive()) {
+            deferredStoreRefresh_ = true;
+            emit statusMessage(tr("Transition files updated. The armed/running take keeps its original version until it finishes or is aborted."), 6000);
+        } else refreshMatches();
+    });
     connect(recorder_, &TransitionRecorder::eventCaptured, this,
             &TransitionPanel::onEventCaptured);
     connect(player_, &TransitionPlayer::progressChanged, this,
@@ -594,6 +598,8 @@ void TransitionPanel::setHardwareInputFrozen(bool frozen)
 
 void TransitionPanel::refreshMatches()
 {
+    if (player_->isActive()) { deferredStoreRefresh_ = true; return; }
+    deferredStoreRefresh_ = false;
     QScopedValueRollback<bool> refreshing(refreshingMatches_, true);
     const QString restorePath = selectedPath_;
     matches_.clear();
@@ -627,7 +633,7 @@ void TransitionPanel::refreshMatches()
     for (const auto& o : orderings) {
         for (const GvtFile* f : store_->matching(*o.from, *o.to)) {
             Match m;
-            m.file = f;
+            m.file = std::make_shared<GvtFile>(*f);
             m.fromDeck = o.fromDeck;
             m.quality = std::min(matchTrack(f->from, *o.from),
                                  matchTrack(f->to, *o.to));
@@ -2660,6 +2666,8 @@ void TransitionPanel::onFinished(bool completed)
                   .arg(replayDirectionText(matches_[(size_t)idx]))
             : (completed ? tr("Transition done") : tr("Transition stopped")),
         completed ? 6000 : 3000);
+    if (deferredStoreRefresh_)
+        QTimer::singleShot(0, this, &TransitionPanel::refreshMatches);
 }
 
 void TransitionPanel::observeTutorialHardwareControl(

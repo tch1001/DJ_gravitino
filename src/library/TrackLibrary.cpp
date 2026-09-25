@@ -50,6 +50,7 @@ struct Row {
     double progress = 0.0;
     bool active = false;
     QString error;
+    TrackDataPtr profile;
 };
 
 struct LibState {
@@ -517,6 +518,7 @@ void TrackLibrary::scanFolder(const QString& dirIn)
     for (const QString& f : files) {
         st->pending.push_back(static_cast<int>(st->rows.size()));
         st->rows.push_back(Row{f});
+        st->rows.back().profile = st->catalog.assetProfile(f);
     }
     st->total = (int)files.size();
     st->analyzed = 0;
@@ -638,6 +640,14 @@ TrackDataPtr TrackLibrary::trackAt(int row) const
     auto st = state(this);
     if (row < 0 || row >= (int)st->rows.size()) return nullptr;
     return st->rows[(size_t)row].track;
+}
+
+TrackDataPtr TrackLibrary::profileAt(int row) const
+{
+    const auto st = state(this);
+    if (row < 0 || row >= static_cast<int>(st->rows.size())) return {};
+    const auto& item = st->rows[row];
+    return item.track ? item.track : item.profile;
 }
 
 QString TrackLibrary::pathAt(int row) const

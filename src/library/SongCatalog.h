@@ -23,6 +23,8 @@ public:
     explicit SongCatalog(const QString& path = {});
 
     QString path() const;
+    // Cached identity only; never proof that PCM is ready or the file unchanged.
+    std::shared_ptr<TrackData> assetProfile(const QString& path) const;
     QString registerAsset(const TrackData& track, QString* error = nullptr);
     bool confirmBinding(const QString& assetPath, const QString& songId,
                         double canonicalBeatOffset,

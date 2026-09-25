@@ -431,7 +431,7 @@ void DetailWaveformView::drawLane(QPainter& p, const QRect& r, int deck)
         for (double b = std::max(0.0, firstVisibleBeat);; b += 1.0) {
             const double sec = t->secAtBeat(b);
             if (sec > rightSec) break;
-            const bool strong = std::fmod(b, 4.0) < 0.5;
+            const bool strong = std::llround(b) % 4 == 0;
             QColor grid(255, 255, 255, strong ? 185 : 82);
             QPen gridPen(grid);
             gridPen.setWidthF(strong ? 1.8 : 1.0);

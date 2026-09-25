@@ -74,6 +74,7 @@ struct Workers {
             track->title = QStringLiteral("Track %1").arg(n);
             track->pcm.resize(128, .1f);
             track->bpm = 120;
+            track->fingerprint = QStringLiteral("gvfp1:queue-%1").arg(n);
             progress(.99, QStringLiteral("Finishing"));
             return track;
         };
@@ -122,6 +123,61 @@ void load_requests_skip_background_work_and_do_not_duplicate(const QString& root
         return true;
     }));
     for (int i = 0; i < 8; ++i) CHECK(work.calls[i] == 1);
+}
+
+void transition_click_prioritizes_both_songs_and_waits_for_verified_audio(const QString& root)
+{
+    using namespace gvt;
+    Workers work;
+    ControlBus bus; AudioEngine engine(&bus);
+    TrackLibrary library; TransitionStore transitions;
+    const auto dir = fixtures(root, "transition-priority", 0, 9);
+    for (int n : {7, 8}) {
+        TrackData profile;
+        profile.filePath = dir + QStringLiteral("/%1.wav").arg(n, 2, 10, QLatin1Char('0'));
+        profile.title = QStringLiteral("Track %1").arg(n);
+        profile.fingerprint = QStringLiteral("gvfp1:queue-%1").arg(n);
+        profile.bpm = 120; profile.durationSec = 16;
+        CHECK(!library.songCatalog()->registerAsset(profile).isEmpty());
+    }
+    detail::setLibraryAnalyzerForTesting(library, work.analyzer());
+    library.scanFolder(dir);
+    GvtFile file;
+    file.name = "Priority both sides"; file.masterBpm = 120; file.endBeat = 8;
+    file.from.title = "Track 7"; file.from.fingerprint = "gvfp1:queue-7";
+    file.to.title = "Track 8"; file.to.fingerprint = "gvfp1:queue-8";
+    file.from.bpm = file.to.bpm = 120; file.from.durationSec = file.to.durationSec = 16;
+    QString error; CHECK(!transitions.save(file, &error).isEmpty());
+    LibraryWidget widget(&library, &engine, &transitions);
+    auto* tab = widget.findChild<QPushButton*>("transitionLibraryTab");
+    auto* table = widget.findChild<QTableView*>("transitionLibraryTable");
+    CHECK(tab && table);
+    if (!tab || !table) { work.releaseAll(); return; }
+    tab->click();
+    int selected = 0;
+    QObject::connect(&widget, &LibraryWidget::transitionSelected, &widget,
+        [&](const QString& path) { if (!path.isEmpty()) ++selected; });
+    const auto click = [&] {
+        CHECK(QMetaObject::invokeMethod(&widget, "onTransitionClicked", Qt::DirectConnection,
+            Q_ARG(QModelIndex, table->model()->index(0, 0))));
+    };
+    CHECK(table->model()->headerData(7, Qt::Horizontal).toString() == "Status");
+    CHECK(table->model()->index(0, 7).data().toString().contains("Queued"));
+    click();
+    CHECK(until([&] { return work.calls[7] == 1; }));
+    CHECK(!engine.deck(0).track() && !engine.deck(1).track() && selected == 0);
+    CHECK(table->model()->index(0, 7).data().toString().contains("priority"));
+    work.released[7] = true;
+    CHECK(until([&] { return work.calls[8] == 1; }));
+    CHECK(!engine.deck(0).track() && !engine.deck(1).track());
+    work.released[8] = true;
+    CHECK(until([&] { return selected == 1; }));
+    CHECK(engine.deck(0).track() == library.trackAt(7));
+    CHECK(engine.deck(1).track() == library.trackAt(8));
+    CHECK(table->model()->index(0, 7).data().toString() == "Ready (2/2 songs)");
+    work.releaseAll();
+    CHECK(until([&] { return bool(library.trackAt(6)); }));
+    QString removeError; CHECK(transitions.deleteTransition(file, &removeError));
 }
 
 void errors_retry_and_rescans_cancel_old_results(const QString& root)
@@ -308,6 +364,7 @@ int main(int argc, char** argv)
     qputenv("GRAVITINO_CATALOG_PATH", temporary.filePath("catalog.json").toUtf8());
     qputenv("GRAVITINO_TRANSITIONS_DIR", temporary.filePath("transitions").toUtf8());
     load_requests_skip_background_work_and_do_not_duplicate(temporary.path());
+    transition_click_prioritizes_both_songs_and_waits_for_verified_audio(temporary.path());
     errors_retry_and_rescans_cancel_old_results(temporary.path());
     queued_loads_follow_the_requested_song_not_selection(temporary.path());
     real_analysis_progress_does_not_change_audio_or_grids(temporary.path());

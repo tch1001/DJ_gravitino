@@ -243,6 +243,25 @@ downbeat correction is never replaced by an older recipe's reference downbeat.
 
 ## Transition record/replay
 
+`TransitionStore` watches both supported extensions and the library directory,
+debounces file events (including atomic replacement saves), and uses a two-second
+metadata fallback. Content hashes avoid reparsing unchanged recipes and needless
+model resets. `aboutToChange` precedes vector replacement, then `changed` refreshes
+the library/graph. Invalid updated files are excluded rather than launching an old
+cached recipe. TransitionPanel owns copies, not pointers into the store, and defers
+its refresh while armed/running until finish/abort. Editor preview already owns its
+take; live reload never changes that audio graph. A clean idle editor reloads saved
+changes, preserving the cursor; dirty/staged edits, focused fields and active or
+paused audition defer to the explicit **Reload Saved** action with confirmation.
+Save-time conflict detection remains in place. None of this writes source recipes.
+
+Canonical coordinates and the local grid's downbeat phase are distinct: a local
+asset may carry a fractional `canonicalBeatOffset`. Timeline/sample-editor grids
+draw the actual local beat lines at that offset (including four-beat emphasis),
+not fabricated integer canonical lines. An explicitly approved local anchor change
+can preserve every canonical source timestamp by changing the catalog offset by
+the same beat delta. Never perform that user-data repair implicitly.
+
 See `docs/TRANSITION_FORMAT.md` for the file format. Runtime flow:
 
 1. User loads track A (playing) and track B, arms **Record Transition**.
@@ -366,6 +385,17 @@ transition files, catalog matching rules and cache schema are unchanged.
 This is queue responsiveness, not lazy loading: directory discovery is still
 synchronous, and each analyzed track is still fully decoded into memory.
 
+Transition selection uses `TrackLibrary::profileAt` / `SongCatalog::assetProfile`
+to resolve already-catalogued endpoints before their PCM is ready. These cached
+profiles are identity hints, never playback-ready tracks. Clicking an edge
+prioritizes both songs and stages an owned recipe snapshot; neither stopped
+deck is replaced until both decoded tracks pass fresh endpoint matching.
+Changed/playing decks, a newer selection, a library/store reset, disabled live
+UI, or an editor lease cancel the pending pair. A matching playing outgoing
+deck can be retained. The transition table's Status column reports OUT/IN
+analysis progress, errors or missing matches, then Ready (2/2 songs); this is
+audio-analysis readiness, not a promise that optional stems are prepared.
+
 Library sorting uses typed model roles: BPM and duration compare numerically,
 while Camelot keys compare by their numeric wheel position and A/B suffix.
 The Library page's default-on **Recommended** mode is a view-only priority
@@ -433,8 +463,9 @@ rather than a linear anchor offset. Audible loop passes therefore unroll on the
 monotonic transition clock with repeated canonical beat grids and pass badges;
 stopped spans stay dark and unused saved loops remain definition overlays. The
 trace and repeat counts are editor data only and never change the serialized
-transition. Plain wheel input pans horizontally and Command-wheel zooms around
-the beat beneath the pointer. Selecting a timeline event opens its exact Events
+transition. Plain wheel input scrolls vertically, Shift-wheel pans horizontally,
+and Command-wheel zooms around the beat beneath the pointer. Native two-axis
+trackpad movement retains both axes. Selecting a timeline event opens its exact Events
 inspector and retains identity across chronological re-sorting. Placing the
 playhead between events selects and centers the next executable action; the
 same selection follows preview playback, while compatibility-only crossfader
@@ -534,12 +565,53 @@ prose/countdown/reset guidance lives in the transition control panel above
 CLOSE ENOUGH. Perform gives the guided run up to eight beats of pre-anchor
 countdown; Prime arms the same guidance against the live outgoing deck.
 
+### CUSTOM stem-echo actions
+
+NORMAL CUSTOM pads offer Saved loop / custom audio, Vocal Echo and Instrumental
+Echo through their right-click Pad action menu. The optional local assignment
+action is validated only for CUSTOM; older settings retain saved-loop/audio
+behavior. Switching actions preserves track cues, saved loops and assigned audio
+paths. TRANSITION CUSTOM remains protected. Wet level and beat length are
+configurable, defaulting to 50% and half a beat.
+
+Stem echo is momentary: Vocal Echo enables vocals and mutes melody/bass/drums;
+Instrumental Echo does the inverse. Press sends those four stem levels plus
+echo type, wet, beat length and enable through ControlBus. Release restores
+the previous FX settings and all four fractional stem levels. Switching modes,
+banks or overlapping FX pads also releases the held action. Reloading a track
+discards the old snapshot so a late release cannot overwrite the new deck's
+state. Without attached stems, the pad explains preparation and changes nothing.
+
+Every press/restoration action carries its pad input hint. The recorder retains
+these as discrete steps, including quick taps, and thins subsequent manual knob
+movements separately. Replay uses ordinary FX/stem controls, not a local pad
+assignment. No transition schema, control ID or capability change is needed.
+
 ### Tone-play authoring and shared sampler
 
 The editor's Tone play workspace separates a canonical outgoing-song source
 slice ruler from a transition-beat piano roll. Drag IN/OUT or type exact source
 beats; draw, move, resize, delete or duplicate notes and edit pitch/start/gate/
 velocity. The same document undo stack and guarded Save/Save As path own edits.
+Source navigation has independent −/+ zoom buttons, Fit slice, Whole song,
+pointer-anchored Command-wheel zoom, wheel panning and a horizontal scrollbar.
+Opening a stored slice or enabling a new instrument fits the source selection;
+navigation never changes its stored bounds. START/END handles remain separate
+even at overview scale; fractional grid labels and PCM detail support close
+trimming. The source header shows seconds and beats; Preview slice auditions
+the source at its original pitch, distinct from Preview mix.
+
+The piano roll supports ruler-drag bar ranges (using the outgoing meter),
+rectangle selection and Shift-click membership. Copy/Paste (Command-C/V) keeps
+relative timing, pitch, gates, velocity, unknown note fields and a selected
+range's leading/trailing silence. Paste begins at the cyan cursor and advances
+it by the copied range for repeated phrases. Duplicate, move, resize and Delete
+operate on the selected group; each edit is one undo command. Clipboard payloads
+are size-bounded and validated before mutation, and never replace source slice
+or instrument settings. Snap exposes 1, 1/2 … 1/64 beat and Off; drawing uses that
+length instead of imposing a quarter-beat gate. Piano zoom now reaches 1024 px
+per beat so a 1/64-beat note has a usable resize edge. Minimum note duration
+remains the existing 1/64 beat; no format or playback semantic change is needed.
 Piano keys audition one isolated pitched note through the exclusive MASTER
 lease; returning restores the prior editing cue and cannot write an automation
 take. Preview mix/C/Space reuse normal editor audition. No automatic migration,
@@ -574,6 +646,36 @@ shorten it. Preview, Perform and set export share this engine path, and the WAV
 manifest embeds the same YAML pattern. Tests protect fractional onset, octave
 pitch, block-size invariance, loop/stop clock continuity, safe replacement,
 both physical deck mappings, real editor-ring parity and exported audio/data.
+
+The optional `TonePlaySustain` adds one independent background vowel beneath
+the foreground notes, gated by `tone-play-sustain.v1`. Its canonical loop IN/OUT
+stay inside the original slice; transition start/length, pitch, gain and fade
+times are independent of the piano-roll events. Preparation crossfades one
+periodic cycle in immutable memory. The audio thread uses a dedicated single
+voice with periodic band-limited reads and sample-clock attack/release, never
+retriggering notes or changing deck loops. Both layers share the outgoing
+sampler clock and route. No allocation, locking or unbounded growth occurs in
+the callback. End/replace-outgoing calculations include enabled holds.
+
+The editor's BACKGROUND HOLD panel exposes these parameters, a purple vowel
+selection mode inside the amber source slice, and isolated Preview hold through
+the same MASTER lease. Preview slice/piano keys explicitly exclude the hold.
+A purple dashed band behind the green foreground notes shows the held interval.
+All hold edits use document validation/Undo; trimming the source so it excludes
+the hold is refused, not silently remapped. All-fields/YAML sees the same model.
+The background region and crossfade are authored, not automatic pitch detection;
+auditioning a steady vowel remains necessary for a natural result.
+
+Optional `TonePlayEffects` (`tone-play-effects.v1`) sends only foreground notes
+to independent echo/reverb returns using DeckFx, leaving the direct sample
+unchanged. Return storage/type selection and wet-only initialization happen in
+prepare, off the audio callback. Returns use the sampler's effective tempo and
+continue after gates until the bounded, faded tail end. The background hold
+never feeds either effect; optional smoothed foreground ducking lowers only
+that hold to reduce masking of short pitched notes. All instances remain local
+to the sampler and reset on prepare/clear. No shared deck FX state is modified.
+Editor slice/key audition includes the full tail; hold-only audition has no
+foreground sends. Perform, preview and offline export use the same path.
 
 ## Offline set recording
 

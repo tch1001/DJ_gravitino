@@ -127,6 +127,15 @@ SongCatalog::SongCatalog(const QString& path)
 
 QString SongCatalog::path() const { return impl_->path; }
 
+std::shared_ptr<TrackData> SongCatalog::assetProfile(const QString& path) const
+{
+    const auto asset = impl_->assets.value(normalizedPath(path)).toObject();
+    if (asset.isEmpty()) return {};
+    auto track = std::make_shared<TrackData>(trackFromAsset(asset));
+    track->songId = asset.value("songId").toString();
+    return track;
+}
+
 QString SongCatalog::registerAsset(const TrackData& track, QString* error)
 {
     const QString path = normalizedPath(track.filePath);

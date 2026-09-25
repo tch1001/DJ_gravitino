@@ -76,6 +76,12 @@ int main(int argc,char** argv)
     TonePlayPattern pattern;
     pattern.sourceStartBeat=1;pattern.sourceEndBeat=2;
     pattern.notes={{.125,.5,60,.8},{1,.5,67,.8}};
+    TonePlaySustain hold;
+    hold.loopStartBeat=1.25; hold.loopEndBeat=1.75; hold.duration=1.5;
+    pattern.sustain=hold;
+    pattern.effects=TonePlayEffects{};
+    pattern.effects->tailBeats=.5;
+    pattern.effects->sustainDucking=.8;
     toneRequest.transitions[0].tonePlay=pattern;
     const auto toneResult=renderTransitionSet(toneRequest,dir.filePath("tone-play.wav"));
     CHECK(toneResult.completed);
@@ -87,6 +93,10 @@ int main(int argc,char** argv)
     CHECK(transitionParse(toneYaml,embedded,&toneError));
     CHECK(embedded.tonePlay && embedded.tonePlay->notes.size()==2);
     CHECK(embedded.tonePlay && !embedded.tonePlay->replaceOutgoing);
+    CHECK(embedded.tonePlay && embedded.tonePlay->sustain);
+    CHECK(embedded.requirements.contains("tone-play-sustain.v1"));
+    CHECK(embedded.tonePlay && embedded.tonePlay->effects);
+    CHECK(embedded.requirements.contains("tone-play-effects.v1"));
     CHECK(!gvtSaveFile(toneRequest.transitions[0],dir.filePath("unsupported.gvt"),&toneError));
     CHECK(!QFileInfo::exists(dir.filePath("unsupported.gvt")));
     toneRequest.transitions[0].tonePlay->sourceStartBeat=-100;

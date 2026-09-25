@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include <optional>
 #include "../audio/AudioEngine.h"
 #include "../library/History.h"
 #include "../library/TrackLibrary.h"
@@ -68,6 +69,7 @@ private:
     void loadRowTo(int sourceRow, int deck);
     void finishPendingLoads(int sourceRow);
     void cancelUnsafePendingLoads();
+    void finishPendingTransition();
     int selectedTransitionSourceRow() const;
 
     TrackLibrary* library_;
@@ -108,6 +110,13 @@ private:
         TrackDataPtr previousTrack;
     };
     PendingLoad pendingLoads_[kNumDecks];
+    struct PendingTransition {
+        GvtFile file;
+        int rows[2]; // outgoing, incoming
+        int fromDeck;
+        TrackDataPtr previous[2]; // physical deck snapshots
+    };
+    std::optional<PendingTransition> pendingTransition_;
     bool transitionEditingEnabled_ = true;
     QString selectedTransitionPath_;
     TransitionGraphWindow* transitionGraphWindow_ = nullptr;

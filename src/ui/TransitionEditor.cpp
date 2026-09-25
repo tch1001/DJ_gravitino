@@ -221,6 +221,9 @@ QByteArray fileHash(const QString& path)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) return {};
+    if (file.size() > 2 * 1024 * 1024)
+        return QByteArray("oversized:") + QByteArray::number(file.size()) + ':' +
+            QByteArray::number(QFileInfo(file).lastModified().toMSecsSinceEpoch());
     return QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256);
 }
 
@@ -352,7 +355,8 @@ QStringList TransitionEditorDocument::validationErrors() const
         file_.masterBpm > 400.0)
         errors.append(tr("Master BPM must be between 20 and 400"));
     if (file_.events.empty() && (!file_.tonePlay || !file_.tonePlay->enabled ||
-                                 file_.tonePlay->notes.empty()))
+                                 (file_.tonePlay->notes.empty() &&
+                                  (!file_.tonePlay->sustain || !file_.tonePlay->sustain->enabled))))
         errors.append(tr("Add at least one timeline action or tone-play note"));
     if (file_.endBeat.has_value() &&
         (!std::isfinite(*file_.endBeat) || *file_.endBeat < latestBeat(file_)))
@@ -660,7 +664,8 @@ void TransitionTimelineView::drawWaveform(QPainter& painter,
     for (const TransitionTransportSpan& span : transportTrace_.spans(role)) {
         if (!span.audible || !(span.sourceEndBeat > span.sourceStartBeat))
             continue;
-        const double firstBeat = std::ceil(span.sourceStartBeat - 1.0e-7);
+        const double gridOffset = track ? track->canonicalBeatOffset : 0.0;
+        const double firstBeat = std::ceil(span.sourceStartBeat - gridOffset - 1.0e-7) + gridOffset;
         const double sourceLength = span.sourceEndBeat - span.sourceStartBeat;
         const double transitionLength = span.transitionEndBeat -
                                         span.transitionStartBeat;
@@ -675,7 +680,7 @@ void TransitionTimelineView::drawWaveform(QPainter& painter,
             const int x = kTimelineLeft + static_cast<int>(
                 std::lround(transitionBeat * pixelsPerBeat_));
             if (x < rect.left() || x > rect.right()) continue;
-            const auto rounded = static_cast<long long>(std::llround(beat));
+            const auto rounded = static_cast<long long>(std::llround(beat - gridOffset));
             const bool downbeat = rounded % 4 == 0;
             painter.setPen(QPen(QColor(255, 255, 255,
                                        downbeat ? 180 : 78),
@@ -685,7 +690,7 @@ void TransitionTimelineView::drawWaveform(QPainter& painter,
                 painter.setFont(QFont(font().family(), 7, QFont::DemiBold));
                 painter.setPen(QColor(235, 238, 244, 205));
                 painter.drawText(QRect(x + 3, rect.bottom() - 15, 62, 13),
-                                 QString::number(rounded));
+                                 QString::number(beat, 'f', std::abs(beat-std::round(beat)) < 1e-6 ? 0 : 2));
             }
         }
     }
@@ -1496,6 +1501,14 @@ TransitionEditorWindow::TransitionEditorWindow(
     previewTimer_->setTimerType(Qt::PreciseTimer);
     connect(previewTimer_, &QTimer::timeout, this,
             &TransitionEditorWindow::updatePreviewTick);
+    if (store_) connect(store_, &TransitionStore::changed, this, [this] {
+        // Store writes made by this editor update its baseline before this runs.
+        QTimer::singleShot(0, this, [this] { refreshSavedTransition(); });
+    });
+    auto* diskTimer = new QTimer(this);
+    diskTimer->setInterval(1000);
+    connect(diskTimer, &QTimer::timeout, this, [this] { refreshSavedTransition(); });
+    diskTimer->start();
 }
 
 TransitionEditorWindow::~TransitionEditorWindow()
@@ -1515,6 +1528,11 @@ void TransitionEditorWindow::buildUi()
     saveAsAction_ = toolbar->addAction(tr("Save As…"), this,
                                        &TransitionEditorWindow::saveAs);
     saveAsAction_->setShortcut(QKeySequence::SaveAs);
+    reloadSavedAction_ = toolbar->addAction(tr("Reload Saved"), this,
+        [this] { refreshSavedTransition(true); });
+    reloadSavedAction_->setObjectName("transitionEditorReloadSaved");
+    reloadSavedAction_->setEnabled(false);
+    reloadSavedAction_->setToolTip(tr("Reload a changed file. Unsaved edits are never discarded without confirmation."));
     toolbar->addSeparator();
     QAction* undo = document_->undoStack()->createUndoAction(this, tr("Undo"));
     QAction* redo = document_->undoStack()->createRedoAction(this, tr("Redo"));
@@ -1589,6 +1607,10 @@ void TransitionEditorWindow::buildUi()
     toneEditor_ = new TonePlayEditor(document_, workspaceTabs);
     workspaceTabs->addTab(toneEditor_, tr("Tone play • sampler / piano roll"));
     connect(toneEditor_, &TonePlayEditor::auditionRequested, this, &TransitionEditorWindow::auditionTone);
+    connect(toneEditor_, &TonePlayEditor::sustainAuditionRequested, this, [this] {
+        const auto &p = document_->file().tonePlay;
+        if (p && p->sustain && p->sustain->enabled) auditionSample(p->sustain->pitch, true);
+    });
     connect(toneEditor_, &TonePlayEditor::previewRequested, this, &TransitionEditorWindow::startOrPausePreview);
     connect(toneEditor_, &TonePlayEditor::cursorRequested, this, [this](double beat) {
         if (preview_->active || previewPaused_) endPreview(false);
@@ -1714,6 +1736,12 @@ void TransitionEditorWindow::buildUi()
     applyDetails->setObjectName(QStringLiteral("transitionEditorApplyDetails"));
     detailsLayout->addWidget(applyDetails);
     detailsLayout->addStretch();
+    const auto detailsEdited = [this] { if (!refreshing_) detailsPending_ = true; };
+    for (auto* edit : {nameEdit_, authorEdit_})
+        connect(edit, &QLineEdit::textEdited, this, detailsEdited);
+    connect(descriptionEdit_, &QPlainTextEdit::textChanged, this, detailsEdited);
+    for (auto* spin : {masterBpmSpin_, endBeatSpin_, outgoingAnchorSpin_, incomingAnchorSpin_})
+        connect(spin, &QDoubleSpinBox::valueChanged, this, detailsEdited);
     auto* detailsScroll = new QScrollArea(inspectorTabs_);
     detailsScroll->setWidgetResizable(true);
     detailsScroll->setFrameShape(QFrame::NoFrame);
@@ -2040,6 +2068,8 @@ void TransitionEditorWindow::buildUi()
     incomingBpmEdit_->setObjectName(QStringLiteral("transitionEditorIncomingBpm"));
     incomingTempoEdit_ = new QLineEdit(initialPage);
     incomingTempoEdit_->setObjectName(QStringLiteral("transitionEditorIncomingTempoRatio"));
+    for (auto* edit : {incomingBpmEdit_, incomingTempoEdit_})
+        connect(edit, &QLineEdit::textEdited, this, detailsEdited);
     incomingTempoEdit_->setToolTip(tr("performance.initial_state.incoming.tempo_ratio — multiply by the incoming endpoint's native BPM."));
     tempoForm->addRow(tr("Incoming playback BPM"), incomingBpmEdit_);
     tempoForm->addRow(tr("Incoming tempo ratio"), incomingTempoEdit_);
@@ -2533,6 +2563,7 @@ void TransitionEditorWindow::refreshUi()
 {
     if (refreshing_) return;
     refreshing_ = true;
+    detailsPending_ = false;
     const GvtFile& file = document_->file();
     toneEditor_->setTrack(outgoing_);
     toneEditor_->refresh();
@@ -2762,6 +2793,7 @@ void TransitionEditorWindow::followEventSequence(double beat)
 
 void TransitionEditorWindow::updateEventInspector()
 {
+    eventInspectorPending_ = false;
     // Selection, undo/redo and document refresh populate controls but are not
     // user edits. Keep their signals from applying a half-populated inspector.
     const QScopedValueRollback guard(refreshing_, true);
@@ -3019,8 +3051,9 @@ void TransitionEditorWindow::applyEventInspector()
 
 void TransitionEditorWindow::autoApplyEventInspector()
 {
-    if (!refreshing_ && autoApplyEventCheck_->isChecked())
-        commitEventInspector(true);
+    if (refreshing_) return;
+    eventInspectorPending_ = true;
+    if (autoApplyEventCheck_->isChecked()) commitEventInspector(true);
 }
 
 void TransitionEditorWindow::commitEventInspector(bool automatic)
@@ -3099,8 +3132,10 @@ void TransitionEditorWindow::commitEventInspector(bool automatic)
         event.beat == original.beat && event.value == original.value &&
         event.curve == original.curve && event.cueId == original.cueId &&
         event.loopId == original.loopId && event.gestureControl == original.gestureControl &&
-        event.gesturePadMode == original.gesturePadMode)
+        event.gesturePadMode == original.gesturePadMode) {
+        eventInspectorPending_ = false;
         return;
+    }
     if (moveLaunchTogetherCheck_->isChecked() && event.role == original.role &&
         event.control == original.control && event.cueId == original.cueId &&
         event.loopId == original.loopId) {
@@ -3817,6 +3852,56 @@ bool TransitionEditorWindow::maybeRecoverUnsavedDraft()
     return false;
 }
 
+void TransitionEditorWindow::refreshSavedTransition(bool explicitReload)
+{
+    if (sourcePath_.isEmpty() || sourceHash_.isEmpty() || isNew_) return;
+    const auto diskHash = fileHash(sourcePath_);
+    if (diskHash == sourceHash_) {
+        reloadSavedAction_->setEnabled(false);
+        return;
+    }
+    reloadSavedAction_->setEnabled(true);
+    const bool localEdits = document_->isDirty() || eventInspectorPending_ || detailsPending_ || fieldsEditor_->hasPendingChanges() ||
+        yamlEdit_->document()->isModified();
+    // Focused fields can contain an uncommitted value (editingFinished has not
+    // fired yet), including the event inspector with Auto apply disabled.
+    const bool typing = isVisible() && focusConsumesTransportShortcut();
+    const bool playing = preview_->active || preview_->leased || previewPaused_;
+    if (!explicitReload && (localEdits || typing || playing)) {
+        statusBar()->showMessage(tr("Saved file changed. Keeping your current edits/preview; use Reload Saved when ready."));
+        return;
+    }
+    GvtFile updated;
+    QString error;
+    if (!loadTransitionFile(sourcePath_, updated, &error)) {
+        statusBar()->showMessage(tr("Saved file is unavailable or invalid; current editor preserved: %1").arg(error));
+        return;
+    }
+    if (fileHash(sourcePath_) != diskHash) return; // external writer is still saving
+    if (explicitReload && (localEdits || typing || playing) &&
+        QMessageBox::question(this, tr("Reload saved transition?"),
+            tr("Stop this preview and replace the editor with the saved file? Any unsaved or unapplied edits will be discarded."),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes)
+        return;
+    const double cursor = timeline_->playheadBeat();
+    stopPreview();
+    if (explicitReload) removeDraft();
+    sourceHash_ = diskHash;
+    requiresSaveAs_ = false;
+    originalName_ = updated.name;
+    selectedEvent_ = -1;
+    outgoing_ = resolveTrack(updated, true);
+    incoming_ = resolveTrack(updated, false);
+    fieldsEditor_->setDocument(updated, true);
+    yamlEdit_->document()->setModified(false);
+    document_->reset(updated);
+    timeline_->setTracks(outgoing_, incoming_);
+    timeline_->setPlayheadBeat(std::min(cursor, document_->effectiveEndBeat()));
+    followEventSequence(timeline_->playheadBeat());
+    reloadSavedAction_->setEnabled(false);
+    statusBar()->showMessage(tr("Reloaded the updated transition from disk"), 5000);
+}
+
 bool TransitionEditorWindow::persist(bool forceSaveAs)
 {
     if (!fieldsEditor_->applyPending()) {
@@ -4028,7 +4113,7 @@ bool TransitionEditorWindow::eventFilter(QObject* watched, QEvent* event)
         const QPoint pixel = wheel->pixelDelta();
         const QPoint angle = wheel->angleDelta();
 
-        if (wheel->modifiers() & Qt::ControlModifier) {
+        if (wheel->modifiers() & (Qt::ControlModifier | Qt::MetaModifier)) {
             const double delta = pixel.y() != 0 ? pixel.y()
                 : pixel.x() != 0 ? pixel.x()
                 : angle.y() != 0 ? angle.y() : angle.x();
@@ -4045,15 +4130,18 @@ bool TransitionEditorWindow::eventFilter(QObject* watched, QEvent* event)
             return true;
         }
 
-        double delta = 0.0;
-        if (!pixel.isNull())
-            delta = std::fabs(pixel.x()) > std::fabs(pixel.y())
-                        ? pixel.x() : pixel.y();
-        else
-            delta = 0.5 * (std::fabs(angle.x()) > std::fabs(angle.y())
-                               ? angle.x() : angle.y());
-        if (delta != 0.0) scroll->setValue(scroll->value() -
-                                           static_cast<int>(std::lround(delta)));
+        const QPoint delta = pixel.isNull() ? angle : pixel;
+        const double scale = pixel.isNull() ? 0.5 : 1.0;
+        if (wheel->modifiers() & Qt::ShiftModifier) {
+            const int movement = delta.y() != 0 ? delta.y() : delta.x();
+            scroll->setValue(scroll->value() - qRound(movement * scale));
+        } else {
+            // Preserve native two-axis trackpad movement. A vertical wheel
+            // moves vertically; Shift maps it to the horizontal time ruler.
+            scroll->setValue(scroll->value() - qRound(delta.x() * scale));
+            auto* vertical = timelineScroll_->verticalScrollBar();
+            vertical->setValue(vertical->value() - qRound(delta.y() * scale));
+        }
         wheel->accept();
         return true;
     }
@@ -4152,6 +4240,11 @@ void TransitionEditorWindow::keyReleaseEvent(QKeyEvent* event)
 
 void TransitionEditorWindow::auditionTone(int pitch)
 {
+    auditionSample(pitch, false);
+}
+
+void TransitionEditorWindow::auditionSample(int pitch, bool sustain)
+{
     const auto file = document_->file();
     if (!file.tonePlay || !file.tonePlay->enabled || !outgoing_) return;
     if (std::abs(pitch - file.tonePlay->rootNote) > 24) {
@@ -4169,8 +4262,16 @@ void TransitionEditorWindow::auditionTone(int pitch)
     const double seconds = (file.tonePlay->sourceEndBeat - file.tonePlay->sourceStartBeat) * 60.0 / outgoing_->bpm;
     const double duration = std::clamp(seconds / std::exp2((pitch-file.tonePlay->rootNote)/12.0) * file.masterBpm / 60, 1.0/64, 64.0);
     audition.tonePlay->notes = {{0.0, duration, pitch, 1.0}};
+    double auditionEnd = duration;
+    if (sustain) {
+        if (!audition.tonePlay->sustain) return;
+        audition.tonePlay->notes.clear();
+        audition.tonePlay->sustain->beat = 0;
+        audition.tonePlay->sustain->duration = std::min(8.0, audition.tonePlay->sustain->duration);
+        auditionEnd = audition.tonePlay->sustain->duration;
+    } else audition.tonePlay->sustain.reset();
     audition.tonePlay->replaceOutgoing = false;
-    audition.endBeat = duration + .25;
+    audition.endBeat = std::max(auditionEnd, tonePlayEndBeat(*audition.tonePlay)) + .25;
     const double returnBeat = timeline_->playheadBeat();
     if (beginPreviewAt(0.0, true, &audition)) {
         previewCueBeat_ = returnBeat;

@@ -193,6 +193,7 @@ private:
     QString sourceDigest() const;
     bool ensureCanDiscard();
     bool persist(bool forceSaveAs);
+    void refreshSavedTransition(bool explicitReload = false);
     void selectEvent(int index);
     void rebuildEventTable();
     void rebuildPerformanceDefinitions();
@@ -219,6 +220,7 @@ private:
     void prepareRequiredStems();
     bool beginPreviewAt(double beat, bool establishCue = true, const GvtFile* audition = nullptr);
     void auditionTone(int pitch);
+    void auditionSample(int pitch, bool sustain);
     void endPreview(bool returnToCue);
     void returnPlayheadToPreviewCue();
     int nextExecutableEventAtOrAfter(double beat) const;
@@ -246,6 +248,9 @@ private:
     QString sourcePath_;
     QString originalName_;
     QByteArray sourceHash_;
+    QAction* reloadSavedAction_ = nullptr;
+    bool eventInspectorPending_ = false;
+    bool detailsPending_ = false;
     bool isNew_ = false;
     bool requiresSaveAs_ = false;
     bool refreshing_ = false;

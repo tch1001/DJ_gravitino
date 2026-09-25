@@ -178,6 +178,9 @@ void layering_is_default_and_replacement_only_ducks_the_authored_phrase() {
 void loops_stops_and_jumps_do_not_retrigger_the_pattern_and_tempo_changes_retime_gates() {
     auto p = *recipe().tonePlay;
     p.notes = {{0, 4, 60, 1}, {1, 1, 67, .8}};
+    TonePlaySustain h;
+    h.loopStartBeat = 0; h.loopEndBeat = .5; h.duration = 4;
+    p.sustain = h;
     const auto t = source();
     QString error;
     TonePlayProcessor a, b;
@@ -201,6 +204,12 @@ void loops_stops_and_jumps_do_not_retrigger_the_pattern_and_tempo_changes_retime
 void perform_and_preview_share_sampler_audio_in_both_deck_orders(int outgoing) {
     const auto t = source();
     auto f = recipe();
+    TonePlaySustain h;
+    h.loopStartBeat = 0; h.loopEndBeat = .5; h.duration = 1.5;
+    f.tonePlay->sustain = h;
+    f.tonePlay->effects = TonePlayEffects{};
+    f.tonePlay->effects->tailBeats = .5;
+    f.tonePlay->effects->sustainDucking = .8;
     QString error;
     ControlBus busA, busB;
     AudioEngine a(&busA), b(&busB);
@@ -262,6 +271,186 @@ void replacing_prepared_samples_safely_drains_active_callbacks() {
     done.store(true);
     reader.join();
 }
+
+TonePlaySustain holdFor(const TonePlayPattern &p) {
+    TonePlaySustain h;
+    h.beat = .125; h.duration = 4;
+    h.loopStartBeat = p.sourceStartBeat + .2;
+    h.loopEndBeat = p.sourceEndBeat - .1;
+    return h;
+}
+void sustain_is_portable_capability_gated_and_does_not_change_old_notes() {
+    auto f = recipe();
+    f.tonePlay->sustain = holdFor(*f.tonePlay);
+    f.tonePlay->sustain->extraYaml["future.expression"] = "kept";
+    f.endBeat = 5;
+    QString error;
+    GvtFile parsed;
+    const auto yaml = transitionSerialize(f);
+    CHECK(transitionParse(yaml, parsed, &error));
+    CHECK(parsed.requirements.contains("tone-play-sustain.v1"));
+    CHECK(parsed.unsupportedRequirements.isEmpty());
+    CHECK(parsed.tonePlay && parsed.tonePlay->sustain);
+    CHECK(transitionSerialize(parsed) == yaml);
+    CHECK(parsed.tonePlay->sustain->extraYaml == f.tonePlay->sustain->extraYaml);
+    CHECK(tonePlayEndBeat(*parsed.tonePlay) == 4.125);
+    auto missing = yaml;
+    missing.replace("tone-play-sustain.v1", "future.v9");
+    CHECK(!transitionParse(missing, parsed, &error));
+    CHECK(error.contains("tone-play-sustain.v1"));
+    f.endBeat = 2;
+    CHECK(!transitionParse(transitionSerialize(f), parsed, &error));
+    const auto valid = *f.tonePlay;
+    for (int field = 0; field < 7; ++field) {
+        auto bad = valid;
+        auto &h = *bad.sustain;
+        if (field == 0) h.duration = NAN;
+        if (field == 1) h.loopStartBeat = valid.sourceStartBeat - .01;
+        if (field == 2) h.loopEndBeat = h.loopStartBeat;
+        if (field == 3) h.crossfadeMs = 0;
+        if (field == 4) h.pitch = 96;
+        if (field == 5) h.gain = 2;
+        if (field == 6) h.attackMs = INFINITY;
+        CHECK(!validateTonePlay(bad, &error));
+    }
+    auto json = serializeTonePlay(valid);
+    auto h = json["sustain"].toObject();
+    h["pitch"] = 60.5; json["sustain"] = h;
+    std::optional<TonePlayPattern> result;
+    CHECK(!parseTonePlay(json, result, &error));
+    json["sustain"] = false;
+    CHECK(!parseTonePlay(json, result, &error));
+    auto legacy = recipe();
+    CHECK(!transitionSerialize(legacy).contains("sustain"));
+}
+void sustained_voice_runs_under_independent_hits_and_is_block_invariant() {
+    const auto t = source();
+    auto p = *recipe().tonePlay;
+    p.notes = {{.25, .0625, 60, 1}, {1.25, .0625, 67, .7}, {2.25, .0625, 60, 1}};
+    p.sustain = holdFor(p);
+    p.sustain->duration = 3;
+    p.sustain->crossfadeMs = 17.3; // not a pitch-period multiple
+    auto hits = p; hits.sustain.reset();
+    auto background = p; background.notes.clear();
+    TonePlayProcessor both, singleFrame, onlyHits, onlyHold;
+    QString error;
+    for (auto *s : {&both, &singleFrame}) {
+        CHECK(s->prepare(*t, p, 0, .5, 0, &error)); s->enable(true);
+    }
+    CHECK(onlyHits.prepare(*t, hits, 0, .5, 0, &error)); onlyHits.enable(true);
+    CHECK(onlyHold.prepare(*t, background, 0, .5, 0, &error)); onlyHold.enable(true);
+    const auto mix = render(both, 96000, 257);
+    CHECK(mix == render(singleFrame, 96000, 1));
+    const auto foreground = render(onlyHits, 96000, 511);
+    const auto bed = render(onlyHold, 96000, 256);
+    double errorSum = 0, heldEnergy = 0, maxJump = 0;
+    for (size_t i = 0; i < mix.size(); ++i) {
+        CHECK(std::isfinite(mix[i]));
+        errorSum += std::abs(mix[i] - foreground[i] - bed[i]);
+        if (i > 48000 && i < 120000) heldEnergy += std::abs(bed[i]);
+        if (i >= 2) maxJump = std::max(maxJump, std::abs(double(bed[i] - bed[i-2])));
+    }
+    CHECK(errorSum < .001);
+    CHECK(heldEnergy > 100); // sustains long after the half-second source ends
+    CHECK(maxJump < .01); // smooth joins rather than hard restarts
+    CHECK(std::all_of(mix.begin() + 151000, mix.end(), [](float v) { return v == 0; }));
+    // Disable is immediate; the old one-shot path is exactly unchanged.
+    p.sustain->enabled = false;
+    CHECK(both.prepare(*t, p, 0, .5, 0, &error)); both.enable(true);
+    CHECK(render(both, 96000, 256) == foreground);
+    p.sustain->enabled = true;
+    p.sustain->loopEndBeat = p.sustain->loopStartBeat + .001;
+    CHECK(!both.prepare(*t, p, 0, .5, 0, &error));
+}
+void note_effects_round_trip_with_required_capability_and_bounded_parameters() {
+    auto f = recipe();
+    f.tonePlay->effects = TonePlayEffects{};
+    f.tonePlay->effects->sustainDucking = .8;
+    f.tonePlay->effects->extraYaml["future.color"] = "warm";
+    f.endBeat = 6;
+    QString error;
+    GvtFile parsed;
+    const auto yaml = transitionSerialize(f);
+    CHECK(transitionParse(yaml, parsed, &error));
+    CHECK(parsed.requirements.contains("tone-play-effects.v1"));
+    CHECK(parsed.unsupportedRequirements.isEmpty());
+    CHECK(transitionSerialize(parsed) == yaml);
+    CHECK(tonePlayEndBeat(*f.tonePlay) == 5);
+    auto missing = yaml;
+    missing.replace("tone-play-effects.v1", "future.v9");
+    CHECK(!transitionParse(missing, parsed, &error));
+    CHECK(error.contains("tone-play-effects.v1"));
+    f.endBeat = 2;
+    CHECK(!transitionParse(transitionSerialize(f), parsed, &error));
+    for (int i = 0; i < 6; ++i) {
+        auto p = *f.tonePlay;
+        if (i == 0) p.effects->echo = NAN;
+        if (i == 1) p.effects->reverb = 1.1;
+        if (i == 2) p.effects->echoBeats = .125;
+        if (i == 3) p.effects->tailBeats = INFINITY;
+        if (i == 4) p.effects->tailBeats = 17;
+        if (i == 5) p.effects->sustainDucking = -1;
+        CHECK(!validateTonePlay(p, &error));
+    }
+    CHECK(!transitionSerialize(recipe()).contains("effects"));
+}
+void note_tails_preserve_dry_attacks_stop_cleanly_and_never_process_the_background() {
+    const auto t = source();
+    auto p = *recipe().tonePlay;
+    p.notes = {{.125, .0625, 61, 1}};
+    const auto audioFor = [&](const TonePlayPattern &pattern, int block = 257, double tempo = 1) {
+        TonePlayProcessor s;
+        QString error;
+        CHECK(s.prepare(*t, pattern, 0, .5, 0, &error));
+        s.enable(true);
+        auto audio = render(s, 96000, block, tempo);
+        s.enable(false);
+        const auto silence = render(s, 256, 256);
+        CHECK(std::all_of(silence.begin(), silence.end(), [](float x) { return x == 0; }));
+        return audio;
+    };
+    const auto dry = audioFor(p);
+    p.effects = TonePlayEffects{};
+    p.effects->tailBeats = 2;
+    const auto wet = audioFor(p);
+    CHECK(wet == audioFor(p, 1));
+    double difference = 0, tailEnergy = 0;
+    for (int i = 3000; i < 4000; ++i)
+        difference += std::abs(wet[i*2] - dry[i*2]);
+    CHECK(difference < .0001); // no return before the earliest reverb delay
+    for (int i = 6000; i < 30000; ++i) tailEnergy += wet[i*2]*wet[i*2];
+    CHECK(tailEnergy > .001);
+    CHECK(std::all_of(wet.begin()+105000, wet.end(), [](float x) { return x == 0; }));
+    p.effects->enabled = false;
+    CHECK(audioFor(p) == dry);
+    p.effects->enabled = true;
+    p.effects->reverb = 0;
+    p.effects->echo = .1;
+    const auto fast = audioFor(p, 257, 2);
+    double echoEnergy = 0;
+    for (int i = 4600; i < 5000; ++i) echoEnergy += fast[i*2]*fast[i*2];
+    CHECK(echoEnergy > .0001); // quarter-beat echo follows doubled tempo
+    p.sustain = holdFor(p);
+    p.notes.clear();
+    const auto held = audioFor(p);
+    p.effects.reset();
+    CHECK(audioFor(p) == held); // long vowel is not fed into note FX
+    p.notes = {{.5, .0625, 61, 1}};
+    auto dryNotes = p; dryNotes.sustain.reset();
+    const auto hits = audioFor(dryNotes);
+    p.effects = TonePlayEffects{};
+    p.effects->echo = p.effects->reverb = 0;
+    p.effects->sustainDucking = .9;
+    const auto ducked = audioFor(p);
+    double bed = 0, duckedBed = 0;
+    for (int i = 12300; i < 13200; ++i) {
+        bed += held[i*2]*held[i*2];
+        duckedBed += std::pow(ducked[i*2]-hits[i*2],2);
+    }
+    CHECK(duckedBed < bed*.1);
+    p.sustain.reset();
+    CHECK(audioFor(p) == hits); // ducking cannot alter a solo C-sharp note
+}
 } // namespace
 int main(int argc, char **argv) {
     QCoreApplication app(argc, argv);
@@ -272,5 +461,9 @@ int main(int argc, char **argv) {
     for (int deck : {0, 1})
         perform_and_preview_share_sampler_audio_in_both_deck_orders(deck);
     replacing_prepared_samples_safely_drains_active_callbacks();
+    sustain_is_portable_capability_gated_and_does_not_change_old_notes();
+    sustained_voice_runs_under_independent_hits_and_is_block_invariant();
+    note_effects_round_trip_with_required_capability_and_bounded_parameters();
+    note_tails_preserve_dry_attacks_stop_cleanly_and_never_process_the_background();
     return failures ? 1 : 0;
 }

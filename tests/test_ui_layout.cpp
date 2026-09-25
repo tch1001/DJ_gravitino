@@ -18,15 +18,21 @@
 #include "ui/Theme.h"
 
 #include <QApplication>
+#include <QAction>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QEventLoop>
 #include <QFile>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QMimeData>
 #include <QLabel>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMouseEvent>
 #include <QMenu>
 #include <QPlainTextEdit>
@@ -215,6 +221,17 @@ void checkPrimeRetries(QApplication& app)
         prime->click();
         CHECK(player.isActive());
         CHECK(!engine.deck(toDeck).playing.load());
+        // A disk update must not replace the armed recipe or invalidate the
+        // Event Sequence's owned data. The next take receives the new file.
+        auto external = store.all().front();
+        const auto* list = panel.findChild<QListWidget*>();
+        CHECK(list && list->count() == 1);
+        const auto armedLabel = list ? list->item(0)->text() : QString{};
+        external.name = QStringLiteral("Edited while primed %1").arg(fromDeck);
+        CHECK(gvt::transitionSaveFile(external, path, &error));
+        store.reload(); app.processEvents();
+        CHECK(player.isActive());
+        CHECK(list && list->item(0)->text() == armedLabel);
         std::vector<float> audio(7200 * 2);
         engine.renderOffline(audio.data(), 7200); // Cross entry and LOOP OUT.
         QEventLoop wait;
@@ -224,6 +241,7 @@ void checkPrimeRetries(QApplication& app)
         CHECK(status->text().contains(QStringLiteral("in progress")));
         player.abort();
         app.processEvents();
+        CHECK(list && list->item(0)->text().contains(external.name));
     }
     qputenv("GRAVITINO_TRANSITIONS_DIR", originalDirectory);
 }
@@ -368,8 +386,226 @@ void checkCustomBankSwitching(QApplication& app)
 }
 }
 
-void tone_workspace_edits_notes_without_touching_automation_or_original_files(QApplication& app)
-{
+void custom_stem_echo_records_every_action_and_restores_without_touching_song_cues(
+    QApplication& app) {
+    using namespace gvt;
+    ControlBus bus;
+    AudioEngine engine(&bus);
+    const auto track = makeTrack("Stem echo fixture", "gvfp1:echo-fixture");
+    track->hotCues[0] = .5;
+    track->savedLoops[0] = {1, 2, "Keep loop"};
+    engine.deck(0).loadTrack(track);
+    engine.deck(1).loadTrack(makeTrack("Incoming", "gvfp1:echo-in"));
+    DeckWidget widget(0, &bus, &engine);
+    widget.show();
+    widget.setPerformancePadMode(PerformancePadMode::Sampler);
+    auto* pad = widget.findChild<QPushButton*>("deck0PerformancePad1");
+    CHECK(pad);
+    if (!pad)
+        return;
+    int metadataChanges = 0;
+    QObject::connect(&widget, &DeckWidget::trackPerformanceMetadataChanged, &widget,
+                     [&](int) { ++metadataChanges; });
+    const auto choose = [&](const QString& text) {
+        bool found = false;
+        QTimer::singleShot(0, &widget, [&] {
+            for (auto* menu : widget.findChildren<QMenu*>()) {
+                if (!menu->isVisible())
+                    continue;
+                for (auto* action : menu->findChildren<QAction*>())
+                    if (action->text() == text) {
+                        action->trigger();
+                        found = true;
+                        break;
+                    }
+                menu->close();
+            }
+        });
+        CHECK(QMetaObject::invokeMethod(pad, "customContextMenuRequested", Qt::DirectConnection,
+                                        Q_ARG(QPoint, QPoint())));
+        CHECK(found);
+    };
+    choose("Vocal Echo");
+    CHECK(pad->text() == "VOC ECHO");
+    auto& deck = engine.deck(0);
+    deck.fxType.store(1);
+    deck.fxWet.store(.2);
+    deck.fxBeats.store(2);
+    deck.fxOn.store(false);
+    deck.stemVocals.store(.8);
+    deck.stemMelody.store(.7);
+    deck.stemBass.store(.6);
+    deck.stemDrums.store(.5);
+    widget.triggerPerformancePad(PerformancePadMode::Sampler, 0, true);
+    CHECK(!deck.fxOn.load() && deck.stemMelody.load() == .7f);
+    CHECK(widget.performancePadPressedMask() == 0);
+    auto* feedback = widget.findChild<QLabel*>("deck0PadFeedback");
+    CHECK(feedback && feedback->toolTip().contains("Prepare stems"));
+    auto stems = std::make_shared<StemSet>();
+    for (auto* pcm : {&stems->vocals, &stems->melody, &stems->bass, &stems->drums})
+        pcm->resize(track->pcm.size(), 500);
+    deck.attachStems(stems);
+    deck.playing.store(true);
+    for (const QString& name : {QString("Vocal Echo"), QString("Instrumental Echo")}) {
+        choose(name);
+        const bool vocal = name == "Vocal Echo";
+        TransitionRecorder recorder(&bus, &engine);
+        recorder.start(0);
+        widget.triggerPerformancePad(PerformancePadMode::Sampler, 0, true);
+        CHECK(deck.fxType.load() == 0 && std::abs(deck.fxWet.load() - .5) < 1e-7 &&
+              deck.fxOn.load());
+        CHECK(deck.stemVocals.load() == (vocal ? 1 : 0));
+        CHECK(deck.stemMelody.load() == (vocal ? 0 : 1) &&
+              deck.stemBass.load() == (vocal ? 0 : 1) && deck.stemDrums.load() == (vocal ? 0 : 1));
+        std::array<float, 512> audio{};
+        engine.renderOffline(audio.data(), 256); // deliberately shorter than coalescing bucket
+        widget.triggerPerformancePad(PerformancePadMode::Sampler, 0, false);
+        engine.renderOffline(audio.data(), 256);
+        auto recorded = recorder.finish();
+        CHECK(!deck.fxOn.load() && deck.fxType.load() == 1);
+        CHECK(std::abs(deck.fxWet.load() - .2) < 1e-7 && deck.fxBeats.load() == 2);
+        CHECK(deck.stemVocals.load() == .8f && deck.stemMelody.load() == .7f &&
+              deck.stemBass.load() == .6f && deck.stemDrums.load() == .5f);
+        for (auto id : {ControlId::FxType, ControlId::FxWet, ControlId::FxBeats, ControlId::FxOn,
+                        ControlId::StemVocals, ControlId::StemMelody, ControlId::StemBass,
+                        ControlId::StemDrums}) {
+            std::vector<GvtEvent> events;
+            for (const auto& event : recorded.events)
+                if (event.control == id)
+                    events.push_back(event);
+            CHECK(events.size() == 2);
+            for (const auto& event : events)
+                CHECK(event.curve == Curve::Step &&
+                      event.gestureControl == ControlId::PerformancePad1);
+        }
+        GvtFile parsed;
+        QString error;
+        CHECK(transitionParse(transitionSerialize(recorded), parsed, &error));
+        CHECK(parsed.events.size() == recorded.events.size());
+        CHECK(parsed.events.size() >= 16);
+        if (parsed.events.size() < 16)
+            continue;
+        TransitionPlayer player(&bus, &engine);
+        transitionPlayerUseExternalClock(&player, true);
+        CHECK(player.arm(parsed, 0, true, &error));
+        transitionPlayerAdvanceToBeat(&player,
+                                      (parsed.events[7].beat + parsed.events[8].beat) * .5);
+        CHECK(deck.fxOn.load() && deck.fxType.load() == 0 &&
+              deck.stemVocals.load() == (vocal ? 1 : 0));
+        transitionPlayerAdvanceToBeat(&player, parsed.events.back().beat + .001);
+        CHECK(!deck.fxOn.load() && deck.fxType.load() == 1 && deck.stemMelody.load() == .7f);
+        player.abort();
+    }
+    CHECK(track->hotCues[0] == .5 && track->savedLoops[0].label == "Keep loop");
+    CHECK(metadataChanges == 0);
+    // Restoring an already-enabled effect must retain the off/on pair even
+    // when release happens in the same recording coalescing window.
+    deck.fxOn.store(true);
+    {
+        TransitionRecorder recorder(&bus, &engine);
+        recorder.start(0);
+        widget.triggerPerformancePad(PerformancePadMode::Sampler, 0, true);
+        widget.triggerPerformancePad(PerformancePadMode::Sampler, 0, false);
+        const auto recorded = recorder.finish();
+        std::vector<double> onValues;
+        for (const auto& event : recorded.events)
+            if (event.control == ControlId::FxOn)
+                onValues.push_back(event.value);
+        CHECK(onValues == std::vector<double>({1, 0, 1}));
+        CHECK(deck.fxOn.load() && deck.fxType.load() == 1);
+    }
+    deck.fxOn.store(false);
+    {
+        DeckWidget reloaded(0, &bus, &engine);
+        reloaded.setPerformancePadMode(PerformancePadMode::Sampler);
+        CHECK(reloaded.findChild<QPushButton*>("deck0PerformancePad1")->text() == "INS ECHO");
+    }
+    // Changing bank restores a held macro; replacement audio must never inherit
+    // an old pad's restore snapshot, including a reload of the same song object.
+    widget.triggerPerformancePad(PerformancePadMode::Sampler, 0, true);
+    widget.setPerformancePadMode(PerformancePadMode::HotCue);
+    CHECK(!deck.fxOn.load() && deck.stemVocals.load() == .8f);
+    widget.triggerPerformancePad(PerformancePadMode::Sampler, 0, true);
+    deck.loadTrack(track);
+    widget.trackChanged();
+    widget.triggerPerformancePad(PerformancePadMode::Sampler, 0, false);
+    CHECK(deck.stemVocals.load() == 1 && deck.stemMelody.load() == 1);
+    choose("Saved loop / custom audio");
+    CHECK(pad->text() == "Keep loo");
+    CHECK(metadataChanges == 0);
+    QSettings().remove("performancePads/deck0/sampler/pad1");
+    widget.setPerformancePadMode(PerformancePadMode::HotCue);
+    app.processEvents();
+}
+
+void live_reload_preserves_unsaved_edits_and_running_preview(QApplication& app) {
+    using namespace gvt;
+    ControlBus bus;
+    AudioEngine engine(&bus);
+    TrackLibrary library;
+    TransitionStore store;
+    TransitionRecorder recorder(&bus, &engine);
+    TransitionPlayer player(&bus, &engine);
+    const auto out = makeTrack("Reload outgoing", "gvfp1:reload-out");
+    const auto in = makeTrack("Reload incoming", "gvfp1:reload-in");
+    engine.deck(0).loadTrack(out); engine.deck(1).loadTrack(in);
+    GvtFile file;
+    file.name = "Live reload fixture";
+    file.from.title = out->title; file.from.fingerprint = out->fingerprint;
+    file.to.title = in->title; file.to.fingerprint = in->fingerprint;
+    file.from.bpm = file.to.bpm = file.masterBpm = 120;
+    file.from.durationSec = file.to.durationSec = 16;
+    file.endBeat = 12;
+    file.events = {{0, Role::ToDeck, ControlId::Play, 1, Curve::Step}};
+    QString error;
+    const auto path = store.save(file, &error); CHECK(!path.isEmpty());
+    CHECK(loadTransitionFile(path, file, &error));
+    TransitionEditorWindow editor(&engine, &library, &store, &recorder, &player);
+    editor.openTransition(file); editor.hide(); app.processEvents();
+    auto* doc = editor.findChild<TransitionEditorDocument*>();
+    auto* timeline = editor.findChild<TransitionTimelineView*>();
+    auto* reload = editor.findChild<QAction*>("transitionEditorReloadSaved");
+    auto* play = editor.findChild<QPushButton*>("transitionEditorPlay");
+    auto* stop = editor.findChild<QPushButton*>("transitionEditorStop");
+    auto* yaml = editor.findChild<QPlainTextEdit*>("transitionEditorYaml");
+    CHECK(doc && timeline && reload && play && stop && yaml);
+    if (!doc || !timeline || !reload || !play || !stop || !yaml) return;
+    const auto externalEdit = [&](const QString& name) {
+        file.name = name;
+        CHECK(transitionSaveFile(file, path, &error));
+        store.reload(); app.processEvents();
+    };
+    timeline->setPlayheadBeat(3);
+    externalEdit("Saved edit one");
+    CHECK(doc->file().name == file.name && !doc->isDirty());
+    CHECK(timeline->playheadBeat() == 3 && !reload->isEnabled());
+    doc->mutate("Local edit", [](GvtFile& f) { f.name = "Keep unsaved"; });
+    externalEdit("Saved edit two");
+    CHECK(doc->file().name == "Keep unsaved" && doc->isDirty());
+    CHECK(reload->isEnabled());
+    doc->undoStack()->undo();
+    externalEdit("Saved edit three");
+    CHECK(doc->file().name == file.name && !reload->isEnabled());
+    yaml->insertPlainText("# staged YAML\n");
+    externalEdit("Saved edit four");
+    CHECK(doc->file().name == "Saved edit three" && reload->isEnabled());
+    yaml->document()->setModified(false);
+    externalEdit("Saved edit five");
+    CHECK(doc->file().name == file.name);
+    play->click(); CHECK(engine.exclusivePreviewActive());
+    externalEdit("Saved during playback");
+    CHECK(engine.exclusivePreviewActive());
+    CHECK(doc->file().name == "Saved edit five" && reload->isEnabled());
+    stop->click(); CHECK(!engine.exclusivePreviewActive());
+    externalEdit("Saved after playback");
+    CHECK(doc->file().name == file.name && !reload->isEnabled());
+    // Every external reload left the saved recipe untouched by the editor.
+    GvtFile disk;
+    CHECK(loadTransitionFile(path, disk, &error)); CHECK(disk.name == file.name);
+    editor.close(); app.processEvents();
+}
+
+void tone_workspace_edits_notes_without_touching_automation_or_original_files(QApplication& app) {
     using namespace gvt;
     ControlBus bus;
     AudioEngine engine(&bus);
@@ -416,6 +652,17 @@ void tone_workspace_edits_notes_without_touching_automation_or_original_files(QA
     CHECK(doc->file().tonePlay && !replace->isChecked());
     CHECK(doc->file().tonePlay->notes.size()==1);
     auto* viewport=roll->viewport();
+    const int initialY=roll->verticalScrollBar()->value();
+    QWheelEvent vertical(QPointF(300,100),QPointF(viewport->mapToGlobal(QPoint(300,100))),
+        QPoint(),QPoint(0,-120),Qt::NoButton,Qt::NoModifier,Qt::NoScrollPhase,false);
+    QApplication::sendEvent(viewport,&vertical);
+    CHECK(roll->verticalScrollBar()->value()>initialY && roll->horizontalScrollBar()->value()==0);
+    const int afterY=roll->verticalScrollBar()->value();
+    QWheelEvent horizontal(QPointF(300,100),QPointF(viewport->mapToGlobal(QPoint(300,100))),
+        QPoint(-25,0),QPoint(),Qt::NoButton,Qt::ShiftModifier,Qt::NoScrollPhase,false);
+    QApplication::sendEvent(viewport,&horizontal);
+    CHECK(roll->horizontalScrollBar()->value()==25 && roll->verticalScrollBar()->value()==afterY);
+    roll->horizontalScrollBar()->setValue(0);roll->verticalScrollBar()->setValue(initialY);
     const auto mouse=[&](QEvent::Type type,QPoint at){
         sendMouse(viewport,type,at,viewport->mapToGlobal(at),Qt::LeftButton,
             type==QEvent::MouseButtonRelease?Qt::NoButton:Qt::LeftButton);
@@ -454,6 +701,79 @@ void tone_workspace_edits_notes_without_touching_automation_or_original_files(QA
     CHECK(timeline->playheadBeat()==5);
     CHECK(!engine.exclusivePreviewActive());
     CHECK(doc->file().tonePlay->notes.size()==2);
+    // Background hold is independently editable/auditionable and undoable.
+    auto* hold = editor.findChild<QCheckBox*>("toneSustainEnabled");
+    auto* holdGain = editor.findChild<QDoubleSpinBox*>("toneHoldGain");
+    auto* holdLength = editor.findChild<QDoubleSpinBox*>("toneHoldDuration");
+    auto* region = editor.findChild<QCheckBox*>("toneEditSustainRegion");
+    auto* previewHold = editor.findChild<QPushButton*>("tonePreviewSustain");
+    CHECK(hold && holdGain && holdLength && region && previewHold);
+    if (hold && holdGain && holdLength && region && previewHold) {
+        const QJsonValue notes = serializeTonePlay(*doc->file().tonePlay).value("notes");
+        hold->setChecked(true);
+        CHECK(doc->file().tonePlay->sustain && region->isEnabled());
+        CHECK(doc->file().requirements.contains("tone-play-sustain.v1"));
+        holdGain->setValue(.22);
+        QMetaObject::invokeMethod(holdGain,"editingFinished",Qt::DirectConnection);
+        holdLength->setValue(8);
+        QMetaObject::invokeMethod(holdLength,"editingFinished",Qt::DirectConnection);
+        CHECK(doc->file().tonePlay->sustain->gain == .22);
+        CHECK(doc->file().tonePlay->sustain->duration == 8);
+        CHECK(serializeTonePlay(*doc->file().tonePlay)["notes"] == notes);
+        const auto snippetStart = doc->file().tonePlay->sourceStartBeat;
+        const auto snippetEnd = doc->file().tonePlay->sourceEndBeat;
+        auto* waveform = editor.findChild<QWidget*>("toneSampleWaveform");
+        CHECK(waveform);
+        if (waveform) {
+            region->setChecked(true);
+            const double viewStart = waveform->property("viewStartBeat").toDouble();
+            const double span = waveform->property("viewEndBeat").toDouble() - viewStart;
+            const auto at = [&](double beat) {
+                return QPoint(qRound(10+(beat-viewStart)/span*(waveform->width()-20)), 80);
+            };
+            const auto drag = [&](QEvent::Type type, double beat) {
+                sendMouse(waveform,type,at(beat),waveform->mapToGlobal(at(beat)),Qt::LeftButton,
+                          type==QEvent::MouseButtonRelease?Qt::NoButton:Qt::LeftButton);
+            };
+            drag(QEvent::MouseButtonPress,.22);
+            drag(QEvent::MouseMove,.37);
+            drag(QEvent::MouseButtonRelease,.37);
+            CHECK(std::abs(doc->file().tonePlay->sustain->loopStartBeat-.22)<.002);
+            CHECK(std::abs(doc->file().tonePlay->sustain->loopEndBeat-.37)<.002);
+            CHECK(doc->file().tonePlay->sourceStartBeat==snippetStart);
+            CHECK(doc->file().tonePlay->sourceEndBeat==snippetEnd);
+            doc->undoStack()->undo();
+            region->setChecked(false);
+        }
+        doc->undoStack()->undo(); CHECK(doc->file().tonePlay->sustain->duration != 8);
+        doc->undoStack()->redo(); CHECK(doc->file().tonePlay->sustain->duration == 8);
+        previewHold->click(); CHECK(engine.exclusivePreviewActive());
+        if(stop)stop->click();
+        CHECK(timeline->playheadBeat()==5);
+        CHECK(!engine.exclusivePreviewActive());
+        CHECK(serializeTonePlay(*doc->file().tonePlay)["notes"] == notes);
+    }
+    auto* fx = editor.findChild<QCheckBox*>("toneEffectsEnabled");
+    auto* reverb = editor.findChild<QDoubleSpinBox*>("toneReverb");
+    auto* duck = editor.findChild<QDoubleSpinBox*>("toneHoldDucking");
+    CHECK(fx && reverb && duck);
+    if (fx && reverb && duck) {
+        const QJsonValue notes = serializeTonePlay(*doc->file().tonePlay)["notes"];
+        fx->setChecked(true);
+        CHECK(doc->file().requirements.contains("tone-play-effects.v1"));
+        reverb->setValue(.12);
+        QMetaObject::invokeMethod(reverb,"editingFinished",Qt::DirectConnection);
+        duck->setValue(.9);
+        QMetaObject::invokeMethod(duck,"editingFinished",Qt::DirectConnection);
+        CHECK(doc->file().tonePlay->effects->sustainDucking == .9);
+        CHECK(doc->file().tonePlay->effects->reverb == .12);
+        CHECK(serializeTonePlay(*doc->file().tonePlay)["notes"] == notes);
+        doc->undoStack()->undo(); CHECK(doc->file().tonePlay->effects->sustainDucking == 0);
+        doc->undoStack()->redo(); CHECK(doc->file().tonePlay->effects->sustainDucking == .9);
+        QMetaObject::invokeMethod(tone,"auditionRequested",Qt::DirectConnection,Q_ARG(int,61));
+        CHECK(engine.exclusivePreviewActive());
+        if(stop)stop->click();
+    }
     // Tutor button is refused for tone-enabled files and explains why.
     auto toneFile=doc->file();toneFile.id.clear();toneFile.filePath.clear();
     const auto tonePath=store.save(toneFile,&error);CHECK(!tonePath.isEmpty());
@@ -463,10 +783,159 @@ void tone_workspace_edits_notes_without_touching_automation_or_original_files(QA
     for(auto* b:panel.findChildren<QPushButton*>())if(b->text()=="TUTOR VIEW")tutor=b;
     CHECK(tutor && !tutor->isEnabled() && tutor->toolTip().contains("tone play"));
     const auto screenshot=qgetenv("GRAVITINO_TONE_SCREENSHOT");
-    if(!screenshot.isEmpty()){app.processEvents();CHECK(editor.grab().save(QString::fromUtf8(screenshot)));}
+    if(!screenshot.isEmpty()){
+        app.processEvents();CHECK(editor.grab().save(QString::fromUtf8(screenshot)));
+        auto* scroll=editor.findChild<QScrollArea*>("toneWorkspaceScroll");
+        CHECK(scroll);
+        if(scroll){
+            scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
+            app.processEvents();
+            CHECK(editor.grab().save(QString::fromUtf8(screenshot)+"-bottom.png"));
+        }
+    }
     CHECK(original.open(QIODevice::ReadOnly));CHECK(original.readAll()==bytes);
     CHECK(out->firstBeatSec==0 && out->bpm==120 && out->hotCues[0]<0);
     while(doc->undoStack()->canUndo())doc->undoStack()->undo();
+    editor.close();
+}
+
+void tone_slices_zoom_without_edits_and_note_ranges_copy_with_short_gates(QApplication& app)
+{
+    using namespace gvt;
+    TransitionEditorDocument document;
+    GvtFile file;
+    file.masterBpm = 120; file.endBeat = 32;
+    file.tonePlay = TonePlayPattern{};
+    file.tonePlay->sourceStartBeat = 8;
+    file.tonePlay->sourceEndBeat = 9.5;
+    file.tonePlay->notes = {{.5, .25, 60, .8}, {4.25, .125, 62, .6}, {8.5, .5, 64, .7}};
+    document.reset(file);
+    TonePlayEditor editor(&document);
+    QObject::connect(&document, &TransitionEditorDocument::changed, &editor, &TonePlayEditor::refresh);
+    QObject::connect(&editor, &TonePlayEditor::cursorRequested, &editor, &TonePlayEditor::setPlayhead);
+    editor.setTrack(makeTrack("Slice navigation", "gvfp1:slice-navigation"));
+    editor.resize(900, 800); editor.show(); app.processEvents();
+    auto* source = editor.findChild<QWidget*>("toneSampleWaveform");
+    auto* sourceScroll = editor.findChild<QScrollBar*>("toneSliceScroll");
+    auto* roll = editor.findChild<QAbstractScrollArea*>("tonePianoRoll");
+    auto* snap = editor.findChild<QComboBox*>("toneNoteSnap");
+    auto* duration = editor.findChild<QDoubleSpinBox*>("toneNoteDuration");
+    CHECK(source && sourceScroll && roll && snap && duration);
+    if (!source || !sourceScroll || !roll || !snap || !duration) return;
+    const auto click = [&](const char* name) {
+        auto* button = editor.findChild<QPushButton*>(name); CHECK(button);
+        if (button) button->click();
+        app.processEvents();
+    };
+    const auto first = [&] { return source->property("viewStartBeat").toDouble(); };
+    const auto span = [&] { return source->property("viewEndBeat").toDouble() - first(); };
+    const auto wheel = [&](QWidget* target, QPoint at, QPoint pixels, QPoint angles, Qt::KeyboardModifiers mods) {
+        QWheelEvent event(QPointF(at), QPointF(target->mapToGlobal(at)), pixels, angles,
+                          Qt::NoButton, mods, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(target, &event);
+    };
+    const auto mouse = [&](QWidget* target, QEvent::Type type, QPoint at, Qt::KeyboardModifiers mods = Qt::NoModifier) {
+        QMouseEvent event(type, QPointF(at), QPointF(target->mapToGlobal(at)), Qt::LeftButton,
+                          type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton, mods);
+        QApplication::sendEvent(target, &event);
+    };
+    const auto before = serializeTonePlay(*document.file().tonePlay);
+    CHECK(span() < 4);
+    click("toneWholeSong"); CHECK(std::abs(span() - 32) < 1e-8);
+    const int pointer = source->width() * .4;
+    const double fraction = (pointer - 10.0) / (source->width() - 20);
+    const double anchor = first() + span() * fraction;
+    wheel(source, {pointer, 70}, {}, {0, 120}, Qt::ControlModifier);
+    CHECK(span() < 32);
+    CHECK(std::abs(first() + span() * fraction - anchor) < 1e-8);
+    const double zoomed = span();
+    click("toneSliceZoomIn"); CHECK(span() < zoomed);
+    click("toneSliceZoomOut"); CHECK(std::abs(span() - zoomed) < 1e-8);
+    click("toneFitSlice");
+    const double priorStart = first();
+    wheel(source, {pointer, 70}, {-40, 0}, {}, Qt::NoModifier);
+    CHECK(first() > priorStart);
+    sourceScroll->setValue(sourceScroll->maximum());
+    CHECK(std::abs(first() + span() - 32) < .002);
+    CHECK(serializeTonePlay(*document.file().tonePlay) == before);
+    CHECK(document.undoStack()->index() == 0);
+    click("toneFitSlice");
+    const auto sx = [&](double beat) { return qRound(10 + (beat - first()) / span() * (source->width() - 20)); };
+    mouse(source, QEvent::MouseButtonPress, {sx(9.5) - 5, 30});
+    mouse(source, QEvent::MouseMove, {sx(9.625), 65});
+    mouse(source, QEvent::MouseButtonRelease, {sx(9.625), 65});
+    CHECK(std::abs(document.file().tonePlay->sourceEndBeat - 9.625) < .01);
+    CHECK(document.file().tonePlay->sourceStartBeat == 8);
+    document.undoStack()->undo();
+    CHECK(serializeTonePlay(*document.file().tonePlay) == before);
+
+    auto* viewport = roll->viewport();
+    const auto rx = [&](double beat) { return qRound(66 + beat * 48 - roll->horizontalScrollBar()->value()); };
+    mouse(viewport, QEvent::MouseButtonPress, {rx(.1), 12});
+    mouse(viewport, QEvent::MouseMove, {rx(7.9), 12});
+    mouse(viewport, QEvent::MouseButtonRelease, {rx(7.9), 12});
+    click("toneCopyNotes");
+    const auto clipboard = QJsonDocument::fromJson(QApplication::clipboard()->mimeData()->data("application/x-gravitino-tone-notes")).object();
+    CHECK(clipboard.value("length").toDouble() == 8);
+    CHECK(clipboard.value("pattern").toObject().value("notes").toArray().size() == 2);
+    mouse(viewport, QEvent::MouseButtonPress, {rx(8), 12});
+    mouse(viewport, QEvent::MouseButtonRelease, {rx(8), 12});
+    click("tonePasteNotes");
+    CHECK(document.file().tonePlay->notes.size() == 5);
+    if (document.file().tonePlay->notes.size() != 5) return;
+    CHECK(document.file().tonePlay->notes[3].beat == 8.5);
+    CHECK(document.file().tonePlay->notes[4].beat == 12.25);
+    CHECK(document.file().tonePlay->notes[4].duration == .125 && document.file().tonePlay->notes[4].velocity == .6);
+    QKeyEvent pasteKey(QEvent::KeyPress, Qt::Key_V, Qt::ControlModifier);
+    QApplication::sendEvent(roll, &pasteKey);
+    CHECK(document.file().tonePlay->notes.size() == 7);
+    CHECK(document.file().tonePlay->notes.back().beat == 20.25);
+    document.undoStack()->undo(); CHECK(document.file().tonePlay->notes.size() == 5);
+    document.undoStack()->undo(); CHECK(document.file().tonePlay->notes.size() == 3);
+    CHECK(serializeTonePlay(*document.file().tonePlay) == before);
+    // Reverse bar selection preserves leading and trailing silence too.
+    roll->horizontalScrollBar()->setValue(0);
+    mouse(viewport, QEvent::MouseButtonPress, {rx(7.9), 12});
+    mouse(viewport, QEvent::MouseMove, {rx(.1), 12});
+    mouse(viewport, QEvent::MouseButtonRelease, {rx(.1), 12});
+    QKeyEvent copyKey(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+    QApplication::sendEvent(roll, &copyKey);
+    CHECK(QJsonDocument::fromJson(QApplication::clipboard()->mimeData()->data("application/x-gravitino-tone-notes")).object() == clipboard);
+    // Box-selection and Shift-click adjust one group, not every note in the song.
+    const int rootY = 26 + (96 - 60) * 19 - roll->verticalScrollBar()->value() + 9;
+    mouse(viewport, QEvent::MouseButtonPress, {rx(.1), rootY + 15});
+    mouse(viewport, QEvent::MouseMove, {rx(5), rootY - 50});
+    mouse(viewport, QEvent::MouseButtonRelease, {rx(5), rootY - 50});
+    click("toneCopyNotes");
+    auto copied = [&] { return QJsonDocument::fromJson(QApplication::clipboard()->mimeData()->data("application/x-gravitino-tone-notes")).object(); };
+    CHECK(copied().value("pattern").toObject().value("notes").toArray().size() == 2);
+    mouse(viewport, QEvent::MouseButtonPress, {rx(.5) + 3, rootY}, Qt::ShiftModifier);
+    mouse(viewport, QEvent::MouseButtonRelease, {rx(.5) + 3, rootY}, Qt::ShiftModifier);
+    click("toneCopyNotes");
+    CHECK(copied().value("pattern").toObject().value("notes").toArray().size() == 1);
+    // A malformed external clipboard cannot change the document or sample.
+    auto* malformed = new QMimeData;
+    malformed->setData("application/x-gravitino-tone-notes", "{\"version\":1,\"length\":8,\"pattern\":{}}");
+    QApplication::clipboard()->setMimeData(malformed);
+    click("tonePasteNotes");
+    CHECK(serializeTonePlay(*document.file().tonePlay) == before);
+    // The smallest supported gate is now directly drawable, not forced to .25.
+    snap->setCurrentIndex(snap->findData(1.0 / 64));
+    mouse(viewport, QEvent::MouseButtonDblClick, {rx(2), rootY});
+    CHECK(document.file().tonePlay->notes.back().duration == 1.0 / 64);
+    CHECK(duration->singleStep() == 1.0 / 64);
+    CHECK(duration->minimum() == 1.0 / 64);
+    // Closely zoomed notes remain draggable and the right edge remains usable.
+    editor.zoom(1024.0 / 48);
+    roll->horizontalScrollBar()->setValue(1900);
+    auto* wideSnap = snap;
+    wideSnap->setCurrentIndex(wideSnap->findData(1.0 / 32));
+    const int edge = qRound(66 + (2 + 1.0 / 64) * 1024 - 1900 - 1);
+    mouse(viewport, QEvent::MouseButtonPress, {edge, rootY});
+    mouse(viewport, QEvent::MouseMove, {edge + 16, rootY});
+    mouse(viewport, QEvent::MouseButtonRelease, {edge + 16, rootY});
+    CHECK(document.file().tonePlay->notes.back().duration == 1.0 / 32);
+    CHECK(document.file().tonePlay->sourceStartBeat == 8 && document.file().tonePlay->sourceEndBeat == 9.5);
     editor.close();
 }
 
@@ -700,6 +1169,13 @@ void editor_audio_matches_perform_and_explains_the_two_beat_rulers(QApplication&
         pattern.sourceStartBeat = 2.125;
         pattern.sourceEndBeat = 2.625;
         pattern.notes = {{0,.125,60,.8},{.025,.125,67,.6}};
+        TonePlaySustain sustain;
+        sustain.loopStartBeat = 2.25; sustain.loopEndBeat = 2.5;
+        sustain.beat = 0; sustain.duration = .15;
+        pattern.sustain = sustain;
+        pattern.effects = TonePlayEffects{};
+        pattern.effects->tailBeats = 1;
+        pattern.effects->sustainDucking = .8;
         file.tonePlay = pattern;
     }
     QString error;
@@ -959,6 +1435,8 @@ int main(int argc, char** argv)
                 .toUtf8());
 
     checkCustomBankSwitching(app);
+    custom_stem_echo_records_every_action_and_restores_without_touching_song_cues(app);
+    tone_slices_zoom_without_edits_and_note_ranges_copy_with_short_gates(app);
     checkVirtualKnobOrientation();
     editor_drag_guides_follow_the_marker_not_the_pointer(app);
     checkPrimeRetries(app);
@@ -970,6 +1448,7 @@ int main(int argc, char** argv)
         editor_audio_matches_perform_and_explains_the_two_beat_rulers(app, true);
         tone_workspace_edits_notes_without_touching_automation_or_original_files(app);
         editor_event_types_and_auto_apply_keep_the_selected_action(app);
+        live_reload_preserves_unsaved_edits_and_running_preview(app);
         qputenv("GRAVITINO_TRANSITIONS_DIR", previousDirectory);
     }
 
@@ -2283,7 +2762,18 @@ int main(int argc, char** argv)
                         QPoint(), QPoint(0, -120), Qt::NoButton,
                         Qt::NoModifier, Qt::NoScrollPhase, false);
                     QApplication::sendEvent(editorTimeline, &scrollWheel);
+                    CHECK(timelineScroll->horizontalScrollBar()->value() == 0);
+                    if (timelineScroll->verticalScrollBar()->maximum() > 0)
+                        CHECK(timelineScroll->verticalScrollBar()->value() > 0);
+                    const int verticalAfter = timelineScroll->verticalScrollBar()->value();
+                    QWheelEvent shiftWheel(
+                        QPointF(500, 50),
+                        QPointF(editorTimeline->mapToGlobal(QPoint(500, 50))),
+                        QPoint(), QPoint(0, -120), Qt::NoButton,
+                        Qt::ShiftModifier, Qt::NoScrollPhase, false);
+                    QApplication::sendEvent(editorTimeline, &shiftWheel);
                     CHECK(timelineScroll->horizontalScrollBar()->value() > 0);
+                    CHECK(timelineScroll->verticalScrollBar()->value() == verticalAfter);
 
                     const double beforeZoom = editorTimeline->pixelsPerBeat();
                     const double pointerViewportX =

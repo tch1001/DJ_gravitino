@@ -97,7 +97,14 @@ bool performancePadActionIsSupported(PerformancePadAction action)
            action == PerformancePadAction::BeatJump ||
            action == PerformancePadAction::BeatLoop ||
            action == PerformancePadAction::SamplerSlot ||
-           action == PerformancePadAction::SavedLoop;
+           action == PerformancePadAction::SavedLoop ||
+           performancePadActionIsStemEcho(action);
+}
+
+bool performancePadActionIsStemEcho(PerformancePadAction action)
+{
+    return action == PerformancePadAction::VocalEcho ||
+           action == PerformancePadAction::InstrumentalEcho;
 }
 
 PerformancePadAssignment defaultPerformancePadAssignment(
@@ -183,6 +190,11 @@ PerformancePadAssignment sanitizePerformancePadAssignment(
     const PerformancePadAssignment defaults =
         defaultPerformancePadAssignment(mode, pad);
     result.action = defaults.action;
+    // Only NORMAL CUSTOM pads accept alternate actions. Older settings without
+    // an action retain their saved-loop/audio behavior; other banks stay fixed.
+    if (mode == PerformancePadMode::Sampler &&
+        performancePadActionIsStemEcho(assignment.action))
+        result.action = assignment.action;
 
     if (!std::isfinite(result.value)) result.value = defaults.value;
     if (!std::isfinite(result.fxWet)) result.fxWet = defaults.fxWet;
@@ -196,6 +208,10 @@ PerformancePadAssignment sanitizePerformancePadAssignment(
     case PerformancePadAction::BeatLoop:
         result.value = std::clamp(result.value, 0.125, 64.0);
         break;
+    case PerformancePadAction::VocalEcho:
+    case PerformancePadAction::InstrumentalEcho:
+        result.fxType = 0;
+        [[fallthrough]];
     case PerformancePadAction::FxHold:
         result.fxType = std::clamp(result.fxType, 0, 2);
         result.fxWet = std::clamp(result.fxWet, 0.0, 1.0);

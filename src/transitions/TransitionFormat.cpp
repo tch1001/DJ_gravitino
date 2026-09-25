@@ -764,6 +764,12 @@ void ensurePortableDefaults(GvtFile& file)
     }
     if (file.tonePlay && !file.requirements.contains("tone-play.v1"))
         file.requirements.append("tone-play.v1");
+    if (file.tonePlay && file.tonePlay->sustain &&
+        !file.requirements.contains("tone-play-sustain.v1"))
+        file.requirements.append("tone-play-sustain.v1");
+    if (file.tonePlay && file.tonePlay->effects &&
+        !file.requirements.contains("tone-play-effects.v1"))
+        file.requirements.append("tone-play-effects.v1");
     if (!file.transitionLoops.empty() &&
         !file.requirements.contains(QStringLiteral("temporary-loops.v1")))
         file.requirements.append(QStringLiteral("temporary-loops.v1"));
@@ -975,7 +981,9 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
                                     QStringLiteral("temporary-cues.v1"),
                                     QStringLiteral("temporary-loops.v1"),
                                     QStringLiteral("timeline-end.v1"),
-                                    QStringLiteral("tone-play.v1")};
+                                    QStringLiteral("tone-play.v1"),
+                                    QStringLiteral("tone-play-sustain.v1"),
+                                    QStringLiteral("tone-play-effects.v1")};
     for (const QString& requirement : file.requirements)
         if (!supported.contains(requirement))
             file.unsupportedRequirements.append(requirement);
@@ -1462,6 +1470,16 @@ bool transitionParse(const QString& text, GvtFile& out, QString* error,
     if (!parseTonePlay(performance.value("tone_play"), file.tonePlay, error)) return false;
     if (file.tonePlay && !file.requirements.contains("tone-play.v1")) {
         if (error) *error = "performance.tone_play requires capability tone-play.v1";
+        return false;
+    }
+    if (file.tonePlay && file.tonePlay->sustain &&
+        !file.requirements.contains("tone-play-sustain.v1")) {
+        if (error) *error = "performance.tone_play.sustain requires capability tone-play-sustain.v1";
+        return false;
+    }
+    if (file.tonePlay && file.tonePlay->effects &&
+        !file.requirements.contains("tone-play-effects.v1")) {
+        if (error) *error = "performance.tone_play.effects requires capability tone-play-effects.v1";
         return false;
     }
     if (file.endBeat.has_value()) {

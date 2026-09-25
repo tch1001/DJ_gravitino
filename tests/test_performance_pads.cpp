@@ -68,6 +68,16 @@ int main()
     CHECK(jump.action == PerformancePadAction::BeatJump);
     CHECK(std::abs(jump.value + 16.0) < 1e-9);
 
+    for (auto action : {PerformancePadAction::VocalEcho, PerformancePadAction::InstrumentalEcho}) {
+        auto echo = defaultPerformancePadAssignment(PerformancePadMode::Sampler, 0);
+        echo.action = action; echo.fxType = 2; echo.fxWet = 4; echo.fxBeats = -1;
+        const auto valid = sanitizePerformancePadAssignment(PerformancePadMode::Sampler, 0, echo);
+        CHECK(valid.action == action && performancePadActionIsSupported(action));
+        CHECK(valid.fxType == 0 && valid.fxWet == 1 && valid.fxBeats == .25);
+        CHECK(sanitizePerformancePadAssignment(PerformancePadMode::HotCue, 0, echo).action ==
+            PerformancePadAction::HotCue);
+    }
+
     std::printf("test_performance_pads: mode defaults and validation passed\n");
     return 0;
 }

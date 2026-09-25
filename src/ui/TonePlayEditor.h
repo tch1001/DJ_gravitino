@@ -8,6 +8,8 @@ class QCheckBox;
 class QDoubleSpinBox;
 class QComboBox;
 class QLabel;
+class QScrollBar;
+class QPushButton;
 namespace gvt {
 class TransitionEditorDocument;
 class ToneSampleView;
@@ -22,21 +24,30 @@ class TonePlayEditor final : public QWidget {
     void refresh();
   signals:
     void auditionRequested(int pitch);
+    void sustainAuditionRequested();
     void previewRequested();
     void cursorRequested(double beat);
 
   private:
-    void commit(TonePlayPattern, const QString &);
+    bool commit(TonePlayPattern, const QString &);
     void refreshNote();
     TransitionEditorDocument *document_;
     TrackDataPtr track_;
     ToneSampleView *sample_;
     TonePianoRoll *roll_;
+    QScrollBar *sampleScroll_;
     QCheckBox *enabled_;
     QCheckBox *replace_;
+    QCheckBox *sustainEnabled_, *editSustain_;
+    QPushButton *sustainPreview_;
+    QDoubleSpinBox *holdBeat_, *holdDuration_, *holdGain_, *loopStart_, *loopEnd_;
+    QDoubleSpinBox *crossfade_, *attack_, *release_;
+    QComboBox *holdPitch_;
+    QCheckBox *effectsEnabled_;
+    QDoubleSpinBox *echo_, *reverb_, *echoBeats_, *tailBeats_, *holdDucking_;
     QDoubleSpinBox *start_, *end_, *gain_, *noteBeat_, *noteDuration_, *noteVelocity_;
     QComboBox *root_, *notePitch_, *snap_;
-    QLabel *help_;
+    QLabel *help_, *sliceInfo_;
     bool refreshing_ = false;
 };
 } // namespace gvt

@@ -344,18 +344,24 @@ constexpr int kTransitionFormatRole = Qt::UserRole + 2;
 class TransitionEdgeModel : public QAbstractTableModel {
 public:
     enum Col { ColFrom, ColArrow, ColTo, ColName, ColBpm, ColLength,
-               ColCues, ColCount };
+               ColCues, ColStatus, ColCount };
 
-    TransitionEdgeModel(TransitionStore* store, AudioEngine* engine,
+    TransitionEdgeModel(TransitionStore* store, AudioEngine* engine, TrackLibrary* library,
                         QObject* parent)
-        : QAbstractTableModel(parent), store_(store), engine_(engine)
+        : QAbstractTableModel(parent), store_(store), engine_(engine), library_(library)
     {
         if (store_) {
+            connect(store_, &TransitionStore::aboutToChange, this,
+                    [this] { beginResetModel(); });
             connect(store_, &TransitionStore::changed, this, [this] {
-                beginResetModel();
                 endResetModel();
             });
         }
+        const auto refresh = [this] {
+            if (rowCount() > 0) emit dataChanged(index(0, ColStatus), index(rowCount()-1, ColStatus));
+        };
+        connect(library_, &QAbstractItemModel::dataChanged, this, refresh);
+        connect(library_, &QAbstractItemModel::modelReset, this, refresh);
     }
 
     int rowCount(const QModelIndex& parent = {}) const override
@@ -374,6 +380,24 @@ public:
             idx.row() >= (int)store_->all().size())
             return {};
         const GvtFile& file = store_->all()[(size_t)idx.row()];
+        if (idx.column() == ColStatus && (role == Qt::DisplayRole || role == Qt::ToolTipRole || role == Qt::UserRole)) {
+            QStringList sides;
+            int ready = 0;
+            for (bool outgoing : {true, false}) {
+                QString status = QObject::tr("Missing / unmatched");
+                for (int row = 0; row < library_->trackCount(); ++row) {
+                    const auto profile = library_->profileAt(row);
+                    if (!profile || !store_->matchesEndpoint(file, outgoing, *profile)) continue;
+                    if (library_->trackAt(row)) { status = QObject::tr("Ready"); ++ready; break; }
+                    const auto cell = library_->index(row, 5);
+                    status = cell.data().toString();
+                    const auto error = cell.data(TrackLibrary::AnalysisErrorRole).toString();
+                    if (!error.isEmpty()) status = QObject::tr("Error: %1").arg(error);
+                }
+                sides << (outgoing ? QObject::tr("OUT: %1") : QObject::tr("IN: %1")).arg(status);
+            }
+            return ready == 2 ? QObject::tr("Ready (2/2 songs)") : sides.join(QStringLiteral(" · "));
+        }
         if (role == kTransitionFromPlayingRole) {
             if (!engine_) return false;
             for (int deck = 0; deck < kNumDecks; ++deck) {
@@ -461,6 +485,7 @@ public:
         case ColBpm:    return QObject::tr("BPM");
         case ColLength: return QObject::tr("Length");
         case ColCues:   return QObject::tr("Cues");
+        case ColStatus:return QObject::tr("Status");
         }
         return {};
     }
@@ -468,6 +493,7 @@ public:
 private:
     TransitionStore* store_;
     AudioEngine* engine_;
+    TrackLibrary* library_;
 };
 
 // The user's chosen column/order remains the secondary sort. The live
@@ -731,7 +757,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
         historyTabBtn_->hide();
     }
 
-    transitionModel_ = new TransitionEdgeModel(transitions_, engine_, this);
+    transitionModel_ = new TransitionEdgeModel(transitions_, engine_, library_, this);
     transitionProxy_ = new TransitionSortProxy(engine_, this);
     transitionProxy_->setSourceModel(transitionModel_);
     transitionProxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
@@ -776,6 +802,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     transitionTable_->setContextMenuPolicy(Qt::CustomContextMenu);
     transitionTable_->verticalHeader()->setVisible(false);
     transitionTable_->horizontalHeader()->setStretchLastSection(false);
+    transitionTable_->setColumnWidth(TransitionEdgeModel::ColStatus, 240);
     transitionTable_->horizontalHeader()->setSectionResizeMode(
         TransitionEdgeModel::ColFrom, QHeaderView::Stretch);
     transitionTable_->horizontalHeader()->setSectionResizeMode(
@@ -867,7 +894,9 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
             &LibraryWidget::rebuildCrates);
     connect(library_, &QAbstractItemModel::modelAboutToBeReset, this, [this] {
         for (auto& pending : pendingLoads_) pending = {};
+        pendingTransition_.reset();
     });
+    connect(transitions_, &TransitionStore::changed, this, [this] { pendingTransition_.reset(); });
     connect(library_, &TrackLibrary::trackReady, this, &LibraryWidget::finishPendingLoads);
     connect(library_, &QAbstractItemModel::rowsInserted, this,
             &LibraryWidget::rebuildCrates);
@@ -887,6 +916,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     loadStateTimer_ = new QTimer(this);
     loadStateTimer_->setInterval(100);
     connect(loadStateTimer_, &QTimer::timeout, this, [this] {
+        finishPendingTransition();
         updateLoadButtons();
         proxy_->refreshRecommendationPriority();
         transitionProxy_->refreshPlayingPriority();
@@ -1115,7 +1145,7 @@ int LibraryWidget::trackRowFor(const GvtFile& transition,
     std::vector<std::pair<int, MatchQuality>> candidates;
     std::vector<int> metadataCandidates;
     for (int row = 0; row < library_->trackCount(); ++row) {
-        const TrackDataPtr track = library_->trackAt(row);
+        const TrackDataPtr track = library_->profileAt(row);
         if (!track) continue;
         const MatchQuality quality = matchTrack(ref, *track);
         if (transitions_->matchesEndpoint(transition, outgoing, *track))
@@ -1126,7 +1156,7 @@ int LibraryWidget::trackRowFor(const GvtFile& transition,
     }
     if (candidates.empty() && !metadataCandidates.empty()) {
         const int row = metadataCandidates.front();
-        const TrackDataPtr track = library_->trackAt(row);
+        const TrackDataPtr track = library_->profileAt(row);
         if (metadataCandidates.size() > 1) {
             emit const_cast<LibraryWidget*>(this)->statusMessage(
                 tr("Several metadata-only candidates exist; load and verify the desired asset manually"),
@@ -1161,7 +1191,7 @@ int LibraryWidget::trackRowFor(const GvtFile& transition,
 
     QStringList choices;
     for (const auto& [row, quality] : candidates) {
-        const TrackDataPtr track = library_->trackAt(row);
+        const TrackDataPtr track = library_->profileAt(row);
         const QFileInfo info(track->filePath);
         const QString evidence = quality == MatchQuality::Fingerprint
                                      ? tr("exact asset")
@@ -1184,102 +1214,108 @@ int LibraryWidget::trackRowFor(const GvtFile& transition,
 
 void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
 {
-    if (!transitions_ || !proxyIndex.isValid()) return;
-    const QModelIndex source = transitionProxy_->mapToSource(proxyIndex);
-    if (!source.isValid() || source.row() < 0 ||
-        source.row() >= static_cast<int>(transitions_->all().size())) {
+    if (!transitions_ || !proxyIndex.isValid() || !isEnabled()) return;
+    if (engine_->exclusivePreviewActive()) {
+        emit statusMessage(tr("Stop editor preview before loading a transition"), 5000);
         return;
     }
-    const GvtFile& transition =
-        transitions_->all()[static_cast<std::size_t>(source.row())];
-    if (!selectedTransitionPath_.isEmpty() &&
-        selectedTransitionPath_ == transition.filePath) {
+    const QModelIndex source = transitionProxy_->mapToSource(proxyIndex);
+    if (!source.isValid() || source.row() < 0 ||
+        source.row() >= static_cast<int>(transitions_->all().size())) return;
+    const GvtFile transition = transitions_->all()[size_t(source.row())];
+    pendingTransition_.reset();
+    for (auto& load : pendingLoads_) load = {};
+    if (selectedTransitionPath_ == transition.filePath) {
         selectedTransitionPath_.clear();
         transitionTable_->clearSelection();
-        transitionTable_->setCurrentIndex(QModelIndex());
-        emit transitionSelected(QString());
+        transitionTable_->setCurrentIndex({});
+        emit transitionSelected({});
         updateTransitionButtons();
         return;
     }
     selectedTransitionPath_ = transition.filePath;
-
-    const auto clearFailedSelection = [this] {
-        selectedTransitionPath_.clear();
-        transitionTable_->clearSelection();
-        transitionTable_->setCurrentIndex(QModelIndex());
-        emit transitionSelected(QString());
-        updateTransitionButtons();
-    };
-
-    const bool playingA = engine_->deck(0).playing.load();
-    const bool playingB = engine_->deck(1).playing.load();
-    const int playingCount = static_cast<int>(playingA) +
-                             static_cast<int>(playingB);
-    if (playingCount == 2) {
-        const TrackDataPtr a = engine_->deck(0).track();
-        const TrackDataPtr b = engine_->deck(1).track();
-        if (a && b &&
-            ((transitions_->matchesEndpoint(transition, true, *a) &&
-              transitions_->matchesEndpoint(transition, false, *b)) ||
-             (transitions_->matchesEndpoint(transition, true, *b) &&
-              transitions_->matchesEndpoint(transition, false, *a))))
+    const bool aPlaying = engine_->deck(0).playing.load();
+    const bool bPlaying = engine_->deck(1).playing.load();
+    const auto a = engine_->deck(0).track(), b = engine_->deck(1).track();
+    if (aPlaying && bPlaying) {
+        if (a && b && ((transitions_->matchesEndpoint(transition, true, *a) &&
+                       transitions_->matchesEndpoint(transition, false, *b)) ||
+                      (transitions_->matchesEndpoint(transition, true, *b) &&
+                       transitions_->matchesEndpoint(transition, false, *a))))
             emit transitionSelected(transition.filePath);
-        else
-            clearFailedSelection();
-        emit statusMessage(
-            tr("⚠ Transition not loaded: both decks are playing, so neither track can be replaced"),
-            5500);
+        else {
+            selectedTransitionPath_.clear();
+            emit transitionSelected({});
+            emit statusMessage(tr("Both decks are playing — neither track can be replaced"), 5500);
+        }
         return;
     }
-
-    const int fromRow = trackRowFor(transition, true);
+    const int fromDeck = bPlaying ? 1 : 0;
+    const auto playingTrack = engine_->deck(fromDeck).track();
+    if ((aPlaying || bPlaying) &&
+        (!playingTrack || !transitions_->matchesEndpoint(transition, true, *playingTrack))) {
+        selectedTransitionPath_.clear();
+        emit transitionSelected({});
+        emit statusMessage(tr("Transition not loaded: the playing track does not match its FROM track"), 5500);
+        return;
+    }
+    const int fromRow = (aPlaying || bPlaying) ? -1 : trackRowFor(transition, true);
     const int toRow = trackRowFor(transition, false);
-    if (playingCount == 0) {
-        if (fromRow < 0 || toRow < 0) {
-            clearFailedSelection();
-            emit statusMessage(
-                tr("Transition tracks are not ready in the current library"),
-                5000);
+    if ((fromRow < 0 && !aPlaying && !bPlaying) || toRow < 0) {
+        selectedTransitionPath_.clear();
+        emit transitionSelected({});
+        emit statusMessage(tr("Transition audio is missing or needs an explicit arrangement match"), 5500);
+        return;
+    }
+    pendingTransition_ = PendingTransition{transition, {fromRow, toRow}, fromDeck, {a, b}};
+    for (int row : {fromRow, toRow})
+        if (row >= 0 && !library_->trackAt(row)) library_->prioritizeAnalysis(row);
+    if ((fromRow >= 0 && !library_->trackAt(fromRow)) || !library_->trackAt(toRow))
+        emit statusMessage(tr("Prioritizing both transition songs — see Status; will load when both are ready"), 6000);
+    finishPendingTransition();
+}
+
+void LibraryWidget::finishPendingTransition()
+{
+    if (!pendingTransition_) return;
+    const auto pending = *pendingTransition_;
+    const auto cancel = [this](const QString& message) {
+        pendingTransition_.reset();
+        selectedTransitionPath_.clear();
+        emit transitionSelected({});
+        emit statusMessage(message, 6000);
+    };
+    if (pending.file.filePath != selectedTransitionPath_ || !isEnabled() || engine_->exclusivePreviewActive()) {
+        cancel(tr("Pending transition cancelled: workspace is now in use"));
+        return;
+    }
+    for (int deck = 0; deck < 2; ++deck)
+        if (engine_->deck(deck).track() != pending.previous[deck] ||
+            (engine_->deck(deck).playing.load() &&
+             !(deck == pending.fromDeck && pending.rows[0] < 0))) {
+            cancel(tr("Pending transition cancelled: a deck changed or started playing"));
             return;
         }
-        loadRowTo(fromRow, 0);
-        loadRowTo(toRow, 1);
-        emit transitionSelected(transition.filePath);
-        emit statusMessage(
-            tr("Loaded transition '%1': FROM on deck A, TO on deck B")
-                .arg(transition.name),
-            5000);
-        return;
+    TrackDataPtr tracks[2];
+    for (int side = 0; side < 2; ++side) {
+        const int row = pending.rows[side];
+        tracks[side] = row < 0 ? engine_->deck(pending.fromDeck).track() : library_->trackAt(row);
+        if (!tracks[side]) {
+            if (row >= 0 && !library_->index(row, 5).data(TrackLibrary::AnalysisErrorRole).toString().isEmpty())
+                cancel(tr("Transition analysis failed — see Status; click again to retry"));
+            return;
+        }
+        if (!transitions_->matchesEndpoint(pending.file, side == 0, *tracks[side])) {
+            cancel(tr("Analyzed audio does not match this transition; no deck was replaced"));
+            return;
+        }
     }
-
-    const int playingDeck = playingA ? 0 : 1;
-    const TrackDataPtr playingTrack = engine_->deck(playingDeck).track();
-    if (!playingTrack ||
-        !transitions_->matchesEndpoint(transition, true, *playingTrack)) {
-        clearFailedSelection();
-        emit statusMessage(
-            tr("Transition not loaded: the playing track does not match its FROM track"),
-            5500);
-        return;
-    }
-    if (toRow < 0) {
-        clearFailedSelection();
-        emit statusMessage(
-            tr("Transition TO track is not ready in the current library"),
-            5000);
-        return;
-    }
-
-    const int toDeck = 1 - playingDeck;
-    loadRowTo(toRow, toDeck);
-    emit transitionSelected(transition.filePath);
-    emit statusMessage(
-        tr("FROM matched deck %1; loaded TO on deck %2")
-            .arg(playingDeck == 0 ? QStringLiteral("A")
-                                  : QStringLiteral("B"))
-            .arg(toDeck == 0 ? QStringLiteral("A")
-                             : QStringLiteral("B")),
-        5000);
+    pendingTransition_.reset();
+    if (pending.rows[0] >= 0) loadRowTo(pending.rows[0], pending.fromDeck);
+    loadRowTo(pending.rows[1], 1 - pending.fromDeck);
+    emit transitionSelected(pending.file.filePath);
+    emit statusMessage(tr("Loaded transition “%1” — both songs ready").arg(pending.file.name), 5000);
+    updateTransitionButtons();
 }
 
 int LibraryWidget::selectedTransitionSourceRow() const
@@ -1412,6 +1448,7 @@ void LibraryWidget::deleteSelectedTransition()
 
 void LibraryWidget::loadRowTo(int sourceRow, int deck)
 {
+    pendingTransition_.reset();
     if (deck < 0 || deck >= kNumDecks)
         return;
     if (engine_->exclusivePreviewActive()) {
@@ -1466,6 +1503,7 @@ void LibraryWidget::cancelUnsafePendingLoads()
 
 void LibraryWidget::finishPendingLoads(int sourceRow)
 {
+    finishPendingTransition();
     cancelUnsafePendingLoads();
     const QString path = library_->pathAt(sourceRow);
     for (int deck = 0; deck < kNumDecks; ++deck) {

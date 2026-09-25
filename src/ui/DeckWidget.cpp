@@ -1215,7 +1215,7 @@ void DeckWidget::setCustomPadBank(CustomPadBank bank)
     syncPerformancePadUi();
     showPadFeedback(usesTransitionCustomBank()
         ? tr("CUSTOM: TRANSITION · temporary cues/loops; edit in the transition editor")
-        : tr("CUSTOM: NORMAL · your saved loops/audio; right-click a pad to edit"));
+        : tr("CUSTOM: NORMAL · saved loops, audio or stem echo; right-click a pad to edit"));
 }
 
 QWidget* DeckWidget::controlWidget(ControlId control) const
@@ -1260,6 +1260,10 @@ void DeckWidget::loadPerformancePadSettings()
                 .arg(deckIndex_)
                 .arg(QLatin1String(performancePadModeKey(mode)))
                 .arg(pad + 1);
+            const int action = settings.value(base + QStringLiteral("action"),
+                static_cast<int>(assignment.action)).toInt();
+            if (action >= 0 && action <= static_cast<int>(PerformancePadAction::InstrumentalEcho))
+                assignment.action = static_cast<PerformancePadAction>(action);
             assignment.value = settings.value(base + QStringLiteral("value"),
                                                 assignment.value).toDouble();
             assignment.fxType = settings.value(base + QStringLiteral("fxType"),
@@ -1303,6 +1307,7 @@ void DeckWidget::savePerformancePadAssignment(PerformancePadMode mode, int pad)
         .arg(QLatin1String(performancePadModeKey(mode)))
         .arg(pad + 1);
     QSettings settings;
+    settings.setValue(base + QStringLiteral("action"), static_cast<int>(assignment.action));
     settings.setValue(base + QStringLiteral("value"), assignment.value);
     settings.setValue(base + QStringLiteral("fxType"), assignment.fxType);
     settings.setValue(base + QStringLiteral("fxWet"), assignment.fxWet);
@@ -1349,8 +1354,8 @@ void DeckWidget::setPerformancePadMode(PerformancePadMode mode)
         showPadFeedback(
             usesTransitionCustomBank()
                 ? tr("CUSTOM: TRANSITION · temporary cues/loops; switch to NORMAL to edit your own pads")
-                : tr("CUSTOM: NORMAL · empty pad captures the active loop; filled loop "
-                     "starts it; right-click to edit"));
+                : tr("CUSTOM: NORMAL · empty pad captures the active loop; right-click "
+                     "to edit or assign Vocal / Instrumental Echo"));
     } else if (padMode_ == PerformancePadMode::Keyboard ||
                padMode_ == PerformancePadMode::KeyShift) {
         showPadFeedback(tr("%1 is programmable; pitch-shift audio is not available yet")
@@ -1434,6 +1439,10 @@ unsigned int DeckWidget::performancePadLedMask(
         case PerformancePadAction::SavedLoop:
             enabled = track && track->savedLoops[pad].isSet();
             break;
+        case PerformancePadAction::VocalEcho:
+        case PerformancePadAction::InstrumentalEcho:
+            enabled = track && engine_->deck(deckIndex_).stemsAttached();
+            break;
         case PerformancePadAction::FxHold:
         case PerformancePadAction::BeatJump:
         case PerformancePadAction::BeatLoop:
@@ -1479,10 +1488,10 @@ void DeckWidget::syncPerformancePadUi()
         customBankCombo_->setVisible(padMode_ == PerformancePadMode::Sampler);
         customBankCombo_->setEnabled(temporaryTransitionCuesAvailable_);
         customBankCombo_->setToolTip(temporaryTransitionCuesAvailable_
-            ? tr("NORMAL: your editable saved loops and custom audio. "
+            ? tr("NORMAL: your editable saved loops, custom audio and stem-echo pads. "
                  "TRANSITION: protected temporary cues/loops from the selected transition. "
                  "Switching banks does not change either bank or transition playback.")
-            : tr("NORMAL: your editable saved loops and custom audio. "
+            : tr("NORMAL: your editable saved loops, custom audio and stem-echo pads. "
                  "Select a transition with cues/loops to enable the TRANSITION bank."));
     }
     const QColor accent = deckAccent(deckIndex_);
@@ -1571,6 +1580,15 @@ void DeckWidget::syncPerformancePadUi()
                           .arg(pad + 1);
             break;
         }
+        case PerformancePadAction::VocalEcho:
+        case PerformancePadAction::InstrumentalEcho:
+            color = QStringLiteral("#38c9b8");
+            tooltip = tr("Hold %1 at %2% wet, %3 beat(s); release restores the previous FX and stems. "
+                         "Requires prepared stems. Right-click to assign or adjust.")
+                .arg(assignment.action == PerformancePadAction::VocalEcho
+                    ? tr("Vocal Echo (vocals only)") : tr("Instrumental Echo (melody, bass and drums)"))
+                .arg(qRound(assignment.fxWet * 100.0)).arg(assignment.fxBeats);
+            break;
         case PerformancePadAction::FxHold: {
             static constexpr const char* names[3] = {"ECHO", "REVERB", "FLANGER"};
             static constexpr const char* colors[3] = {"#38c9b8", "#a873e8", "#e8a13a"};
@@ -1690,7 +1708,8 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
             const auto id = static_cast<ControlId>(
                 static_cast<int>(ControlId::HotCue1) + pad);
             dispatch(id, 0.0);
-        } else if (assignment.action == PerformancePadAction::FxHold) {
+        } else if (assignment.action == PerformancePadAction::FxHold ||
+                   performancePadActionIsStemEcho(assignment.action)) {
             dispatchPerformancePadGesture(pressedMode, pad);
             endPadFx(pad);
         } else if (assignment.action == PerformancePadAction::SavedLoop ||
@@ -1738,6 +1757,11 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
         requestHotCueClear(pad);
         return;
     }
+    if (performancePadActionIsStemEcho(assignment.action) &&
+        !engine_->deck(deckIndex_).stemsAttached()) {
+        showPadFeedback(tr("Prepare stems with the STEMS button before using Vocal / Instrumental Echo. Nothing was changed."));
+        return;
+    }
 
     padIsPressed_[pad] = true;
     padReleasePending_[pad] = false;
@@ -1754,6 +1778,8 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
         waveform_->update();
         break;
     }
+    case PerformancePadAction::VocalEcho:
+    case PerformancePadAction::InstrumentalEcho:
     case PerformancePadAction::FxHold:
         dispatchPerformancePadGesture(padMode_, pad);
         beginPadFx(pad, assignment);
@@ -1834,6 +1860,7 @@ void DeckWidget::handlePerformancePad(int pad, bool pressed)
     // previews, and momentary FX do.
     if (assignment.action != PerformancePadAction::HotCue &&
         assignment.action != PerformancePadAction::FxHold &&
+        !performancePadActionIsStemEcho(assignment.action) &&
         assignment.action != PerformancePadAction::SavedLoop &&
         assignment.action != PerformancePadAction::SamplerSlot)
         padIsPressed_[pad] = false;
@@ -1857,11 +1884,28 @@ void DeckWidget::beginPadFx(
     padFxSnapshot_.on = deck.fxOn.load();
     padFxSnapshot_.wet = deck.fxWet.load();
     padFxSnapshot_.beats = deck.fxBeats.load();
+    padFxSnapshot_.track = deck.track();
+    padFxSnapshot_.mode = padMode_;
+    padFxSnapshot_.restoreStems = performancePadActionIsStemEcho(assignment.action);
+    padFxSnapshot_.stems = {deck.stemVocals.load(), deck.stemMelody.load(),
+                            deck.stemBass.load(), deck.stemDrums.load()};
+    const auto action = [this, pad](ControlId id, double value) {
+        dispatchPerformancePadGesture(padMode_, pad);
+        dispatch(id, value);
+    };
 
-    dispatch(ControlId::FxType, assignment.fxType);
-    dispatch(ControlId::FxWet, assignment.fxWet);
-    dispatch(ControlId::FxBeats, assignment.fxBeats);
-    dispatch(ControlId::FxOn, 1.0);
+    if (padFxSnapshot_.restoreStems) {
+        const bool vocals = assignment.action == PerformancePadAction::VocalEcho;
+        action(ControlId::StemVocals, vocals ? 1.0 : 0.0);
+        action(ControlId::StemMelody, vocals ? 0.0 : 1.0);
+        action(ControlId::StemBass, vocals ? 0.0 : 1.0);
+        action(ControlId::StemDrums, vocals ? 0.0 : 1.0);
+    }
+
+    action(ControlId::FxType, assignment.fxType);
+    action(ControlId::FxWet, assignment.fxWet);
+    action(ControlId::FxBeats, assignment.fxBeats);
+    action(ControlId::FxOn, 1.0);
 }
 
 void DeckWidget::endPadFx(int pad)
@@ -1870,14 +1914,28 @@ void DeckWidget::endPadFx(int pad)
     const PadFxSnapshot snapshot = padFxSnapshot_;
     padFxSnapshot_.valid = false;
     padFxSnapshot_.pad = -1;
+    padFxSnapshot_.track.reset();
+    // Loading another song resets that deck's stems. A late release must not
+    // apply the old song's FX/stem snapshot to the replacement.
+    if (snapshot.track != engine_->deck(deckIndex_).track()) return;
+    const auto action = [this, pad, &snapshot](ControlId id, double value) {
+        dispatchPerformancePadGesture(snapshot.mode, pad);
+        dispatch(id, value);
+    };
 
     // Fully disengage the momentary effect before restoring the previous slot.
     // All changes still travel through ControlBus and remain recordable.
-    dispatch(ControlId::FxOn, 0.0);
-    dispatch(ControlId::FxType, snapshot.type);
-    dispatch(ControlId::FxWet, snapshot.wet);
-    dispatch(ControlId::FxBeats, snapshot.beats);
-    if (snapshot.on) dispatch(ControlId::FxOn, 1.0);
+    action(ControlId::FxOn, 0.0);
+    action(ControlId::FxType, snapshot.type);
+    action(ControlId::FxWet, snapshot.wet);
+    action(ControlId::FxBeats, snapshot.beats);
+    if (snapshot.on) action(ControlId::FxOn, 1.0);
+    if (snapshot.restoreStems) {
+        action(ControlId::StemVocals, snapshot.stems[0]);
+        action(ControlId::StemMelody, snapshot.stems[1]);
+        action(ControlId::StemBass, snapshot.stems[2]);
+        action(ControlId::StemDrums, snapshot.stems[3]);
+    }
 }
 
 void DeckWidget::showPadFeedback(const QString& text)
@@ -1998,6 +2056,60 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
             tr("CUSTOM: NORMAL · PAD %1").arg(pad + 1));
         heading->setEnabled(false);
         menu.addSeparator();
+        auto persistCustom = [this, pad] {
+            auto& changed = padAssignments_[static_cast<int>(PerformancePadMode::Sampler)][pad];
+            changed = sanitizePerformancePadAssignment(PerformancePadMode::Sampler, pad, changed);
+            savePerformancePadAssignment(PerformancePadMode::Sampler, pad);
+            syncPerformancePadUi();
+        };
+        QMenu* actionMenu = menu.addMenu(tr("Pad action"));
+        for (auto kind : {PerformancePadAction::SamplerSlot, PerformancePadAction::VocalEcho,
+                          PerformancePadAction::InstrumentalEcho}) {
+            const QString label = kind == PerformancePadAction::VocalEcho ? tr("Vocal Echo")
+                : kind == PerformancePadAction::InstrumentalEcho ? tr("Instrumental Echo")
+                : tr("Saved loop / custom audio");
+            QAction* choose = actionMenu->addAction(label);
+            choose->setCheckable(true);
+            choose->setChecked(sampler.action == kind);
+            connect(choose, &QAction::triggered, this, [this, pad, kind, persistCustom] {
+                releaseCustomPads();
+                auto& changed = padAssignments_[static_cast<int>(PerformancePadMode::Sampler)][pad];
+                changed.action = kind;
+                changed.label = kind == PerformancePadAction::VocalEcho ? "VOC ECHO"
+                    : kind == PerformancePadAction::InstrumentalEcho ? "INS ECHO"
+                    : changed.resource.empty() ? "S" + std::to_string(pad + 1)
+                    : QFileInfo(QString::fromStdString(changed.resource)).completeBaseName().left(8).toStdString();
+                persistCustom();
+                showPadFeedback(performancePadActionIsStemEcho(kind)
+                    ? tr("Hold the pad for stem echo; release restores FX and stems. Saved loops are kept; switch Pad action to use them.")
+                    : tr("CUSTOM pad restored to saved-loop / audio mode"));
+            });
+        }
+        if (performancePadActionIsStemEcho(sampler.action)) {
+            QMenu* wetMenu = menu.addMenu(tr("Echo wet level"));
+            for (double wet : {0.25, 0.5, 0.75, 1.0}) {
+                QAction* change = wetMenu->addAction(tr("%1%").arg(qRound(wet * 100)));
+                change->setCheckable(true);
+                change->setChecked(std::abs(sampler.fxWet - wet) < 1e-9);
+                connect(change, &QAction::triggered, this, [this, pad, wet, persistCustom] {
+                    releaseCustomPads();
+                    padAssignments_[static_cast<int>(PerformancePadMode::Sampler)][pad].fxWet = wet;
+                    persistCustom();
+                });
+            }
+            QMenu* beatsMenu = menu.addMenu(tr("Echo beats"));
+            for (double beats : {0.25, 0.5, 1.0, 2.0, 4.0}) {
+                QAction* change = beatsMenu->addAction(formatFxBeats(beats));
+                change->setCheckable(true);
+                change->setChecked(std::abs(sampler.fxBeats - beats) < 1e-9);
+                connect(change, &QAction::triggered, this, [this, pad, beats, persistCustom] {
+                    releaseCustomPads();
+                    padAssignments_[static_cast<int>(PerformancePadMode::Sampler)][pad].fxBeats = beats;
+                    persistCustom();
+                });
+            }
+        }
+        menu.addSeparator();
         QAction* capture = menu.addAction(
             slot.isSet() ? tr("Replace with active loop") : tr("Save active loop"));
         capture->setEnabled(canCapture);
@@ -2007,6 +2119,10 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
             changed.startSec = activeStart;
             changed.endSec = activeEnd;
             if (changed.label.isEmpty()) changed.label = tr("L%1").arg(pad + 1);
+            releaseCustomPads();
+            padAssignments_[static_cast<int>(PerformancePadMode::Sampler)][pad].action =
+                PerformancePadAction::SamplerSlot;
+            savePerformancePadAssignment(PerformancePadMode::Sampler, pad);
             emit trackPerformanceMetadataChanged(deckIndex_);
             syncPerformancePadUi();
             showPadFeedback(tr("Saved active loop to %1").arg(changed.label));
@@ -2047,6 +2163,8 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
                 this, tr("Assign custom slot"), existing,
                 tr("Audio files (*.wav *.aif *.aiff *.flac *.mp3 *.m4a);;All files (*)"));
             if (path.isEmpty()) return;
+            releaseCustomPads();
+            changed.action = PerformancePadAction::SamplerSlot;
             changed.resource = path.toStdString();
             // A saved loop has its own per-track label and takes visual
             // priority; this label is retained for the sampler fallback.
@@ -2062,8 +2180,11 @@ void DeckWidget::configurePerformancePad(int pad, const QPoint& position)
         connect(clearSample, &QAction::triggered, this, [this, pad] {
             auto& changed = padAssignments_[
                 static_cast<int>(PerformancePadMode::Sampler)][pad];
-            changed = defaultPerformancePadAssignment(
-                PerformancePadMode::Sampler, pad);
+            if (performancePadActionIsStemEcho(changed.action))
+                changed.resource.clear();
+            else
+                changed = defaultPerformancePadAssignment(
+                    PerformancePadMode::Sampler, pad);
             savePerformancePadAssignment(PerformancePadMode::Sampler, pad);
             syncPerformancePadUi();
             showPadFeedback(tr("Cleared custom assignment for pad %1")
@@ -2423,6 +2544,7 @@ void DeckWidget::setStemsReady()
         stemPads_[i]->setToolTip(tr(kTips[i]));
     }
     syncStemPads();
+    syncPerformancePadUi();
 }
 
 void DeckWidget::syncStemPads()
@@ -2442,6 +2564,11 @@ void DeckWidget::syncStemPads()
 
 void DeckWidget::trackChanged()
 {
+    // Loading resets stems and FX in the engine, including a reload of the
+    // same TrackData. Forget held effects rather than restoring stale setup.
+    padFxSnapshot_ = PadFxSnapshot {};
+    padIsPressed_.fill(false);
+    padReleasePending_.fill(false);
     TrackDataPtr t = engine_->deck(deckIndex_).track();
     lastWaveformPos_ = -1.0;
     if (gridBtn_)
