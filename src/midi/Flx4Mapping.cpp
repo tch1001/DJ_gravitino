@@ -5,6 +5,13 @@
 #include <cstddef>
 
 namespace gvt {
+
+bool Flx4Mapping::preparationLedState(ControlId id,bool ordinary,bool protectedSet,bool pulse) noexcept
+{
+    if (protectedSet && id==ControlId::Play) return pulse;
+    if (protectedSet && id==ControlId::Cue) return !pulse;
+    return ordinary;
+}
 namespace {
 
 constexpr std::uint8_t kNoteOn = 0x90;

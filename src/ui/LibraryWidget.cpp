@@ -637,7 +637,7 @@ LibraryWidget::LibraryWidget(TrackLibrary* library, AudioEngine* engine,
     transitionGraphBtn_->setToolTip(
         tr("Open a song-and-transition graph for planning a full set"));
     newTransitionBtn_ = new FitPushButton(tr("New…"));
-    setRenderBtn_ = new FitPushButton(tr("Record set…"));
+    setRenderBtn_ = new FitPushButton(tr("Live queue / Record set…"));
     setRenderBtn_->setObjectName(QStringLiteral("setRenderButton"));
     setRenderBtn_->setToolTip(tr("Choose transitions and export a full WAV offline"));
     newTransitionBtn_->setObjectName(QStringLiteral("newTransitionButton"));
@@ -1223,6 +1223,16 @@ void LibraryWidget::onTransitionClicked(const QModelIndex& proxyIndex)
     if (!source.isValid() || source.row() < 0 ||
         source.row() >= static_cast<int>(transitions_->all().size())) return;
     const GvtFile transition = transitions_->all()[size_t(source.row())];
+    // Preparation priority is independent of whether it is currently safe to
+    // replace a deck. Even a click refused because music is playing should
+    // prepare the requested pair in the background.
+    for (int row=0; row<library_->trackCount(); ++row) {
+        const auto profile=library_->profileAt(row);
+        if (!library_->trackAt(row) && profile &&
+            (transitions_->matchesEndpoint(transition,true,*profile) ||
+             transitions_->matchesEndpoint(transition,false,*profile)))
+            library_->prioritizeAnalysis(row);
+    }
     pendingTransition_.reset();
     for (auto& load : pendingLoads_) load = {};
     if (selectedTransitionPath_ == transition.filePath) {

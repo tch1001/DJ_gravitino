@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <array>
 #include <functional>
+#include <optional>
 
 namespace gvt {
 struct SetRenderRequest {
@@ -40,6 +41,16 @@ bool setSongNeedsStems(const SetRenderRequest& request, size_t songIndex);
 std::vector<TrackDataPtr> setAssetCandidates(const SetRenderRequest& request, size_t songIndex);
 SetRenderResult renderTransitionSet(const SetRenderRequest& request, const QString& output,
     SetRenderProgress progress = {}, SetRenderCancel cancelled = {});
+// Worker-thread streaming adapter; shares the export renderer and musical
+// scheduler. write may backpressure the producer, never the audio callback.
+struct SetStreamHooks {
+    std::function<bool(const float*, int)> write;
+    std::function<std::optional<SetRenderRequest>()> takeAppend;
+    std::function<void(bool, const QString&)> appendResult;
+    std::function<void(qint64, const QString&, int)> section;
+};
+SetRenderResult streamTransitionSet(const SetRenderRequest& request,
+    const SetStreamHooks& stream, SetRenderCancel cancelled = {});
 // A linear-in-time BPM ramp covering exactly this many beats.
 double setTempoRampSeconds(double beats, double fromBpm, double toBpm);
 double setTempoRampBpm(double elapsed, double duration, double fromBpm, double toBpm);

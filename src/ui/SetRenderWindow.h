@@ -14,6 +14,7 @@ namespace gvt {
 class TrackLibrary;
 class TransitionStore;
 class StemSeparator;
+class LiveSetSession;
 class SetRenderWindow final : public QMainWindow {
     Q_OBJECT
 public:
@@ -24,6 +25,7 @@ public:
     bool openSet(const QString& path);
     void exportTo(const QString& path);
     void showRecording(const QString& path);
+    void enableLiveQueue(LiveSetSession* session);
 signals:
     void exportFinished(const QString& path, bool success);
 protected:
@@ -59,5 +61,12 @@ private:
     QFutureWatcher<SetRenderResult> watcher_;
     std::shared_ptr<std::atomic<bool>> cancelled_;
     QString completedPath_;
+    LiveSetSession* live_=nullptr;
+    QLabel* liveStatus_=nullptr;
+    QPushButton* liveStart_=nullptr;
+    QPushButton* liveAppend_=nullptr;
+    QPushButton* livePause_=nullptr;
+    QPushButton* liveStop_=nullptr;
+    QPushButton* liveLeave_=nullptr;
 };
 }

@@ -28,6 +28,7 @@ class LibraryWidget;
 class TransitionPanel;
 class TransitionEditorWindow;
 class SetRenderWindow;
+class LiveSetSession;
 class PickupFuzzOverlay;
 class SetupMismatchOverlay;
 class HardwareGhostOverlay;
@@ -55,6 +56,9 @@ public slots:
     void setTransitionEntryMarker(int deck, double sec);
     void setTransitionCueMarkers(int deck, const QList<double>& seconds,
                                  const QStringList& labels);
+
+protected:
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
     void openMusicFolder();
@@ -90,6 +94,7 @@ private:
     TransitionPanel* transitionPanel_ = nullptr;
     TransitionEditorWindow* transitionEditor_ = nullptr;
     SetRenderWindow* setRenderWindow_ = nullptr;
+    LiveSetSession* liveSet_ = nullptr;
     QSplitter* lowerWorkspaceSplitter_ = nullptr;
     QSplitter* lowerSplitter_ = nullptr;
     QPushButton* libraryToggleBtn_ = nullptr;

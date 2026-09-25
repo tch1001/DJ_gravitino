@@ -86,7 +86,10 @@ struct AudioEngine::Impl {
     QString outputName;
     QString requestedOutputName;
     std::atomic<AudioPreviewSource*> previewSource {nullptr};
-    std::atomic<int> previewReaders {0};
+    std::atomic<AudioPreviewSource*> liveProgram {nullptr};
+    std::atomic<int> renderReaders {0};
+    bool offlineTestHeadphones = false;
+    std::array<float, static_cast<std::size_t>(kScratchFrames) * 2U> programBuffer {};
 
     void closeOutputs()
     {
@@ -252,17 +255,29 @@ struct AudioEngine::Impl {
             return;
         outputChannels = outputChannels >= kFlx4Channels
                              ? kFlx4Channels : kMasterChannels;
+        // seq_cst publication/drain protects both external source lifetimes.
+        struct Reader {
+            std::atomic<int>& count;
+            explicit Reader(std::atomic<int>& c) : count(c) { count.fetch_add(1); }
+            ~Reader() { count.fetch_sub(1); }
+        } reader(renderReaders);
+        auto* program = liveProgram.load();
 
         AudioPreviewSource* preview = previewSource.load(
-            std::memory_order_acquire);
+            std::memory_order_seq_cst);
         if (preview != nullptr) {
-            previewReaders.fetch_add(1, std::memory_order_acq_rel);
             if (preview == previewSource.load(std::memory_order_acquire)) {
                 int rendered = 0;
                 while (rendered < frames) {
                     const int chunkFrames = std::min(kScratchFrames,
                                                      frames - rendered);
                     preview->read(master.data(), chunkFrames);
+                    if (program) {
+                        std::copy_n(master.data(), chunkFrames*2, phones.data());
+                        program->read(master.data(), chunkFrames);
+                        if (feedCueRing) pushCueRing(phones.data(), chunkFrames);
+                        if (auto* tap=owner->masterTap.load()) tap->feed(master.data(),chunkFrames);
+                    }
                     for (int frame = 0; frame < chunkFrames; ++frame) {
                         const std::size_t source =
                             static_cast<std::size_t>(frame) * 2U;
@@ -274,14 +289,12 @@ struct AudioEngine::Impl {
                         for (int channel = 2; channel < outputChannels;
                              ++channel)
                             output[destination +
-                                   static_cast<std::size_t>(channel)] = 0.0f;
+                                   static_cast<std::size_t>(channel)] = program ? phones[source+channel-2] : 0.0f;
                     }
                     rendered += chunkFrames;
                 }
-                previewReaders.fetch_sub(1, std::memory_order_acq_rel);
                 return;
             }
-            previewReaders.fetch_sub(1, std::memory_order_acq_rel);
         }
 
         int rendered = 0;
@@ -329,6 +342,7 @@ struct AudioEngine::Impl {
                                          ? 0.0f : std::sin(monitorAngle);
             const float cueBusGain = monitorA && monitorB ? 0.5f : 1.0f;
             float chunkPhonePeak = 0.0f;
+            if (program) program->read(programBuffer.data(),chunkFrames);
 
             for (int frame = 0; frame < chunkFrames; ++frame) {
                 const std::size_t stereo = static_cast<std::size_t>(frame) * 2U;
@@ -357,16 +371,19 @@ struct AudioEngine::Impl {
                     const float mixed =
                         deckA[sample] * gainA + deckB[sample] * gainB;
                     const float masterSample = std::tanh(mixed);
-                    master[sample] = masterSample;
+                    master[sample] = program ? programBuffer[sample] : masterSample;
                     output[destination + static_cast<std::size_t>(channel)] =
-                        masterSample;
+                        master[sample];
 
                     float cueSample = 0.0f;
                     if (monitorA) cueSample += cueA[sample];
                     if (monitorB) cueSample += cueB[sample];
                     cueSample *= cueBusGain;
-                    const float phoneSample = std::clamp(
-                        std::tanh(cueSample * cueGain) +
+                    // Preparation is the full two-deck mix, including faders;
+                    // channel CUE remains available as a pre-fader override.
+                    const float phoneSample = std::clamp(program && !monitorA && !monitorB
+                        ? masterSample + headphoneTestSample
+                        : std::tanh(cueSample * cueGain) +
                             masterSample * masterGain + headphoneTestSample,
                         -1.0f, 1.0f);
                     phones[sample] = phoneSample;
@@ -760,6 +777,12 @@ bool detail::AudioDeviceTestAccess::backendActive(const AudioEngine& engine)
     return engine.impl_->deviceInitialized && AudioEngine::Impl::deviceIsActive(engine.impl_->device);
 }
 
+void detail::AudioDeviceTestAccess::setOfflineHeadphones(AudioEngine& engine,bool available)
+{
+    assert(!engine.impl_->deviceInitialized);
+    engine.impl_->offlineTestHeadphones=available;
+}
+
 Deck& AudioEngine::deck(int index)
 {
     assert(index >= 0 && index < kNumDecks);
@@ -799,8 +822,7 @@ bool AudioEngine::acquireExclusivePreview(AudioPreviewSource* source,
     }
     AudioPreviewSource* expected = nullptr;
     if (!impl_->previewSource.compare_exchange_strong(
-            expected, source, std::memory_order_release,
-            std::memory_order_relaxed)) {
+            expected, source, std::memory_order_seq_cst)) {
         if (error) *error = QStringLiteral("another audio preview is active");
         return false;
     }
@@ -811,11 +833,47 @@ void AudioEngine::releaseExclusivePreview(AudioPreviewSource* source)
 {
     AudioPreviewSource* expected = source;
     if (!impl_->previewSource.compare_exchange_strong(
-        expected, nullptr, std::memory_order_acq_rel,
-        std::memory_order_relaxed))
+        expected, nullptr, std::memory_order_seq_cst))
         return;
-    while (impl_->previewReaders.load(std::memory_order_acquire) != 0)
+    while (impl_->renderReaders.load() != 0)
         std::this_thread::yield();
+}
+
+bool AudioEngine::liveProgramActive() const { return impl_->liveProgram.load()!=nullptr; }
+
+bool AudioEngine::acquireLiveProgram(AudioPreviewSource* source, QString* error)
+{
+    if (!source || !headphoneOutputAvailable() || exclusivePreviewActive()) {
+        if (error) *error=QStringLiteral("Connect the FLX4 headphone output and stop editor preview before starting the live queue.");
+        return false;
+    }
+    AudioPreviewSource* expected=nullptr;
+    if (!impl_->liveProgram.compare_exchange_strong(expected,source)) {
+        if (error) *error=QStringLiteral("Another live queue already owns MASTER.");
+        return false;
+    }
+    return true;
+}
+
+bool AudioEngine::releaseLiveProgram(AudioPreviewSource* source, QString* error)
+{
+    // No implicit return to audible prep on stop, EOF, error or hot unplug.
+    if (exclusivePreviewActive() || deck(0).playing.load() || deck(1).playing.load()) {
+        if (error) *error=QStringLiteral("Stop both preparation decks and editor preview before returning them to MASTER.");
+        return false;
+    }
+    AudioPreviewSource* expected=source;
+    if (!impl_->liveProgram.compare_exchange_strong(expected,nullptr)) return false;
+    while (impl_->renderReaders.load()!=0) std::this_thread::yield();
+    return true;
+}
+
+void AudioEngine::shutdownLiveProgram(AudioPreviewSource* source)
+{
+    if (impl_->liveProgram.load()!=source) return;
+    stopDevice();
+    impl_->liveProgram.store(nullptr);
+    while (impl_->renderReaders.load()!=0) std::this_thread::yield();
 }
 
 bool AudioEngine::exclusivePreviewActive() const
@@ -825,7 +883,7 @@ bool AudioEngine::exclusivePreviewActive() const
 
 bool AudioEngine::headphoneOutputAvailable() const
 {
-    return (impl_->fourChannelOutput && impl_->deviceStarted &&
+    return impl_->offlineTestHeadphones || (impl_->fourChannelOutput && impl_->deviceStarted &&
             Impl::deviceIsActive(impl_->device)) ||
            impl_->cueOutputActive();
 }

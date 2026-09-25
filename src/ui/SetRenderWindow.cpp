@@ -4,6 +4,7 @@
 #include "../analysis/StemSeparator.h"
 #include "../audio/RecordingWav.h"
 #include "../library/TrackLibrary.h"
+#include "../transitions/LiveSetSession.h"
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -36,6 +37,7 @@ SetRenderWindow::SetRenderWindow(TrackLibrary* library,TransitionStore* store,St
     setWindowTitle(tr("Set Recorder — Gravitino")); resize(1180,740); setMinimumSize(900,620);
     auto* central=new QWidget(this); auto* layout=new QVBoxLayout(central); setCentralWidget(central);
     auto* heading=new QLabel(tr("Build a set → export one continuous WAV"),central);
+    heading->setObjectName("setHeading");
     heading->setStyleSheet("font-size:18px; font-weight:600;"); layout->addWidget(heading);
     auto* help=new QLabel(tr("Choose transitions in performance order. Recorded transitions stay intact; BPM and LOW / MID / HIGH EQ ramp smoothly across the solo sections to match the next setup. The first song starts at the beginning and the final song plays to its end."),central);
     help->setWordWrap(true); layout->addWidget(help);
@@ -112,6 +114,7 @@ SetRenderWindow::SetRenderWindow(TrackLibrary* library,TransitionStore* store,St
     });
     connect(&watcher_,&QFutureWatcher<SetRenderResult>::finished,this,[this] {
         const auto result=watcher_.result(); editing_->setEnabled(true); cancel_->setEnabled(false); refreshQueue();
+        if(liveStart_) liveStart_->setEnabled(!live_->protectedRouting());
         if(result.completed) showRecording(result.outputPath);
         else status_->setText(result.error);
         emit exportFinished(result.outputPath,result.completed);
@@ -136,6 +139,61 @@ SetRenderWindow::SetRenderWindow(TrackLibrary* library,TransitionStore* store,St
 }
 
 SetRenderWindow::~SetRenderWindow() { cancelled_->store(true); watcher_.waitForFinished(); }
+void SetRenderWindow::enableLiveQueue(LiveSetSession* session) {
+    if(live_ || !session) return;
+    live_=session;
+    setWindowTitle(tr("Live Queue / Set Recorder — Gravitino"));
+    findChild<QLabel*>("setHeading")->setText(tr("Build a set → play live or export WAV"));
+    auto* layout=qobject_cast<QVBoxLayout*>(centralWidget()->layout());
+    auto* explanation=new QLabel(tr("LIVE: queued set → speakers; decks, FLX4 and editor → FLX4 headphones. Alternating PLAY/CUE lights mean PREP ONLY. Hardware output-volume knobs still affect their wired outputs. Append only: accepted songs/recipes stay locked; a 30-second audio buffer locks the near future. New requests need a connecting transition, analyzed audio and required stems."),centralWidget());
+    explanation->setWordWrap(true); layout->insertWidget(2,explanation);
+    liveStatus_=new QLabel(tr("Live queue is off."),centralWidget()); liveStatus_->setObjectName("liveQueueStatus");
+    liveStatus_->setWordWrap(true); layout->addWidget(liveStatus_);
+    auto* controls=new QHBoxLayout;
+    liveStart_=new QPushButton(tr("START LIVE QUEUE"),centralWidget()); liveStart_->setObjectName("liveQueueStart");
+    liveAppend_=new QPushButton(tr("APPEND to live queue"),centralWidget()); liveAppend_->setObjectName("liveQueueAppend");
+    livePause_=new QPushButton(tr("Pause live"),centralWidget()); livePause_->setObjectName("liveQueuePause");
+    liveStop_=new QPushButton(tr("Stop live"),centralWidget()); liveStop_->setObjectName("liveQueueStop");
+    liveLeave_=new QPushButton(tr("Return decks to MASTER…"),centralWidget()); liveLeave_->setObjectName("liveQueueLeave");
+    for(auto* button:{liveStart_,liveAppend_,livePause_,liveStop_,liveLeave_}) controls->addWidget(button);
+    layout->addLayout(controls);
+    connect(liveStart_,&QPushButton::clicked,this,[this] {
+        if(watcher_.isRunning()) return;
+        if(QMessageBox::question(this,tr("Start isolated live set?"),tr("The queued set will take over the speakers from its beginning. The two decks and editor will move to FLX4 headphones. Confirm your headphones are connected; test their output in Settings first."))!=QMessageBox::Yes) return;
+        QString error; if(!live_->start(snapshot(),&error)) QMessageBox::warning(this,tr("Cannot start live queue"),error);
+    });
+    connect(liveAppend_,&QPushButton::clicked,this,[this] {
+        QString error;
+        if(!live_->append(snapshot(),&error)) QMessageBox::warning(this,tr("Cannot append"),error);
+        else status_->setText(tr("Append requested. It will be checked at the next safe song boundary; existing live songs remain unchanged."));
+    });
+    connect(live_,&LiveSetSession::appendFinished,this,[this](bool ok,const QString& message) {
+        status_->setText(message);
+        if(!ok) QMessageBox::warning(this,tr("Live queue unchanged"),message);
+    });
+    connect(livePause_,&QPushButton::clicked,this,[this]{live_->pause(!live_->paused());});
+    connect(liveStop_,&QPushButton::clicked,this,[this] {
+        if(QMessageBox::question(this,tr("Stop live music?"),tr("This stops the music on the speakers. Preparation stays isolated."))==QMessageBox::Yes) live_->stop();
+    });
+    connect(liveLeave_,&QPushButton::clicked,this,[this] {
+        if(QMessageBox::question(this,tr("Return to ordinary mixing?"),tr("Stop both preparation decks and editor preview first. After leaving, mouse and controller actions will affect MASTER again."))!=QMessageBox::Yes) return;
+        QString error; if(!live_->leave(&error)) QMessageBox::warning(this,tr("Still protected"),error);
+    });
+    const auto refresh=[this] {
+        const bool protectedRoute=live_->protectedRouting();
+        liveStart_->setEnabled(!protectedRoute && !watcher_.isRunning());
+        liveAppend_->setEnabled(protectedRoute && live_->running());
+        livePause_->setEnabled(protectedRoute && live_->running());
+        livePause_->setText(live_->paused() ? tr("Resume live") : tr("Pause live"));
+        liveStop_->setEnabled(protectedRoute && live_->running());
+        liveLeave_->setEnabled(protectedRoute && !live_->running());
+        const int seconds=int(live_->elapsedSeconds());
+        liveStatus_->setText(!protectedRoute ? tr("Live queue is off.") : tr("LIVE %1:%2 • %3 • buffered %4 s • %5 accepted transitions\nPREP ONLY: decks, FLX4 and editor → headphones. Closing this window does not stop live music.")
+            .arg(seconds/60).arg(seconds%60,2,10,QLatin1Char('0')).arg(live_->status()).arg(live_->bufferedSeconds(),0,'f',1).arg(live_->acceptedTransitions()));
+    };
+    connect(live_,&LiveSetSession::changed,this,refresh); refresh();
+    connect(live_,&LiveSetSession::routingChanged,this,[this]{refreshQueue();});
+}
 SetRenderRequest SetRenderWindow::snapshot() const {
     auto result=request_; result.title=title_->text().trimmed(); result.keyLock=keyLock_->isChecked();
     // Grid edits in the main library should also be used by a long-open queue.
@@ -171,7 +229,7 @@ void SetRenderWindow::refreshQueue() {
     }
     if(selected>=0 && selected<queue_->rowCount()) queue_->selectRow(selected);
     const auto plan=planTransitionSet(snapshot());
-    export_->setEnabled(plan.valid() && !watcher_.isRunning());
+    export_->setEnabled(plan.valid() && !watcher_.isRunning() && !(live_ && live_->protectedRouting()));
     prepare_->setEnabled(stems_ && !request_.transitions.empty());
     status_->setText(plan.valid() ? tr("%1 transitions • %2 songs • approximately %3:%4 • ready to export offline")
         .arg(request_.transitions.size()).arg(plan.tracks.size()).arg(int(plan.estimatedSeconds)/60)
@@ -236,10 +294,11 @@ void SetRenderWindow::prepareStems() {
     status_->setText(count ? tr("Preparing stems for %1 songs; export will unlock when ready.").arg(count) : tr("Required stems are cached. Resolve any audio-file choices first."));
 }
 void SetRenderWindow::exportTo(const QString& path) {
-    if(watcher_.isRunning()) return;
+    if(watcher_.isRunning() || (live_ && live_->protectedRouting())) return;
     const auto r=snapshot(); const auto plan=planTransitionSet(r);
     if(!plan.valid()) { status_->setText(plan.errors.join('\n')); return; }
     cancelled_->store(false); editing_->setEnabled(false); export_->setEnabled(false); cancel_->setEnabled(true); progress_->setValue(0);
+    if(liveStart_) liveStart_->setEnabled(false);
     const auto cancel=cancelled_;
     watcher_.setFuture(QtConcurrent::run([this,r,path,cancel] {
         return renderTransitionSet(r,path,[this](double fraction,const QString& status) {

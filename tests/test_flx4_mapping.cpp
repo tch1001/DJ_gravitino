@@ -31,6 +31,14 @@ int main()
 
     Flx4Mapping mapping;
 
+    for(bool normal:{false,true}) for(bool pulse:{false,true}) {
+        CHECK(Flx4Mapping::preparationLedState(ControlId::Play,normal,true,pulse)==pulse);
+        CHECK(Flx4Mapping::preparationLedState(ControlId::Cue,normal,true,pulse)==!pulse);
+        CHECK(Flx4Mapping::preparationLedState(ControlId::HotCue1,normal,true,pulse)==normal);
+        CHECK(Flx4Mapping::preparationLedState(ControlId::Play,normal,false,pulse)==normal);
+        CHECK(Flx4Mapping::preparationLedState(ControlId::Cue,normal,false,pulse)==normal);
+    }
+
     // The five-segment channel meters are host-driven CC messages, not notes.
     const auto meterA = Flx4Mapping::channelLevelMessage(0, 0x57);
     const auto meterB = Flx4Mapping::channelLevelMessage(1, 0x7F);

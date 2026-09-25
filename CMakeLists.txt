@@ -55,6 +55,7 @@ add_library(gvtcore STATIC
     src/transitions/TransitionPlayer.cpp
     src/transitions/TransitionPlayback.cpp
     src/transitions/SetRenderer.cpp
+    src/transitions/LiveSetSession.cpp
     src/midi/MidiEngine.cpp
     src/midi/Flx4Mapping.cpp
     src/midi/Flx4TutorialMap.cpp

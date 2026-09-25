@@ -9,6 +9,9 @@ struct AudioDeviceTestAccess {
     static void stopBackend(AudioEngine& engine);
     static void notifyInterruption(AudioEngine& engine);
     static bool backendActive(const AudioEngine& engine);
+    // Availability seam only; output is still exercised through real offline
+    // stereo/four-channel rendering, never the user's sound devices.
+    static void setOfflineHeadphones(AudioEngine& engine, bool available);
 };
 }
 }

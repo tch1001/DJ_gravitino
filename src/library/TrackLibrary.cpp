@@ -528,6 +528,35 @@ void TrackLibrary::scanFolder(const QString& dirIn)
     dispatchAnalysis();
 }
 
+int TrackLibrary::addAudioFiles(const QStringList& paths,QStringList* errors)
+{
+    const auto st=state(this);
+    QStringList added;
+    for(const auto& path:paths) {
+        const QFileInfo info(path);
+        if(!info.isFile() || !info.isReadable() ||
+            !QStringList{"mp3","flac","wav","aif","aiff"}.contains(info.suffix().toLower())) {
+            if(errors) errors->append(tr("Unreadable or unsupported audio: %1").arg(path));
+            continue;
+        }
+        const auto absolute=info.absoluteFilePath();
+        const auto found=std::find_if(st->rows.begin(),st->rows.end(),[&](const Row& row){return QFileInfo(row.path).absoluteFilePath()==absolute;});
+        if(found!=st->rows.end()) { prioritizeAnalysis(int(found-st->rows.begin())); continue; }
+        if(!added.contains(absolute)) added.append(absolute);
+    }
+    if(added.isEmpty()) return 0;
+    const int first=int(st->rows.size());
+    beginInsertRows({},first,first+added.size()-1);
+    for(const auto& path:added) {
+        const int row=int(st->rows.size());
+        st->rows.push_back(Row{path}); st->rows.back().profile=st->catalog.assetProfile(path);
+        st->rows.back().status=tr("Queued · priority"); st->urgent.push_back(row);
+    }
+    st->total=int(st->rows.size());
+    endInsertRows(); emit scanProgress(st->analyzed,st->total); dispatchAnalysis();
+    return added.size();
+}
+
 bool TrackLibrary::prioritizeAnalysis(int row)
 {
     auto st = state(this);

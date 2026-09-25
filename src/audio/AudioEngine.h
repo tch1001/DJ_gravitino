@@ -19,8 +19,8 @@ struct AudioOutputDevice {
     bool isDefault = false;
 };
 
-// Realtime-safe stereo source used by the transition editor. The live audio
-// callback calls read() only while an exclusive preview lease is held. The
+// Realtime-safe stereo source used by editor audition and the protected queue.
+// The audio callback calls read() only while the corresponding lease is held. The
 // implementation must not allocate, lock, or block and must always fill the
 // requested frames (silence is acceptable on underrun).
 class AudioPreviewSource {
@@ -178,13 +178,24 @@ public:
     // Test/diagnostic path: interleaved MASTER L/R, PHONES L/R.
     void renderOfflineFourChannel(float* out, int frames);
 
-    // Temporarily route a private editor graph to MASTER without advancing or
-    // mutating the live decks. Only one source may hold the lease. release()
+    // Temporarily route a private editor graph to MASTER (or PHONES while a
+    // live program owns MASTER), without advancing/mutating the prep decks.
+    // Only one editor source may hold this lease. release()
     // waits for an in-flight callback before the source may be destroyed.
     bool acquireExclusivePreview(AudioPreviewSource* source,
                                  QString* error = nullptr);
     void releaseExclusivePreview(AudioPreviewSource* source);
     bool exclusivePreviewActive() const;
+
+    // Queue audio alone owns MASTER. Normal decks and editor audition are
+    // sent to PHONES, never mixed into the program. Requires a separate cue
+    // output at entry. Losing it mutes preparation, never reroutes to MASTER.
+    bool acquireLiveProgram(AudioPreviewSource* source, QString* error = nullptr);
+    bool releaseLiveProgram(AudioPreviewSource* source, QString* error = nullptr);
+    bool liveProgramActive() const;
+    // Owner shutdown only: stop device/recovery, detach and drain regardless
+    // of prep transport. Never use this as the user-facing return-to-MASTER.
+    void shutdownLiveProgram(AudioPreviewSource* source);
 
     // Master-output tap (set/cleared from the GUI thread; the audio thread
     // calls tap->feed(interleavedStereo, frames) after the limiter when set).

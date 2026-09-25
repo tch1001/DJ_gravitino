@@ -740,6 +740,65 @@ paths and are not portable replacement transition documents. Both .gvt and
 .transition load through the format-neutral reader. Song-list autoselection
 uses portable files only, avoiding duplicate legacy migrations.
 
+## Protected live queue and preparation
+
+`LiveSetSession` adapts the same `SetRenderer` orchestration to a stereo stream
+instead of a WAV sink. No second transition scheduler or BPM/EQ bridge exists.
+Its dedicated one-thread producer pool never waits behind library analysis or
+stem jobs. A bounded 30-second SPSC float ring provides backpressure on the
+producer; the device callback only copies samples using atomic cursors. Startup
+and underrun recovery prebuffer two seconds (or the remaining completed tail).
+Underruns are visible, not concealed as guaranteed gapless playback. Only two
+private decks are decoded; neither shares ControlBus with the preparation decks.
+All new tracks are freshly identity-checked, without changing grids or cues.
+
+`AudioEngine::acquireLiveProgram` requires the independent FLX4 phones route and
+refuses an active editor lease. The queue exclusively replaces MASTER 1/2;
+ordinary decks now render into PHONES 3/4, including their faders/FX. Channel CUE
+can still select pre-fader monitoring. Editor exclusive preview freezes only
+those preparation decks and goes to PHONES; the program source keeps advancing
+and its MASTER tap remains recordable. No controller bus event reaches the
+private set graph. A seq_cst callback-reader gate protects external source
+lifetimes when leases are released. No new allocation or lock is in the callback.
+Both a primary four-channel FLX4 and another master device plus secondary FLX4
+phones use the existing routing. Arbitrary non-FLX4 preparation devices are not
+implemented. Losing phones never redirects preparation to MASTER. Stop, pause,
+EOF, worker failure and unplugging retain isolation; an explicit return refuses
+while preparation decks or editor preview are playing. Application shutdown
+uses `shutdownLiveProgram` to stop device/recovery and detach/drain the source
+before destroying the main-window-owned session/ring. This shutdown-only method
+is never used for the user-facing return to MASTER.
+
+The **Live queue / Record set** window reuses song-list/transition selection,
+asset choice, stem preparation and `.set.json` plans. Its live controls start,
+pause/resume, stop and explicitly leave protection; closing the window only
+hides it. Main-window close confirms stopping a running set. An on-screen
+PREP badge and alternating FLX4 PLAY/CUE lights persist until isolation ends,
+including reconnect and immediate input LED echoes. The warning changes only
+illumination, not button behavior. Physical output-volume knobs remain outside
+this software isolation guarantee.
+
+Accepted transitions/assets/grids/key-lock are immutable snapshots. **Append**
+submits a candidate extension to the producer; it validates the chain and new
+recipe bytes at the next song boundary, or during the final song's solo tail.
+Removed/reordered/edited accepted entries, ambiguous assets, missing stems and
+already-rendered entry points are refused. During the final tail, a new anchor
+also needs one source second beyond the producer cursor. The displayed elapsed
+time/section follows consumed audio, not the producer's up-to-30-second lead.
+This first version is append-only; no skip, replace-next, or automatic fallback
+mix is invented. New requests must have a connecting recipe before appending.
+`TrackLibrary::addAudioFiles` / **File → Add request audio** insert and prioritize
+selected MP3/FLAC/WAV/AIFF files without rescanning existing rows, cancelling
+workers or replacing deck references. Added files stay at their original paths;
+the session list is not a new persisted crate. Cache/catalog registration uses
+the existing protected analysis path.
+
+Headless tests compare stream samples with exported PCM (within WAV quantization),
+exercise mid-tail appends, prefix/late-entry refusal, bounded buffering and
+cancellation, and verify MASTER remains unchanged during MIDI preparation,
+four-channel editor preview and loss of the headphone route. Real FLX4 routing,
+physical LEDs and sustained gig-load behavior still require hardware audition.
+
 ## Testing
 
 - `ctest` unit tests in `tests/` (portable/legacy round trips and hostile YAML,

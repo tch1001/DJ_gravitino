@@ -10,6 +10,9 @@
 #include "TransitionPanel.h"
 #include "TransitionEditor.h"
 #include "SetRenderWindow.h"
+#include "../transitions/LiveSetSession.h"
+#include <QCloseEvent>
+#include <QDir>
 #include "../analysis/BeatGridEditor.h"
 #include "../analysis/StemSeparator.h"
 #include "../audio/MasterRecorder.h"
@@ -35,6 +38,17 @@
 #include <algorithm>
 
 namespace gvt {
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    if (liveSet_ && liveSet_->protectedRouting() && liveSet_->running() &&
+        QMessageBox::question(this,tr("Stop the live set and quit?"),
+            tr("The queue is playing on the speakers. Quitting will stop it."))!=QMessageBox::Yes) {
+        event->ignore(); return;
+    }
+    if (liveSet_) liveSet_->stop();
+    QMainWindow::closeEvent(event);
+}
 
 
 MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
@@ -183,11 +197,19 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
     QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(tr("Open Music Folder…"), this,
                         &MainWindow::openMusicFolder);
+    fileMenu->addAction(tr("Add request audio…"),this,[this] {
+        const auto paths=QFileDialog::getOpenFileNames(this,tr("Add crowd-request audio"),
+            QDir::homePath()+"/Downloads",tr("Audio (*.mp3 *.flac *.wav *.aif *.aiff)"));
+        if(paths.isEmpty()) return;
+        QStringList errors; const int count=library_->addAudioFiles(paths,&errors);
+        statusBar()->showMessage(tr("%1 request songs added with priority; existing decks and live queue are unchanged.").arg(count),6000);
+        if(!errors.isEmpty()) QMessageBox::warning(this,tr("Some files were not added"),errors.join('\n'));
+    });
     QMenu* transMenu = menuBar()->addMenu(tr("&Transitions"));
     transMenu->addAction(tr("Open Transitions Folder"), this,
                          &MainWindow::openTransitionsFolder);
     QAction* newTransitionAction = transMenu->addAction(tr("New Transition…"));
-    QAction* renderSetAction = transMenu->addAction(tr("Record Set to WAV…"));
+    QAction* renderSetAction = transMenu->addAction(tr("Live Queue / Record Set…"));
     QMenu* settingsMenu = menuBar()->addMenu(tr("&Settings"));
     audioOutputMenu_ = settingsMenu->addMenu(tr("Audio Output"));
     audioOutputMenu_->setToolTipsVisible(true);
@@ -388,11 +410,31 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
 
     // Cross-widget wiring.
     store_->setSongCatalog(library_->songCatalog());
+    liveSet_=new LiveSetSession(engine_,this);
+    auto* liveBanner=new QLabel(this);
+    liveBanner->setObjectName("livePreparationBanner");
+    liveBanner->setText(tr("LIVE QUEUE • PREP → PHONES"));
+    liveBanner->setStyleSheet("QLabel { color: #52e2cf; font-weight: bold; padding: 4px; }");
+    liveBanner->setToolTip(tr("Controller musical controls do not affect the queued set. Physical output-volume knobs still affect their wired outputs. Open Live Queue / Record Set to pause or stop the live set."));
+    statusBar()->addPermanentWidget(liveBanner); liveBanner->hide();
+    auto* liveQueueAccess=new QPushButton(tr("Queue…"),this);
+    liveQueueAccess->setObjectName("liveQueueAccess");
+    liveQueueAccess->setToolTip(tr("Open live controls, including while auditioning in the editor"));
+    statusBar()->addPermanentWidget(liveQueueAccess); liveQueueAccess->hide();
+    connect(liveSet_,&LiveSetSession::routingChanged,this,[liveBanner](bool active){liveBanner->setVisible(active);});
+    connect(liveSet_,&LiveSetSession::routingChanged,this,[liveQueueAccess](bool active){liveQueueAccess->setVisible(active);});
+    connect(engine_,&AudioEngine::outputDeviceChanged,this,[liveBanner,this](const QString&,bool phones) {
+        liveBanner->setText(phones ? tr("LIVE QUEUE • PREP → PHONES") : tr("LIVE QUEUE • PREP MUTED"));
+    });
     const auto openSetRenderer = [this] {
-        if (!setRenderWindow_) setRenderWindow_ = new SetRenderWindow(library_,store_,stems_,this);
+        if (!setRenderWindow_) {
+            setRenderWindow_ = new SetRenderWindow(library_,store_,stems_,this);
+            setRenderWindow_->enableLiveQueue(liveSet_);
+        }
         setRenderWindow_->show(); setRenderWindow_->raise(); setRenderWindow_->activateWindow();
     };
     connect(renderSetAction,&QAction::triggered,this,openSetRenderer);
+    connect(liveQueueAccess,&QPushButton::clicked,this,openSetRenderer);
     connect(libraryWidget_,&LibraryWidget::setRenderRequested,this,openSetRenderer);
     transitionEditor_ = new TransitionEditorWindow(
         engine_, library_, store_, recorder, player, rec_, stems_, this);
@@ -432,7 +474,9 @@ MainWindow::MainWindow(ControlBus* bus, AudioEngine* engine,
                 if (recBtn_) recBtn_->setEnabled(!active);
                 if (active)
                     statusBar()->showMessage(
-                        tr("Transition Editor preview owns MASTER; the live workspace is locked."));
+                        engine_->liveProgramActive()
+                            ? tr("Editor preview → HEADPHONES. Live queue continues on speakers; preparation decks are temporarily locked.")
+                            : tr("Transition Editor preview owns MASTER; the live workspace is locked."));
                 else
                     statusBar()->clearMessage();
             });

@@ -303,12 +303,12 @@ std::vector<TrackDataPtr> setAssetCandidates(const SetRenderRequest& r,size_t i)
     return result;
 }
 
-SetRenderResult renderTransitionSet(const SetRenderRequest& r,const QString& output,
-    SetRenderProgress progress,SetRenderCancel cancelled)
+static SetRenderResult runTransitionSet(SetRenderRequest r,const QString& output,
+    SetRenderProgress progress,SetRenderCancel cancelled, const SetStreamHooks* stream)
 {
     SetRenderResult result; result.outputPath=output;
     try {
-        const auto plan=planTransitionSet(r);
+        auto plan=planTransitionSet(r);
         if (!plan.valid()) { result.error=plan.errors.join('\n'); return result; }
         // A queue is a snapshot. Never silently export an older recipe after
         // the user edits/deletes its file in another window.
@@ -322,22 +322,34 @@ SetRenderResult renderTransitionSet(const SetRenderRequest& r,const QString& out
             }
         }
         RecordingWav writer; QString error;
-        if (!writer.open(output,&error)) { result.error=error; return result; }
+        if (!stream && !writer.open(output,&error)) { result.error=error; return result; }
+        qint64 writtenFrames = 0;
         ControlBus bus; AudioEngine engine(&bus); TransitionPlayer player(&bus,&engine);
         transitionPlayerUseExternalClock(&player,true);
         QElapsedTimer notifications; notifications.start();
         QString stage;
+        QString notifiedStage;
+        int songIndex = 0;
         const auto check=[&] {
             if (cancelled && cancelled()) throw std::runtime_error("cancelled");
             if (progress && notifications.elapsed()>150) {
-                progress(std::min(.99,writer.frames()/double(kSampleRate)/std::max(1.0,plan.estimatedSeconds)),stage);
+                progress(std::min(.99,writtenFrames/double(kSampleRate)/std::max(1.0,plan.estimatedSeconds)),stage);
                 notifications.restart();
             }
         };
         const auto require=[&](bool ok) { if (!ok) throw std::runtime_error(error.toStdString()); };
         std::array<float,512*2> buffer{};
         const auto render=[&](int frames) {
-            check(); engine.renderOffline(buffer.data(),frames); require(writer.write(buffer.data(),frames,&error));
+            check();
+            if (stream && stage != notifiedStage) {
+                notifiedStage = stage;
+                if (stream->section) stream->section(writtenFrames, stage, songIndex);
+            }
+            engine.renderOffline(buffer.data(),frames);
+            if (stream) {
+                if (!stream->write(buffer.data(),frames)) throw std::runtime_error("cancelled");
+            } else require(writer.write(buffer.data(),frames,&error));
+            writtenFrames += frames;
         };
         QJsonArray tracks,transitions,ramps,eqRamps;
         for (const auto& t:plan.tracks) tracks.append(QJsonObject{{"title",t->title},{"artist",t->artist},
@@ -364,7 +376,7 @@ SetRenderResult renderTransitionSet(const SetRenderRequest& r,const QString& out
             const double startBpm=d.effectiveBpm();
             const double seconds=setTempoRampSeconds(std::max(0.0,sourceRemaining)*t->bpm/60,startBpm,endBpm);
             const qint64 total=qint64(std::llround(seconds*kSampleRate));
-            const qint64 start=writer.frames();
+            const qint64 start=writtenFrames;
             const double sourceStart=t->canonicalBeatAtSec(d.positionSec());
             const SetEqValues startEq{d.eqLow.load(),d.eqMid.load(),d.eqHigh.load()};
             const SetEqValues endEq=nextSetup && nextSetup->captured
@@ -391,29 +403,102 @@ SetRenderResult renderTransitionSet(const SetRenderRequest& r,const QString& out
             // No incoming audio or in-transition automation is modified here.
             applyEq(endEq);
             ramps.append(QJsonObject{{"song_index",int(songIndex)},{"start_frame",double(start)},
-                {"end_frame",double(writer.frames())},{"from_bpm",startBpm},{"to_bpm",endBpm},
+                {"end_frame",double(writtenFrames)},{"from_bpm",startBpm},{"to_bpm",endBpm},
                 {"curve","linear-time"},{"from_track_beat",sourceStart},
                 {"to_track_beat",t->canonicalBeatAtSec(targetSeconds)}});
             const auto valuesJson=[](const SetEqValues& values) {
                 return QJsonObject{{"low",values[0]},{"mid",values[1]},{"high",values[2]}};
             };
             eqRamps.append(QJsonObject{{"song_index",int(songIndex)},{"start_frame",double(start)},
-                {"end_frame",double(writer.frames())},{"curve","linear-time"},
+                {"end_frame",double(writtenFrames)},{"curve","linear-time"},
                 {"domain","normalized-knob"},{"from_values",valuesJson(startEq)},
                 {"to_values",valuesJson(endEq)}});
         };
         int outgoing=0;
-        for (size_t i=0;i<r.transitions.size();++i) {
+        // Only append at a safe boundary, or while rendering the final solo.
+        // The accepted prefix is immutable, even if recipes are edited for prep.
+        const auto append = [&]() {
+            if (!stream || !stream->takeAppend) return false;
+            auto update = stream->takeAppend();
+            if (!update) return false;
+            QString reason;
+            auto candidate = planTransitionSet(*update);
+            if (update->transitions.size() <= r.transitions.size() || update->keyLock != r.keyLock)
+                reason = "Append only: keep the accepted queue and key-lock setting unchanged.";
+            for (size_t n=0; reason.isEmpty() && n<r.transitions.size(); ++n)
+                if (transitionSerialize(update->transitions[n]) != transitionSerialize(r.transitions[n]))
+                    reason = "An accepted transition was changed or reordered. Only append new transitions.";
+            if (reason.isEmpty() && !candidate.valid()) reason = candidate.errors.join('\n');
+            for (size_t n=0; reason.isEmpty() && n<plan.tracks.size(); ++n) {
+                const auto& a=*plan.tracks[n]; const auto& b=*candidate.tracks[n];
+                if (a.filePath!=b.filePath || a.bpm!=b.bpm || a.firstBeatSec!=b.firstBeatSec ||
+                    a.canonicalBeatOffset!=b.canonicalBeatOffset || a.fingerprint!=b.fingerprint ||
+                    a.assetSha256!=b.assetSha256)
+                    reason="An accepted song or grid changed. The live queue retains its original snapshot.";
+            }
+            for (size_t n=r.transitions.size(); reason.isEmpty() && n<update->transitions.size(); ++n) {
+                const auto& file=update->transitions[n];
+                GvtFile current; QString why;
+                if (!file.filePath.isEmpty() && (!loadTransitionFile(file.filePath,current,&why) ||
+                    transitionSerialize(current)!=transitionSerialize(file)))
+                    reason="New recipe changed: re-add it before appending.";
+            }
+            if (reason.isEmpty() && size_t(songIndex)==r.transitions.size()) {
+                const auto& next=update->transitions[r.transitions.size()];
+                const auto track=engine.deck(outgoing).track();
+                if (transitionSecAtBeat(next,*track,next.anchorFromBeat) <= engine.deck(outgoing).positionSec()+1.0)
+                    reason="Too late: the next entry is inside the already-rendered audio or less than one source second ahead.";
+            }
+            if (!reason.isEmpty()) {
+                if (stream->appendResult) stream->appendResult(false,reason);
+                return false;
+            }
+            // An appended edge can newly require stems on the existing final
+            // song. Attach before rendering its new solo/transition section.
+            if (setSongNeedsStems(*update,size_t(songIndex)) && !engine.deck(outgoing).stemsAttached()) {
+                auto stems=decodeStems(*update,*engine.deck(outgoing).track(),&error);
+                if (!stems) {
+                    if (stream->appendResult) stream->appendResult(false,error);
+                    return false;
+                }
+                engine.deck(outgoing).attachStems(stems);
+            }
+            r=std::move(*update); plan=std::move(candidate);
+            if (stream->appendResult) stream->appendResult(true,"Appended to the live queue.");
+            return true;
+        };
+        for (size_t i=0;;) {
+            songIndex=int(i);
+            append();
+            if (i>=r.transitions.size()) {
+                stage="Final song: " + plan.tracks.back()->title;
+                if (!stream) {
+                    solo(outgoing,engine.deck(outgoing).track()->durationSec,engine.deck(outgoing).effectiveBpm(),i);
+                    break;
+                }
+                bool extended=false;
+                while (engine.deck(outgoing).playing.load()) {
+                    if (append()) { extended=true; break; }
+                    const auto& d=engine.deck(outgoing);
+                    const double remaining=(d.track()->durationSec-d.positionSec())/d.tempoRatio.load();
+                    if (remaining<=0) break;
+                    render(std::clamp(int(std::ceil(remaining*kSampleRate)),1,512));
+                }
+                if (extended) continue;
+                break;
+            }
             const auto& f=r.transitions[i];
+            // Decode the next asset before producing the solo, not at its
+            // exit, giving the realtime consumer its buffered audio to play.
+            load(i+1,1-outgoing);
             stage="Playing " + plan.tracks[i]->title;
             solo(outgoing,transitionSecAtBeat(f,*engine.deck(outgoing).track(),f.anchorFromBeat),f.masterBpm,i,&f.initialFrom);
-            load(i+1,1-outgoing);
             stage=QString("Transition %1/%2: %3").arg(i+1).arg(r.transitions.size()).arg(f.name);
             prepareTransitionSetup(bus,engine,f,outgoing);
             positionTransitionPerform(engine,f,outgoing);
             require(player.arm(f,outgoing,true,&error));
             bus.dispatch({outgoing,ControlId::Play,1},Origin::Replay);
-            const qint64 start=writer.frames();
+            const qint64 start=writtenFrames;
             const double end=transitionGraphEffectiveEndBeat(f);
             double beat=0;
             while (beat<end-1e-9) {
@@ -431,28 +516,38 @@ SetRenderResult renderTransitionSet(const SetRenderRequest& r,const QString& out
             transitionPlayerAdvanceToBeat(&player,end+1e-8);
             player.abort();
             transitions.append(QJsonObject{{"id",f.id},{"name",f.name},{"start_frame",double(start)},
-                {"end_frame",double(writer.frames())},{"start_seconds",double(start)/kSampleRate},
-                {"end_seconds",double(writer.frames())/kSampleRate},{"outgoing_song_index",int(i)},
+                {"end_frame",double(writtenFrames)},{"start_seconds",double(start)/kSampleRate},
+                {"end_seconds",double(writtenFrames)/kSampleRate},{"outgoing_song_index",int(i)},
                 {"incoming_song_index",int(i+1)},{"transition_yaml",transitionSerialize(f)}});
             bus.dispatch({outgoing,ControlId::Stop,1},Origin::System);
             bus.dispatch({outgoing,ControlId::Fader,0},Origin::System);
             outgoing=1-outgoing;
+            ++i;
         }
-        stage="Finishing " + plan.tracks.back()->title;
-        solo(outgoing,engine.deck(outgoing).track()->durationSec,engine.deck(outgoing).effectiveBpm(),plan.tracks.size()-1);
         QJsonObject manifest{{"format","gravitino.recording"},{"version",1},{"title",r.title},
             {"created_at",QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
             {"renderer","offline-set.v2"},{"key_lock",r.keyLock},{"crossfader",0.5},
             {"tracks",tracks},{"transitions",transitions},{"tempo_ramps",ramps},{"eq_ramps",eqRamps},
             {"handoff_policy","Retire outgoing deck at authored transition end; linearly bridge BPM and EQ to the next setup during the solo section. Retain other incoming state."}};
-        check(); require(writer.finish(manifest,&error));
-        result.manifest=readRecordingManifest(output,&error); result.completed=true;
+        check();
+        if (!stream) { require(writer.finish(manifest,&error)); result.manifest=readRecordingManifest(output,&error); }
+        result.completed=true;
         if (progress) progress(1,"Recording ready");
     } catch (const std::exception& e) {
         result.cancelled=QString::fromUtf8(e.what())=="cancelled";
         result.error=result.cancelled ? "Export cancelled; no completed WAV was replaced." : QString::fromUtf8(e.what());
     }
     return result;
+}
+
+SetRenderResult renderTransitionSet(const SetRenderRequest& request,const QString& output,
+    SetRenderProgress progress,SetRenderCancel cancelled) {
+    return runTransitionSet(request,output,std::move(progress),std::move(cancelled),nullptr);
+}
+SetRenderResult streamTransitionSet(const SetRenderRequest& request,const SetStreamHooks& stream,
+    SetRenderCancel cancelled) {
+    if (!stream.write) { SetRenderResult result; result.error="Missing live audio sink."; return result; }
+    return runTransitionSet(request,{}, {},std::move(cancelled),&stream);
 }
 
 QJsonObject setRequestJson(const SetRenderRequest& r) {

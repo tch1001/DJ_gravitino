@@ -734,6 +734,7 @@ struct MidiEngine::Impl {
             return;
         }
 
+        on=Flx4Mapping::preparationLedState(id,on,engine && engine->liveProgramActive(),preparationPulse);
         const auto message = Flx4Mapping::ledMessage(deck, id, on);
         if (!message.has_value()) {
             return;
@@ -1135,6 +1136,7 @@ struct MidiEngine::Impl {
     std::map<std::pair<DeckId, unsigned int>, double> takeoverStartValues;
     std::atomic_bool takeoverFrozen {false};
     bool manualFrozen = false;
+    bool preparationPulse = false;
 };
 
 MidiEngine::MidiEngine(
@@ -1145,7 +1147,16 @@ MidiEngine::MidiEngine(
     auto* ledTimer = new QTimer(this);
     ledTimer->setInterval(250);
     connect(ledTimer, &QTimer::timeout, this,
-            [this] { impl_->reconcileTransportLeds(); });
+            [this] {
+                impl_->reconcileTransportLeds();
+                impl_->preparationPulse = !impl_->preparationPulse;
+                // Always restore engine truth when protected routing ends;
+                // the override also applies to immediate input LED echoes.
+                for (int deck=0; deck<2; ++deck) {
+                    impl_->sendLed(deck,ControlId::Play,impl_->playing[deck].load());
+                    impl_->sendLed(deck,ControlId::Cue,impl_->cue[deck]);
+                }
+            });
     ledTimer->start();
     auto* meterTimer = new QTimer(this);
     meterTimer->setInterval(40);

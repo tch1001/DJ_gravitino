@@ -3,6 +3,10 @@
 #include "ui/SetRenderWindow.h"
 #include "ui/Theme.h"
 #include "library/TrackLibrary.h"
+#include "transitions/LiveSetSession.h"
+#include "audio/AudioDeviceTestAccess.h"
+#include <QElapsedTimer>
+#include <QThread>
 #include <QApplication>
 #include <QEventLoop>
 #include <QLabel>
@@ -52,7 +56,26 @@ int main(int argc,char** argv)
         store.reload();
         CHECK(gvt::readSetRequest(path,demo,&error)); window.setRequest(demo); app.processEvents();
     }
+    gvt::ControlBus bus; gvt::AudioEngine engine(&bus);
+    gvt::LiveSetSession live(&engine);
+    window.enableLiveQueue(&live); app.processEvents();
+    CHECK(window.findChild<QPushButton*>("liveQueueStart")->isEnabled());
+    CHECK(!window.findChild<QPushButton*>("liveQueueAppend")->isEnabled());
+    CHECK(!window.findChild<QPushButton*>("liveQueueLeave")->isEnabled());
+    CHECK(window.findChild<QLabel*>("liveQueueStatus")->text().contains("off"));
+    gvt::detail::AudioDeviceTestAccess::setOfflineHeadphones(engine,true);
+    CHECK(live.start(request,&error)); app.processEvents();
+    CHECK(!window.findChild<QPushButton*>("liveQueueStart")->isEnabled());
+    CHECK(window.findChild<QPushButton*>("liveQueueAppend")->isEnabled());
+    CHECK(window.findChild<QPushButton*>("liveQueuePause")->isEnabled());
+    CHECK(!window.findChild<QPushButton*>("liveQueueLeave")->isEnabled());
+    CHECK(!exportButton->isEnabled());
+    CHECK(window.findChild<QLabel*>("liveQueueStatus")->text().contains("PREP ONLY"));
     const auto screenshot=qEnvironmentVariable("GRAVITINO_SET_QA_IMAGE");
     if(!screenshot.isEmpty()) CHECK(window.grab().save(screenshot));
+    live.stop();
+    QElapsedTimer deadline; deadline.start();
+    while(!live.leave(&error) && deadline.elapsed()<5000) { app.processEvents(); QThread::msleep(1); }
+    CHECK(!live.protectedRouting()); CHECK(exportButton->isEnabled());
     std::printf("Set render window: %d failures\n",failures); return failures ? 1 : 0;
 }

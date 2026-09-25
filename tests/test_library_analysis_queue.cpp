@@ -180,6 +180,31 @@ void transition_click_prioritizes_both_songs_and_waits_for_verified_audio(const 
     QString removeError; CHECK(transitions.deleteTransition(file, &removeError));
 }
 
+void request_import_keeps_existing_tracks_and_workers(const QString& root)
+{
+    Workers work;
+    gvt::TrackLibrary library;
+    gvt::detail::setLibraryAnalyzerForTesting(library,work.analyzer());
+    const auto old=fixtures(root,"import-old",0,4);
+    library.scanFolder(old);
+    CHECK(until([&]{return work.calls[0] && work.calls[1] && work.calls[2];}));
+    const auto request=fixtures(root,"import-new",10,12);
+    const auto path=request+"/10.wav";
+    QStringList errors;
+    CHECK(library.addAudioFiles({path,path,request+"/missing.wav"},&errors)==1);
+    CHECK(errors.size()==1); CHECK(library.trackCount()==5);
+    CHECK(library.pathAt(0)==old+"/00.wav");
+    CHECK(until([&]{return work.calls[10]==1;}));
+    CHECK(work.calls[0]==1 && !work.calls[3]);
+    work.released[10]=true;
+    CHECK(until([&]{return bool(library.trackAt(4));}));
+    const auto ready=library.trackAt(4);
+    CHECK(library.addAudioFiles({path,request+"/11.wav"})==1);
+    CHECK(library.trackAt(4)==ready && library.trackCount()==6);
+    work.releaseAll();
+    CHECK(until([&]{return bool(library.trackAt(5));}));
+}
+
 void errors_retry_and_rescans_cancel_old_results(const QString& root)
 {
     Workers work;
@@ -365,6 +390,7 @@ int main(int argc, char** argv)
     qputenv("GRAVITINO_TRANSITIONS_DIR", temporary.filePath("transitions").toUtf8());
     load_requests_skip_background_work_and_do_not_duplicate(temporary.path());
     transition_click_prioritizes_both_songs_and_waits_for_verified_audio(temporary.path());
+    request_import_keeps_existing_tracks_and_workers(temporary.path());
     errors_retry_and_rescans_cancel_old_results(temporary.path());
     queued_loads_follow_the_requested_song_not_selection(temporary.path());
     real_analysis_progress_does_not_change_audio_or_grids(temporary.path());

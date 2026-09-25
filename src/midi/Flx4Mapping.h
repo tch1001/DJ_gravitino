@@ -32,6 +32,9 @@ public:
     // value when the requested control has no MVP LED mapping.
     static std::optional<std::array<unsigned char, 3>> ledMessage(
         DeckId deck, ControlId id, bool on) noexcept;
+    // Protected-set warning overrides only transport illumination, not MIDI
+    // input or pads. Returning to normal restores the actual transport state.
+    static bool preparationLedState(ControlId id, bool ordinary, bool protectedSet, bool pulse) noexcept;
 
     // Official FLX4 channel-meter output: CC 0x02 on deck channel B0/B1.
     static std::optional<std::array<unsigned char, 3>> channelLevelMessage(

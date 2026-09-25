@@ -4317,7 +4317,7 @@ bool TransitionEditorWindow::beginPreviewAt(double beat, bool establishCue, cons
             tr("Editor preview cannot take the master output during recording, Perform, Prime, or Tutorial."));
         return false;
     }
-    if (masterRecorder_ && masterRecorder_->isRecording()) {
+    if (masterRecorder_ && masterRecorder_->isRecording() && !liveEngine_->liveProgramActive()) {
         QMessageBox::information(this, tr("Stop master recording"),
             tr("Editor preview is intentionally excluded from master recordings."));
         return false;
@@ -4372,7 +4372,9 @@ bool TransitionEditorWindow::beginPreviewAt(double beat, bool establishCue, cons
     stopButton_->setEnabled(true);
     if (!audition && writeAutomationCheck_->isChecked()) beginAutomationTake();
     statusBar()->showMessage(
-        tr("Editor preview owns MASTER; the live decks are frozen and unchanged."));
+        liveEngine_->liveProgramActive()
+            ? tr("PREP ONLY: editor preview → HEADPHONES; live queue continues on SPEAKERS.")
+            : tr("Editor preview owns MASTER; the live decks are frozen and unchanged."));
     return true;
 }
 

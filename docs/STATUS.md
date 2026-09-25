@@ -6,6 +6,24 @@
 
 ## Current state (update the date/line when you change things)
 
+- 2026-09-25 (codex): **Protected live queue / request preparation, first release.**
+  Software checkpoint 8761b9d and recipe backup c78d2c9 pushed before feature work.
+  SetRecorder now also starts an isolated streamed set, using the shared set
+  renderer/player and BPM/EQ bridging. Dedicated producer + bounded 30-second
+  ring; queued mix alone reaches MASTER, main decks and editor reach FLX4 phones.
+  Pause/stop/end/error retain isolation until explicit safe return. Controller
+  PLAY/CUE lights alternate throughout protection; physical volume controls are
+  explicitly excluded. Append-only candidate queues validate on safe boundaries,
+  reject changed accepted snapshots and already-buffered entrances. File → Add
+  request audio inserts prioritized analysis rows without a library reset.
+  No transition schema, source recipe, grid or permanent hot-cue mutation.
+  Full build, 45/45 ctests, isolated audio selftest and the 1100×700 queue-window
+  check pass. Follow-up tests cover enabled live controls and safe shutdown;
+  physical FLX4 output/LED audition remains unverified. QA snapshot/selftest:
+  /tmp/gravitino-live-final.sdL4Vg. All 88 backed-up .transition files still
+  match the saved library byte-for-byte; no app restart performed.
+  See docs/LIVE_QUEUE.md for workflow, buffering limitations and hardware QA.
+
 - 2026-09-25 (codex): **Transition-pair analysis priority and Status.**
   Cached catalog profiles let transition selection find both endpoints before
   background decoding finishes. Both are promoted to the interactive queue;

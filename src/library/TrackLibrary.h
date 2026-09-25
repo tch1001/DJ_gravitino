@@ -17,6 +17,9 @@ public:
     explicit TrackLibrary(QObject* parent = nullptr);
     ~TrackLibrary() override;
     void scanFolder(const QString& dir);     // async; default ~/Music
+    // Add crowd-request files to this session without resetting existing rows,
+    // deck references or in-flight work. New files get interactive priority.
+    int addAudioFiles(const QStringList& paths, QStringList* errors=nullptr);
     // Promote an unfinished track (or retry an error). At most four workers,
     // with one slot reserved for interactive load requests. GUI thread only.
     bool prioritizeAnalysis(int row);
